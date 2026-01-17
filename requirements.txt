@@ -1,0 +1,29 @@
+# ============================================================
+# News Video Generator - Required Python Packages
+# ============================================================
+
+# Core Dependencies
+anthropic>=0.40.0          # Claude API client
+requests>=2.31.0           # HTTP requests for API calls
+python-dotenv>=1.0.0       # Environment variable management
+
+# Note: FFmpeg must be installed separately on your system
+# Windows: winget install FFmpeg
+# Mac: brew install ffmpeg
+# Linux: sudo apt install ffmpeg
+
+# ============================================================
+# Optional Dependencies (uncomment if needed)
+# ============================================================
+
+# ElevenLabs official SDK (alternative to direct API)
+# elevenlabs>=1.0.0
+
+# fal.ai official SDK (alternative to direct API)
+# fal-client>=0.4.0
+
+# For advanced audio processing
+# pydub>=0.25.1
+
+# For image manipulation
+# pillow>=10.0.0
