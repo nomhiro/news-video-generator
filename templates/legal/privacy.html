@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto">
+    <div class="bg-white rounded-xl shadow-md p-8">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6">Privacy Policy</h1>
+        <p class="text-gray-500 text-sm mb-8">Last updated: January 2026</p>
+
+        <div class="prose prose-gray max-w-none space-y-6">
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">1. Introduction</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    This Privacy Policy describes how News Video Generator ("we", "our", or "the Service") collects, uses, and protects your information when you use our application.
+                </p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">2. Information We Collect</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    We may collect the following types of information:
+                </p>
+                <ul class="list-disc list-inside text-gray-600 mt-2 space-y-1">
+                    <li><strong>OAuth Tokens:</strong> When you connect your YouTube or TikTok account, we store authentication tokens to enable video uploads on your behalf.</li>
+                    <li><strong>Usage Data:</strong> Information about how you use the Service, such as articles selected and videos generated.</li>
+                    <li><strong>Generated Content:</strong> Videos, audio files, and images created through the Service are stored locally on your device.</li>
+                </ul>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">3. How We Use Your Information</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    We use your information to:
+                </p>
+                <ul class="list-disc list-inside text-gray-600 mt-2 space-y-1">
+                    <li>Provide and maintain the Service</li>
+                    <li>Enable video uploads to your connected social media accounts</li>
+                    <li>Improve and optimize the Service</li>
+                </ul>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">4. Data Storage</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    All data, including generated videos and authentication tokens, is stored locally on your device. We do not transmit or store your data on external servers, except when interacting with third-party APIs (Azure OpenAI, Google Cloud, YouTube, TikTok) as necessary to provide the Service.
+                </p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">5. Third-Party Services</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    The Service integrates with the following third-party services:
+                </p>
+                <ul class="list-disc list-inside text-gray-600 mt-2 space-y-1">
+                    <li><strong>Azure OpenAI:</strong> For generating scripts and content</li>
+                    <li><strong>Google Cloud:</strong> For text-to-speech and image generation</li>
+                    <li><strong>YouTube API:</strong> For uploading videos to YouTube</li>
+                    <li><strong>TikTok API:</strong> For uploading videos to TikTok</li>
+                </ul>
+                <p class="text-gray-600 mt-2">
+                    Each of these services has its own privacy policy. We encourage you to review their policies.
+                </p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">6. Data Security</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    We implement reasonable security measures to protect your information. However, no method of electronic storage is 100% secure. Authentication tokens are stored locally in JSON files on your device.
+                </p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">7. Your Rights</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    You have the right to:
+                </p>
+                <ul class="list-disc list-inside text-gray-600 mt-2 space-y-1">
+                    <li>Disconnect your social media accounts at any time</li>
+                    <li>Delete locally stored data by removing the application files</li>
+                    <li>Revoke access through the respective platform's settings (YouTube, TikTok)</li>
+                </ul>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">8. Children's Privacy</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    The Service is not intended for children under 13 years of age. We do not knowingly collect personal information from children.
+                </p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">9. Changes to This Policy</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    We may update this Privacy Policy from time to time. We will notify you of any changes by posting the new Privacy Policy on this page.
+                </p>
+            </section>
+
+            <section>
+                <h2 class="text-xl font-semibold text-gray-800 mb-3">10. Contact Us</h2>
+                <p class="text-gray-600 leading-relaxed">
+                    If you have any questions about this Privacy Policy, please contact us.
+                </p>
+            </section>
+        </div>
+
+        <div class="mt-8 pt-6 border-t border-gray-200">
+            <a href="/" class="text-blue-600 hover:text-blue-800 font-medium">
+                &larr; Back to Home
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

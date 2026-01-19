@@ -1,0 +1,37 @@
+<!-- YouTube認証状態 -->
+{% if is_authenticated %}
+<div class="flex items-center gap-2 text-green-600">
+    <span class="text-lg">✅</span>
+    <span class="text-sm font-medium">YouTube連携済み</span>
+</div>
+{% if auth_message %}
+<p class="text-xs text-green-500 mt-1">{{ auth_message }}</p>
+{% endif %}
+{% else %}
+<div class="flex items-center gap-2">
+    <span class="text-lg">🔓</span>
+    <span class="text-sm text-gray-500">YouTube未連携</span>
+</div>
+{% if auth_message %}
+<p class="text-xs text-red-500 mt-1">{{ auth_message }}</p>
+{% endif %}
+<button
+    hx-post="/youtube/auth"
+    hx-target="#youtube-status"
+    hx-swap="innerHTML"
+    hx-indicator="#youtube-auth-indicator"
+    class="mt-2 bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-medium
+           hover:bg-red-700 transition-colors flex items-center gap-2"
+>
+    <span id="youtube-auth-indicator" class="htmx-indicator">
+        <svg class="w-4 h-4 spinner" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+    </span>
+    <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+        <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+    </svg>
+    YouTubeにログイン
+</button>
+{% endif %}

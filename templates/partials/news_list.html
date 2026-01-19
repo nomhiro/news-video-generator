@@ -1,0 +1,80 @@
+<div class="space-y-4">
+    <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-semibold text-gray-700">
+            {{ category.display_name }}ニュース
+        </h3>
+        <span class="text-sm text-gray-500">{{ articles|length }}件</span>
+    </div>
+
+    {% if articles %}
+    {% for article in articles %}
+    <div class="border rounded-lg p-4 hover:shadow-md transition-shadow
+                {% if article.is_selected %}bg-blue-50 border-blue-300{% else %}bg-white{% endif %}">
+        <div class="flex items-start gap-4">
+            <!-- Thumbnail -->
+            {% if article.thumbnail_url %}
+            <img src="{{ article.thumbnail_url }}"
+                 alt="{{ article.title }}"
+                 class="w-24 h-16 object-cover rounded flex-shrink-0"
+                 onerror="this.style.display='none'">
+            {% else %}
+            <div class="w-24 h-16 bg-gray-200 rounded flex items-center justify-center flex-shrink-0">
+                <span class="text-2xl">📰</span>
+            </div>
+            {% endif %}
+
+            <!-- Content -->
+            <div class="flex-1 min-w-0">
+                <h4 class="font-semibold text-gray-800 line-clamp-2">
+                    {{ article.title }}
+                </h4>
+                <div class="flex items-center gap-2 mt-1 text-sm text-gray-500">
+                    <span class="font-medium">{{ article.source }}</span>
+                    {% if article.published_at %}
+                    <span>•</span>
+                    <span>{{ article.published_at.strftime('%m/%d %H:%M') }}</span>
+                    {% endif %}
+                    {% if article.video_generated %}
+                    <span class="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs">
+                        生成済み
+                    </span>
+                    {% endif %}
+                </div>
+                {% if article.summary %}
+                <p class="text-gray-600 text-sm mt-2 line-clamp-2">
+                    {{ article.summary }}
+                </p>
+                {% endif %}
+            </div>
+
+            <!-- Select Button -->
+            <div class="flex-shrink-0">
+                <button
+                    hx-post="/news/{{ article.id }}/toggle"
+                    hx-target="#selected-panel"
+                    hx-swap="innerHTML"
+                    class="px-4 py-2 rounded-lg font-medium transition-colors
+                           {% if article.is_selected %}
+                           bg-red-100 text-red-700 hover:bg-red-200
+                           {% else %}
+                           bg-blue-100 text-blue-700 hover:bg-blue-200
+                           {% endif %}"
+                >
+                    {% if article.is_selected %}
+                    <span>✕ 解除</span>
+                    {% else %}
+                    <span>+ 選択</span>
+                    {% endif %}
+                </button>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="text-center py-12 text-gray-500">
+        <p class="text-4xl mb-4">📭</p>
+        <p>このカテゴリのニュースがありません</p>
+        <p class="text-sm mt-2">「最新ニュースを取得」をクリックしてください</p>
+    </div>
+    {% endif %}
+</div>

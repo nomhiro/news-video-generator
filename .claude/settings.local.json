@@ -75,7 +75,14 @@
       "mcp__playwright__browser_tabs",
       "Bash(npx playwright:*)",
       "Bash(pnpm build:*)",
-      "Bash(pnpm test:*)"
+      "Bash(pnpm test:*)",
+      "Bash(pip install:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(ffprobe:*)",
+      "Bash(timeout:*)",
+      "Bash(ping:*)",
+      "Bash(git reset:*)",
+      "Bash(git add:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
@@ -86,5 +93,6 @@
     "serena",
     "playwright",
     "chrome-devtools"
-  ]
+  ],
+  "plansDirectory": "./.claude/plans"
 }

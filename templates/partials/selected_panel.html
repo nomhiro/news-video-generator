@@ -1,0 +1,112 @@
+<!-- Update badge count -->
+<script>
+    document.getElementById('selected-badge').textContent = '{{ selected_count }}件';
+</script>
+
+{% if selected_articles %}
+<div class="space-y-3 mb-4 max-h-96 overflow-y-auto">
+    {% for article in selected_articles %}
+    <div class="flex items-start gap-2 p-3 bg-gray-50 rounded-lg">
+        <div class="flex-1 min-w-0">
+            <p class="font-medium text-gray-800 text-sm line-clamp-2">
+                {{ article.title }}
+            </p>
+            <p class="text-xs text-gray-500 mt-1">{{ article.source }}</p>
+        </div>
+        <button
+            hx-delete="/news/{{ article.id }}/remove"
+            hx-target="#selected-panel"
+            hx-swap="innerHTML"
+            class="text-red-500 hover:text-red-700 p-1 flex-shrink-0"
+            title="選択を解除"
+        >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+            </svg>
+        </button>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- Video Format Selector -->
+<div class="mb-4">
+    <label class="block text-sm font-medium text-gray-700 mb-2">動画形式を選択</label>
+    <div class="grid grid-cols-3 gap-2" id="video-format-selector">
+        <label class="relative cursor-pointer">
+            <input type="radio" name="video_format" value="short" checked
+                   class="peer sr-only" form="generate-form">
+            <div class="border-2 border-gray-200 rounded-lg p-3 text-center
+                        peer-checked:border-green-500 peer-checked:bg-green-50
+                        hover:border-gray-300 transition-all">
+                <span class="text-2xl block mb-1">📱</span>
+                <span class="font-medium text-sm text-gray-800">ショート</span>
+                <span class="block text-xs text-gray-500">~35秒 / 縦</span>
+            </div>
+        </label>
+        <label class="relative cursor-pointer">
+            <input type="radio" name="video_format" value="tiktok"
+                   class="peer sr-only" form="generate-form">
+            <div class="border-2 border-gray-200 rounded-lg p-3 text-center
+                        peer-checked:border-pink-500 peer-checked:bg-pink-50
+                        hover:border-gray-300 transition-all">
+                <span class="text-2xl block mb-1">🎵</span>
+                <span class="font-medium text-sm text-gray-800">TikTok</span>
+                <span class="block text-xs text-gray-500">60-90秒 / 縦</span>
+            </div>
+        </label>
+        <label class="relative cursor-pointer">
+            <input type="radio" name="video_format" value="long"
+                   class="peer sr-only" form="generate-form">
+            <div class="border-2 border-gray-200 rounded-lg p-3 text-center
+                        peer-checked:border-blue-500 peer-checked:bg-blue-50
+                        hover:border-gray-300 transition-all">
+                <span class="text-2xl block mb-1">🎬</span>
+                <span class="font-medium text-sm text-gray-800">ロング</span>
+                <span class="block text-xs text-gray-500">~5分 / 横</span>
+            </div>
+        </label>
+    </div>
+</div>
+
+<!-- Generate Button (with form) -->
+<form id="generate-form"
+      hx-post="/generate"
+      hx-target="#generation-status"
+      hx-swap="innerHTML"
+      hx-indicator="#generate-indicator">
+    <button type="submit"
+        class="w-full bg-gradient-to-r from-green-500 to-green-600 text-white
+               px-4 py-3 rounded-lg font-semibold hover:from-green-600 hover:to-green-700
+               transition-all shadow-md flex items-center justify-center gap-2"
+    >
+        <span id="generate-indicator" class="htmx-indicator">
+            <svg class="w-5 h-5 spinner" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+        </span>
+        <span>🎬 {{ selected_count }}件の動画を生成</span>
+    </button>
+</form>
+
+<!-- Generation Status Area -->
+<div id="generation-status" class="mt-4"></div>
+
+{% else %}
+<div class="text-center py-8 text-gray-400">
+    <p class="text-4xl mb-3">📋</p>
+    <p>記事が選択されていません</p>
+    <p class="text-sm mt-2">ニュース一覧から選択してください</p>
+</div>
+
+<!-- Disabled Generate Button -->
+<button
+    disabled
+    class="w-full bg-gray-300 text-gray-500 px-4 py-3 rounded-lg font-semibold
+           cursor-not-allowed"
+>
+    🎬 動画を生成
+</button>
+
+<div id="generation-status" class="mt-4"></div>
+{% endif %}

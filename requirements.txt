@@ -3,27 +3,42 @@
 # ============================================================
 
 # Core Dependencies
-anthropic>=0.40.0          # Claude API client
+openai>=1.0.0              # OpenAI/Azure OpenAI API client
 requests>=2.31.0           # HTTP requests for API calls
 python-dotenv>=1.0.0       # Environment variable management
+
+# Google Cloud Text-to-Speech (Chirp 3 HD Voices)
+google-cloud-texttospeech>=2.16.0
+
+# Audio Processing (セグメント別音声生成・結合)
+pydub>=0.25.0              # Audio segment manipulation
+mutagen>=1.47.0            # Audio metadata (duration) extraction
+audioop-lts>=0.2.0         # Python 3.13+ compatibility (audioop removed from stdlib)
+
+# Google Gemini 3 Pro Image (画像生成 - Nano Banana Pro)
+google-genai>=1.10.0
+Pillow>=10.0.0
+
+# Web Framework (FastAPI + HTMX)
+fastapi>=0.109.0           # Web framework
+uvicorn[standard]>=0.27.0  # ASGI server
+jinja2>=3.1.0              # Template engine
+python-multipart>=0.0.6    # Form handling
+
+# News Aggregation
+feedparser>=6.0.0          # RSS feed parsing
+httpx>=0.26.0              # Async HTTP client
+newspaper3k>=0.2.8         # Article content extraction
+lxml>=5.0.0                # XML/HTML parsing
+googlenewsdecoder>=0.1.7   # Google News URL decoder
+
+# YouTube Upload
+google-api-python-client>=2.100.0   # YouTube Data API v3
+google-auth-oauthlib>=1.0.0         # OAuth2 authentication flow
+google-auth-httplib2>=0.1.0         # HTTP/2 support for Google Auth
 
 # Note: FFmpeg must be installed separately on your system
 # Windows: winget install FFmpeg
 # Mac: brew install ffmpeg
 # Linux: sudo apt install ffmpeg
-
-# ============================================================
-# Optional Dependencies (uncomment if needed)
-# ============================================================
-
-# ElevenLabs official SDK (alternative to direct API)
-# elevenlabs>=1.0.0
-
-# fal.ai official SDK (alternative to direct API)
-# fal-client>=0.4.0
-
-# For advanced audio processing
-# pydub>=0.25.1
-
-# For image manipulation
-# pillow>=10.0.0
+lxml_html_clean
