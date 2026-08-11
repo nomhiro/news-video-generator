@@ -1,18 +1,16 @@
 """YouTube video uploader module."""
 
-import os
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List, Callable
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from .youtube_auth import YouTubeAuth, YouTubeAuthError
-
 
 # Retry settings for resumable uploads
 MAX_RETRIES = 10
@@ -31,14 +29,16 @@ CATEGORY_SCIENCE_TECH = "28"
 @dataclass
 class UploadResult:
     """Result of a video upload operation."""
+
     success: bool
-    video_id: Optional[str] = None
-    video_url: Optional[str] = None
-    error_message: Optional[str] = None
+    video_id: str | None = None
+    video_url: str | None = None
+    error_message: str | None = None
 
 
 class YouTubeUploadError(Exception):
     """Exception raised for YouTube upload errors."""
+
     pass
 
 
@@ -71,12 +71,12 @@ class YouTubeUploader:
         video_path: str,
         title: str,
         description: str = "",
-        tags: Optional[List[str]] = None,
+        tags: list[str] | None = None,
         category_id: str = CATEGORY_NEWS_POLITICS,
         privacy_status: str = "public",
         made_for_kids: bool = False,
         notify_subscribers: bool = True,
-        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_callback: Callable[[float], None] | None = None,
     ) -> UploadResult:
         """Upload a video to YouTube.
 
@@ -96,16 +96,13 @@ class YouTubeUploader:
         """
         video_file = Path(video_path)
         if not video_file.exists():
-            return UploadResult(
-                success=False,
-                error_message=f"Video file not found: {video_path}"
-            )
+            return UploadResult(success=False, error_message=f"Video file not found: {video_path}")
 
         # Ensure tags include #Shorts for vertical videos
         if tags is None:
             tags = []
         if "Shorts" not in tags:
-            tags = ["Shorts"] + tags
+            tags = ["Shorts", *tags]
 
         # Truncate title and description if needed
         title = title[:100]
@@ -129,7 +126,7 @@ class YouTubeUploader:
             str(video_file),
             mimetype="video/mp4",
             resumable=True,
-            chunksize=1024 * 1024  # 1MB chunks
+            chunksize=1024 * 1024,  # 1MB chunks
         )
 
         try:
@@ -152,28 +149,21 @@ class YouTubeUploader:
                 )
             else:
                 return UploadResult(
-                    success=False,
-                    error_message="Upload failed: no response received"
+                    success=False, error_message="Upload failed: no response received"
                 )
 
         except YouTubeAuthError as e:
             return UploadResult(success=False, error_message=str(e))
         except HttpError as e:
             error_content = e.content.decode("utf-8") if e.content else str(e)
-            return UploadResult(
-                success=False,
-                error_message=f"YouTube API error: {error_content}"
-            )
+            return UploadResult(success=False, error_message=f"YouTube API error: {error_content}")
         except Exception as e:
-            return UploadResult(
-                success=False,
-                error_message=f"Upload failed: {e}"
-            )
+            return UploadResult(success=False, error_message=f"Upload failed: {e}")
 
     def _resumable_upload(
         self,
         request,
-        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_callback: Callable[[float], None] | None = None,
     ):
         """Execute a resumable upload with retry logic.
 
@@ -214,7 +204,7 @@ class YouTubeUploader:
                     raise YouTubeUploadError(f"Max retries exceeded: {error}")
 
                 # Exponential backoff with jitter
-                sleep_seconds = random.random() * (2 ** retry)
+                sleep_seconds = random.random() * (2**retry)
                 time.sleep(sleep_seconds)
 
         return response

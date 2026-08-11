@@ -1,14 +1,14 @@
 """TikTok video uploader module."""
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Literal, cast
 
 import httpx
 
 from .tiktok_auth import TikTokAuth, TikTokAuthError
-
 
 # TikTok Content Posting API endpoints
 TIKTOK_UPLOAD_INIT_URL = "https://open.tiktokapis.com/v2/post/publish/video/init/"
@@ -26,16 +26,40 @@ PrivacyLevel = Literal[
     "SELF_ONLY",
 ]
 
+# 設定ファイルや環境変数から来た文字列を検証するための実行時の集合。
+# Literal は静的な型なので実行時に検査できない。
+PRIVACY_LEVELS: frozenset[str] = frozenset(
+    ["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"]
+)
+
+
+def parse_privacy_level(value: str) -> PrivacyLevel:
+    """設定由来の文字列を PrivacyLevel に変換する。
+
+    Args:
+        value: 検証したい文字列（例: 環境変数 TIKTOK_DEFAULT_PRIVACY の値）
+
+    Returns:
+        PrivacyLevel: 検証済みの値
+
+    Raises:
+        ValueError: TikTok が受け付けない値の場合
+    """
+    if value not in PRIVACY_LEVELS:
+        allowed = ", ".join(sorted(PRIVACY_LEVELS))
+        raise ValueError(f"TIKTOK_DEFAULT_PRIVACY の値が不正です: {value!r} (許容値: {allowed})")
+    return cast(PrivacyLevel, value)
+
 
 @dataclass
 class TikTokUploadResult:
     """Result of a TikTok video upload operation."""
 
     success: bool
-    publish_id: Optional[str] = None
-    video_url: Optional[str] = None
-    error_message: Optional[str] = None
-    error_code: Optional[str] = None
+    publish_id: str | None = None
+    video_url: str | None = None
+    error_message: str | None = None
+    error_code: str | None = None
 
 
 class TikTokUploadError(Exception):
@@ -85,7 +109,7 @@ class TikTokUploader:
         disable_duet: bool = False,
         disable_stitch: bool = False,
         disable_comment: bool = False,
-        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_callback: Callable[[float], None] | None = None,
     ) -> TikTokUploadResult:
         """Upload a video to TikTok.
 
@@ -219,7 +243,7 @@ class TikTokUploader:
         data = result.get("data", {})
         if not data.get("upload_url") or not data.get("publish_id"):
             raise TikTokUploadError(
-                f"Upload initialization failed: Missing upload_url or publish_id"
+                "Upload initialization failed: Missing upload_url or publish_id"
             )
 
         return {
@@ -232,7 +256,7 @@ class TikTokUploader:
         video_path: str,
         upload_url: str,
         file_size: int,
-        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_callback: Callable[[float], None] | None = None,
     ) -> None:
         """Upload video in chunks to TikTok.
 
@@ -304,21 +328,19 @@ class TikTokUploader:
                         continue
 
                     # Client error, don't retry
-                    raise TikTokUploadError(
-                        f"Chunk upload failed: HTTP {response.status_code}"
-                    )
+                    raise TikTokUploadError(f"Chunk upload failed: HTTP {response.status_code}")
 
-            except httpx.TimeoutException:
+            except httpx.TimeoutException as e:
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(2**attempt)
                     continue
-                raise TikTokUploadError("Chunk upload timed out")
+                raise TikTokUploadError("Chunk upload timed out") from e
 
             except httpx.RequestError as e:
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(2**attempt)
                     continue
-                raise TikTokUploadError(f"Chunk upload failed: {e}")
+                raise TikTokUploadError(f"Chunk upload failed: {e}") from e
 
         raise TikTokUploadError("Max retries exceeded for chunk upload")
 

@@ -7,12 +7,12 @@ Azure OpenAI の Structured Outputs (responses.parse) のスキーマを兼ね�
 
 import json
 from pathlib import Path
-from typing import List
+from typing import Protocol
 
 from pydantic import BaseModel, model_validator
 
 
-def _join_narration(segments: List[str], language: str) -> str:
+def _join_narration(segments: list[str], language: str) -> str:
     """セグメントを連結して完全なナレーションを作る。
 
     日本語は語間に空白を入れない。英語などは単語境界が必要なので
@@ -29,7 +29,18 @@ def _join_narration(segments: List[str], language: str) -> str:
     return separator.join(s.strip() for s in segments)
 
 
-def _validate_aligned_segments(model: BaseModel) -> None:
+class _HasAlignedSegments(Protocol):
+    """整合性検証が必要とする3フィールドだけを表す構造的な型。
+
+    ScriptDraft と Script の両方がこれを満たす。
+    """
+
+    segment_narrations: list[str]
+    image_prompts: list[str]
+    text_overlays: list[str]
+
+
+def _validate_aligned_segments(model: _HasAlignedSegments) -> None:
     """segment_narrations / image_prompts / text_overlays の整合性を検証する。
 
     Args:
@@ -84,14 +95,14 @@ class ScriptDraft(BaseModel):
 
     title: str
     description: str
-    hashtags: List[str]
+    hashtags: list[str]
     hook: str
-    main_points: List[str]
+    main_points: list[str]
     conclusion: str
-    image_prompts: List[str]
-    text_overlays: List[str]
+    image_prompts: list[str]
+    text_overlays: list[str]
     estimated_duration: int
-    segment_narrations: List[str]
+    segment_narrations: list[str]
 
     @model_validator(mode="after")
     def _check_segment_alignment(self) -> "ScriptDraft":
@@ -149,15 +160,15 @@ class Script(BaseModel):
     language: str
     title: str
     description: str
-    hashtags: List[str]
+    hashtags: list[str]
     hook: str
-    main_points: List[str]
+    main_points: list[str]
     conclusion: str
     full_narration: str
-    image_prompts: List[str]
-    text_overlays: List[str]
+    image_prompts: list[str]
+    text_overlays: list[str]
     estimated_duration: int
-    segment_narrations: List[str]
+    segment_narrations: list[str]
 
     @model_validator(mode="after")
     def _check_segment_alignment(self) -> "Script":
@@ -212,6 +223,6 @@ class Script(BaseModel):
         Returns:
             Script: 読み込んだScriptオブジェクト
         """
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return cls.from_dict(data)

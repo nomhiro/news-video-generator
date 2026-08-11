@@ -1,26 +1,27 @@
 """FastAPI dependency injection setup."""
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+
 from fastapi import FastAPI
 
 from config import Config
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
-from src.uploaders.youtube_uploader import YouTubeUploader
 from src.uploaders.tiktok_uploader import TikTokUploader
+from src.uploaders.youtube_uploader import YouTubeUploader
 
 
 @dataclass
 class GenerationState:
     """動画生成の状態を管理するクラス。"""
+
     is_running: bool = False
     total_count: int = 0
     completed_count: int = 0
-    current_article: Optional[str] = None
-    error_message: Optional[str] = None
-    completed_articles: List[str] = field(default_factory=list)
-    failed_articles: List[str] = field(default_factory=list)
+    current_article: str | None = None
+    error_message: str | None = None
+    completed_articles: list[str] = field(default_factory=list)
+    failed_articles: list[str] = field(default_factory=list)
 
     def start(self, total: int) -> None:
         """生成を開始する。"""
@@ -44,7 +45,7 @@ class GenerationState:
         else:
             self.failed_articles.append(article_title)
 
-    def finish(self, error: Optional[str] = None) -> None:
+    def finish(self, error: str | None = None) -> None:
         """生成を終了する。"""
         self.is_running = False
         self.current_article = None
@@ -62,12 +63,17 @@ class GenerationState:
 
 
 # Global instances (set by setup_dependencies)
-_config: Config = None
-_aggregator: NewsAggregator = None
-_pipeline: Pipeline = None
+#
+# 設計上の負債: モジュールレベルの可変グローバルを DI として使っているため、
+# テスト時に差し替えられず、起動前は None という状態を型で表現するしかない。
+# Phase 5 で FastAPI の lifespan + app.state による DI に置き換える。
+# それまでは None を許す型にして、getter 側で未初期化を検出する。
+_config: Config | None = None
+_aggregator: NewsAggregator | None = None
+_pipeline: Pipeline | None = None
 _generation_state: GenerationState = GenerationState()
-_youtube_uploader: YouTubeUploader = None
-_tiktok_uploader: TikTokUploader = None
+_youtube_uploader: YouTubeUploader | None = None
+_tiktok_uploader: TikTokUploader | None = None
 
 
 def setup_dependencies(app: FastAPI, config: Config) -> None:
@@ -111,7 +117,12 @@ def get_config() -> Config:
 
     Returns:
         Config: アプリケーション設定
+
+    Raises:
+        RuntimeError: setup_dependencies が呼ばれていない場合
     """
+    if _config is None:
+        raise RuntimeError("setup_dependencies() が呼ばれていません")
     return _config
 
 
@@ -120,7 +131,12 @@ def get_aggregator() -> NewsAggregator:
 
     Returns:
         NewsAggregator: ニュース取得・管理インスタンス
+
+    Raises:
+        RuntimeError: setup_dependencies が呼ばれていない場合
     """
+    if _aggregator is None:
+        raise RuntimeError("setup_dependencies() が呼ばれていません")
     return _aggregator
 
 
@@ -129,7 +145,12 @@ def get_pipeline() -> Pipeline:
 
     Returns:
         Pipeline: 動画生成パイプラインインスタンス
+
+    Raises:
+        RuntimeError: setup_dependencies が呼ばれていない場合
     """
+    if _pipeline is None:
+        raise RuntimeError("setup_dependencies() が呼ばれていません")
     return _pipeline
 
 
@@ -147,7 +168,12 @@ def get_youtube_uploader() -> YouTubeUploader:
 
     Returns:
         YouTubeUploader: YouTubeアップローダーインスタンス
+
+    Raises:
+        RuntimeError: setup_dependencies が呼ばれていない場合
     """
+    if _youtube_uploader is None:
+        raise RuntimeError("setup_dependencies() が呼ばれていません")
     return _youtube_uploader
 
 
@@ -156,5 +182,10 @@ def get_tiktok_uploader() -> TikTokUploader:
 
     Returns:
         TikTokUploader: TikTokアップローダーインスタンス
+
+    Raises:
+        RuntimeError: setup_dependencies が呼ばれていない場合
     """
+    if _tiktok_uploader is None:
+        raise RuntimeError("setup_dependencies() が呼ばれていません")
     return _tiktok_uploader

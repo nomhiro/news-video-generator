@@ -1,29 +1,26 @@
 """FastAPI routes for HTMX web interface."""
 
-import os
 from pathlib import Path
-from typing import List, Optional
 
-from fastapi import APIRouter, Request, Depends, BackgroundTasks, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
+from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from src.models.news import NewsCategory, NewsArticle
+from src.models.news import NewsArticle, NewsCategory
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
+from src.uploaders.tiktok_uploader import TikTokUploader, parse_privacy_level
 from src.uploaders.youtube_uploader import YouTubeUploader
-from src.uploaders.tiktok_uploader import TikTokUploader
+from src.utils.logger import log_error, log_step, log_success
 from src.web.dependencies import (
-    get_aggregator,
-    get_pipeline,
-    get_generation_state,
-    get_youtube_uploader,
-    get_tiktok_uploader,
-    get_config,
     GenerationState,
+    get_aggregator,
+    get_config,
+    get_generation_state,
+    get_pipeline,
+    get_tiktok_uploader,
+    get_youtube_uploader,
 )
-from src.utils.logger import log_step, log_success, log_error
-
 
 # Setup router and templates
 router = APIRouter()
@@ -31,10 +28,7 @@ templates = Jinja2Templates(directory=Path(__file__).parent.parent.parent / "tem
 
 
 @router.get("/", response_class=HTMLResponse)
-async def index(
-    request: Request,
-    aggregator: NewsAggregator = Depends(get_aggregator)
-):
+async def index(request: Request, aggregator: NewsAggregator = Depends(get_aggregator)):
     """メインページを表示する。
 
     Args:
@@ -47,19 +41,20 @@ async def index(
     categories = list(NewsCategory)
     selected_count = aggregator.get_selected_count()
 
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "categories": categories,
-        "selected_count": selected_count,
-        "active_category": NewsCategory.AI,  # AIカテゴリをデフォルトに
-    })
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "categories": categories,
+            "selected_count": selected_count,
+            "active_category": NewsCategory.AI,  # AIカテゴリをデフォルトに
+        },
+    )
 
 
 @router.get("/news/{category}", response_class=HTMLResponse)
 async def get_news_by_category(
-    request: Request,
-    category: str,
-    aggregator: NewsAggregator = Depends(get_aggregator)
+    request: Request, category: str, aggregator: NewsAggregator = Depends(get_aggregator)
 ):
     """カテゴリ別ニュース一覧を取得する（HTMXパーシャル）。
 
@@ -78,18 +73,18 @@ async def get_news_by_category(
 
     articles = aggregator.get_articles_by_category(cat)
 
-    return templates.TemplateResponse("partials/news_list.html", {
-        "request": request,
-        "articles": articles,
-        "category": cat,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/news_list.html",
+        {
+            "articles": articles,
+            "category": cat,
+        },
+    )
 
 
 @router.post("/news/fetch", response_class=HTMLResponse)
-async def fetch_news(
-    request: Request,
-    aggregator: NewsAggregator = Depends(get_aggregator)
-):
+async def fetch_news(request: Request, aggregator: NewsAggregator = Depends(get_aggregator)):
     """最新ニュースを取得する（HTMXパーシャル）。
 
     Args:
@@ -106,27 +101,27 @@ async def fetch_news(
 
     # AI関連ニュースも取得
     await aggregator.fetch_ai_news_and_store(
-        config.ai_search_queries,
-        config.ai_news_limit_per_query
+        config.ai_search_queries, config.ai_news_limit_per_query
     )
 
     categories = list(NewsCategory)
     selected_count = aggregator.get_selected_count()
 
-    return templates.TemplateResponse("partials/category_tabs.html", {
-        "request": request,
-        "categories": categories,
-        "active_category": NewsCategory.AI,  # AIカテゴリをデフォルトに
-        "selected_count": selected_count,
-        "fetch_success": True,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/category_tabs.html",
+        {
+            "categories": categories,
+            "active_category": NewsCategory.AI,  # AIカテゴリをデフォルトに
+            "selected_count": selected_count,
+            "fetch_success": True,
+        },
+    )
 
 
 @router.post("/news/{article_id}/toggle", response_class=HTMLResponse)
 async def toggle_article_selection(
-    request: Request,
-    article_id: str,
-    aggregator: NewsAggregator = Depends(get_aggregator)
+    request: Request, article_id: str, aggregator: NewsAggregator = Depends(get_aggregator)
 ):
     """記事の選択状態を切り替える（HTMXパーシャル）。
 
@@ -143,18 +138,18 @@ async def toggle_article_selection(
     selected_articles = aggregator.get_selected_articles()
     selected_count = len(selected_articles)
 
-    return templates.TemplateResponse("partials/selected_panel.html", {
-        "request": request,
-        "selected_articles": selected_articles,
-        "selected_count": selected_count,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/selected_panel.html",
+        {
+            "selected_articles": selected_articles,
+            "selected_count": selected_count,
+        },
+    )
 
 
 @router.get("/selected", response_class=HTMLResponse)
-async def get_selected(
-    request: Request,
-    aggregator: NewsAggregator = Depends(get_aggregator)
-):
+async def get_selected(request: Request, aggregator: NewsAggregator = Depends(get_aggregator)):
     """選択済み記事パネルを取得する（HTMXパーシャル）。
 
     Args:
@@ -167,18 +162,19 @@ async def get_selected(
     selected_articles = aggregator.get_selected_articles()
     selected_count = len(selected_articles)
 
-    return templates.TemplateResponse("partials/selected_panel.html", {
-        "request": request,
-        "selected_articles": selected_articles,
-        "selected_count": selected_count,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/selected_panel.html",
+        {
+            "selected_articles": selected_articles,
+            "selected_count": selected_count,
+        },
+    )
 
 
 @router.delete("/news/{article_id}/remove", response_class=HTMLResponse)
 async def remove_from_selection(
-    request: Request,
-    article_id: str,
-    aggregator: NewsAggregator = Depends(get_aggregator)
+    request: Request, article_id: str, aggregator: NewsAggregator = Depends(get_aggregator)
 ):
     """記事を選択から削除する（HTMXパーシャル）。
 
@@ -195,11 +191,14 @@ async def remove_from_selection(
     selected_articles = aggregator.get_selected_articles()
     selected_count = len(selected_articles)
 
-    return templates.TemplateResponse("partials/selected_panel.html", {
-        "request": request,
-        "selected_articles": selected_articles,
-        "selected_count": selected_count,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/selected_panel.html",
+        {
+            "selected_articles": selected_articles,
+            "selected_count": selected_count,
+        },
+    )
 
 
 @router.post("/generate", response_class=HTMLResponse)
@@ -209,7 +208,7 @@ async def generate_videos(
     video_format: str = Form("short"),
     aggregator: NewsAggregator = Depends(get_aggregator),
     pipeline: Pipeline = Depends(get_pipeline),
-    state: GenerationState = Depends(get_generation_state)
+    state: GenerationState = Depends(get_generation_state),
 ):
     """選択記事から動画を生成する。
 
@@ -226,62 +225,69 @@ async def generate_videos(
     """
     # Check if already running
     if state.is_running:
-        return templates.TemplateResponse("partials/generation_status.html", {
-            "request": request,
-            "status": "running",
-            "total_count": state.total_count,
-            "completed_count": state.completed_count,
-            "current_article": state.current_article,
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/generation_status.html",
+            {
+                "status": "running",
+                "total_count": state.total_count,
+                "completed_count": state.completed_count,
+                "current_article": state.current_article,
+            },
+        )
 
     # Scrape content first
     articles = await aggregator.scrape_selected_content()
 
     if not articles:
-        return templates.TemplateResponse("partials/generation_status.html", {
-            "request": request,
-            "status": "error",
-            "message": "記事が選択されていません",
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/generation_status.html",
+            {
+                "status": "error",
+                "message": "記事が選択されていません",
+            },
+        )
 
     # Filter articles with content
     articles_with_content = [a for a in articles if a.content]
 
     if not articles_with_content:
-        return templates.TemplateResponse("partials/generation_status.html", {
-            "request": request,
-            "status": "error",
-            "message": "スクレイピングに失敗しました。別の記事を選択してください",
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/generation_status.html",
+            {
+                "status": "error",
+                "message": "スクレイピングに失敗しました。別の記事を選択してください",
+            },
+        )
 
     # Initialize generation state
     state.start(len(articles_with_content))
 
     # Start background generation
     background_tasks.add_task(
-        generate_videos_task,
-        articles_with_content,
-        pipeline,
-        aggregator,
-        state,
-        video_format
+        generate_videos_task, articles_with_content, pipeline, aggregator, state, video_format
     )
 
-    return templates.TemplateResponse("partials/generation_status.html", {
-        "request": request,
-        "status": "running",
-        "total_count": len(articles_with_content),
-        "completed_count": 0,
-        "current_article": articles_with_content[0].title if articles_with_content else None,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/generation_status.html",
+        {
+            "status": "running",
+            "total_count": len(articles_with_content),
+            "completed_count": 0,
+            "current_article": articles_with_content[0].title if articles_with_content else None,
+        },
+    )
 
 
 async def generate_videos_task(
-    articles: List[NewsArticle],
+    articles: list[NewsArticle],
     pipeline: Pipeline,
     aggregator: NewsAggregator,
     state: GenerationState,
-    video_format: str = "short"
+    video_format: str = "short",
 ) -> None:
     """バックグラウンドで動画を生成するタスク。
 
@@ -305,8 +311,12 @@ async def generate_videos_task(
             # Create topic from article
             topic = f"{article.title}\n\n{article.content[:2000]}"
 
-            # Run pipeline with article title as output name
-            result = pipeline.run(topic, languages=["ja"], output_name=article.title, video_format=video_format)
+            # Run pipeline with article title as output name.
+            # 戻り値（生成物のパス）は現在どこにも記録していない。
+            # Phase 4 で動画テーブルを入れる際に article_id と紐付けて保存する。
+            pipeline.run(
+                topic, languages=["ja"], output_name=article.title, video_format=video_format
+            )
 
             # Mark as generated
             aggregator.mark_as_generated(article.id)
@@ -329,7 +339,7 @@ async def generate_videos_task(
 async def get_status(
     request: Request,
     aggregator: NewsAggregator = Depends(get_aggregator),
-    state: GenerationState = Depends(get_generation_state)
+    state: GenerationState = Depends(get_generation_state),
 ):
     """生成ステータスを取得する（ポーリング用）。
 
@@ -343,21 +353,25 @@ async def get_status(
     """
     status = state.get_status()
 
-    return templates.TemplateResponse("partials/generation_status.html", {
-        "request": request,
-        "status": status,
-        "total_count": state.total_count,
-        "completed_count": state.completed_count,
-        "current_article": state.current_article,
-        "completed_articles": state.completed_articles,
-        "failed_articles": state.failed_articles,
-        "error_message": state.error_message,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/generation_status.html",
+        {
+            "status": status,
+            "total_count": state.total_count,
+            "completed_count": state.completed_count,
+            "current_article": state.current_article,
+            "completed_articles": state.completed_articles,
+            "failed_articles": state.failed_articles,
+            "error_message": state.error_message,
+        },
+    )
 
 
 # ============================================================
 # Legal Pages (for TikTok URL Verification)
 # ============================================================
+
 
 @router.get("/terms", response_class=HTMLResponse)
 async def terms_of_service(request: Request):
@@ -368,9 +382,7 @@ async def terms_of_service(request: Request):
     Returns:
         HTMLResponse: 利用規約ページHTML
     """
-    return templates.TemplateResponse("legal/terms.html", {
-        "request": request,
-    })
+    return templates.TemplateResponse(request, "legal/terms.html", {})
 
 
 @router.get("/privacy", response_class=HTMLResponse)
@@ -382,19 +394,17 @@ async def privacy_policy(request: Request):
     Returns:
         HTMLResponse: プライバシーポリシーページHTML
     """
-    return templates.TemplateResponse("legal/privacy.html", {
-        "request": request,
-    })
+    return templates.TemplateResponse(request, "legal/privacy.html", {})
 
 
 # ============================================================
 # YouTube Upload Routes
 # ============================================================
 
+
 @router.get("/youtube/status", response_class=HTMLResponse)
 async def youtube_auth_status(
-    request: Request,
-    uploader: YouTubeUploader = Depends(get_youtube_uploader)
+    request: Request, uploader: YouTubeUploader = Depends(get_youtube_uploader)
 ):
     """YouTube認証状態を取得する。
 
@@ -407,16 +417,18 @@ async def youtube_auth_status(
     """
     is_authenticated = uploader.is_authenticated()
 
-    return templates.TemplateResponse("partials/youtube_status.html", {
-        "request": request,
-        "is_authenticated": is_authenticated,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/youtube_status.html",
+        {
+            "is_authenticated": is_authenticated,
+        },
+    )
 
 
 @router.post("/youtube/auth", response_class=HTMLResponse)
 async def youtube_authenticate(
-    request: Request,
-    uploader: YouTubeUploader = Depends(get_youtube_uploader)
+    request: Request, uploader: YouTubeUploader = Depends(get_youtube_uploader)
 ):
     """YouTube認証を実行する。
 
@@ -429,18 +441,24 @@ async def youtube_authenticate(
     """
     try:
         uploader.authenticate()
-        return templates.TemplateResponse("partials/youtube_status.html", {
-            "request": request,
-            "is_authenticated": True,
-            "auth_message": "YouTube認証に成功しました",
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/youtube_status.html",
+            {
+                "is_authenticated": True,
+                "auth_message": "YouTube認証に成功しました",
+            },
+        )
     except Exception as e:
         log_error(f"YouTube認証エラー: {e}")
-        return templates.TemplateResponse("partials/youtube_status.html", {
-            "request": request,
-            "is_authenticated": False,
-            "auth_message": str(e),
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/youtube_status.html",
+            {
+                "is_authenticated": False,
+                "auth_message": str(e),
+            },
+        )
 
 
 @router.get("/videos", response_class=HTMLResponse)
@@ -454,7 +472,9 @@ async def list_videos(request: Request):
         HTMLResponse: 動画一覧パーシャルHTML
     """
     import json
+
     from src.web.dependencies import get_config
+
     config = get_config()
 
     videos_dir = config.output_dir / "videos"
@@ -475,27 +495,32 @@ async def list_videos(request: Request):
             script_file = scripts_dir / f"{stem}.json"
             if script_file.exists():
                 try:
-                    with open(script_file, "r", encoding="utf-8") as f:
+                    with open(script_file, encoding="utf-8") as f:
                         script_data = json.load(f)
                         description = script_data.get("description", "")
                         title = script_data.get("title", "")
                 except Exception:
                     pass
 
-            videos.append({
-                "filename": video_file.name,
-                "path": str(video_file),
-                "language": lang,
-                "size_mb": round(video_file.stat().st_size / (1024 * 1024), 2),
-                "created": video_file.stat().st_mtime,
-                "description": description,
-                "title": title,
-            })
+            videos.append(
+                {
+                    "filename": video_file.name,
+                    "path": str(video_file),
+                    "language": lang,
+                    "size_mb": round(video_file.stat().st_size / (1024 * 1024), 2),
+                    "created": video_file.stat().st_mtime,
+                    "description": description,
+                    "title": title,
+                }
+            )
 
-    return templates.TemplateResponse("partials/video_list.html", {
-        "request": request,
-        "videos": videos[:20],  # Limit to 20 most recent
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/video_list.html",
+        {
+            "videos": videos[:20],  # Limit to 20 most recent
+        },
+    )
 
 
 @router.post("/youtube/upload", response_class=HTMLResponse)
@@ -521,25 +546,32 @@ async def youtube_upload(
         HTMLResponse: アップロード結果パーシャルHTML
     """
     from src.web.dependencies import get_config
+
     config = get_config()
 
     # Verify file exists
     video_file = Path(video_path)
     if not video_file.exists():
-        return templates.TemplateResponse("partials/upload_result.html", {
-            "request": request,
-            "success": False,
-            "error_message": f"動画ファイルが見つかりません: {video_path}",
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/upload_result.html",
+            {
+                "success": False,
+                "error_message": f"動画ファイルが見つかりません: {video_path}",
+            },
+        )
 
     # Check authentication
     if not uploader.is_authenticated():
-        return templates.TemplateResponse("partials/upload_result.html", {
-            "request": request,
-            "success": False,
-            "error_message": "YouTubeにログインしてください",
-            "need_auth": True,
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/upload_result.html",
+            {
+                "success": False,
+                "error_message": "YouTubeにログインしてください",
+                "need_auth": True,
+            },
+        )
 
     log_step(f"YouTubeアップロード開始: {title}", "📤")
 
@@ -554,30 +586,36 @@ async def youtube_upload(
 
     if result.success:
         log_success(f"YouTubeアップロード完了: {result.video_url}")
-        return templates.TemplateResponse("partials/upload_result.html", {
-            "request": request,
-            "success": True,
-            "video_id": result.video_id,
-            "video_url": result.video_url,
-            "title": title,
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/upload_result.html",
+            {
+                "success": True,
+                "video_id": result.video_id,
+                "video_url": result.video_url,
+                "title": title,
+            },
+        )
     else:
         log_error(f"YouTubeアップロード失敗: {result.error_message}")
-        return templates.TemplateResponse("partials/upload_result.html", {
-            "request": request,
-            "success": False,
-            "error_message": result.error_message,
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/upload_result.html",
+            {
+                "success": False,
+                "error_message": result.error_message,
+            },
+        )
 
 
 # ============================================================
 # TikTok Upload Routes
 # ============================================================
 
+
 @router.get("/tiktok/status", response_class=HTMLResponse)
 async def tiktok_auth_status(
-    request: Request,
-    uploader: TikTokUploader = Depends(get_tiktok_uploader)
+    request: Request, uploader: TikTokUploader = Depends(get_tiktok_uploader)
 ):
     """TikTok認証状態を取得する。
 
@@ -592,17 +630,19 @@ async def tiktok_auth_status(
     is_configured = config.is_tiktok_configured()
     is_authenticated = uploader.is_authenticated() if is_configured else False
 
-    return templates.TemplateResponse("partials/tiktok_status.html", {
-        "request": request,
-        "is_configured": is_configured,
-        "is_authenticated": is_authenticated,
-    })
+    return templates.TemplateResponse(
+        request,
+        "partials/tiktok_status.html",
+        {
+            "is_configured": is_configured,
+            "is_authenticated": is_authenticated,
+        },
+    )
 
 
 @router.post("/tiktok/auth", response_class=HTMLResponse)
 async def tiktok_authenticate(
-    request: Request,
-    uploader: TikTokUploader = Depends(get_tiktok_uploader)
+    request: Request, uploader: TikTokUploader = Depends(get_tiktok_uploader)
 ):
     """TikTok認証を実行する。
 
@@ -616,29 +656,38 @@ async def tiktok_authenticate(
     config = get_config()
 
     if not config.is_tiktok_configured():
-        return templates.TemplateResponse("partials/tiktok_status.html", {
-            "request": request,
-            "is_configured": False,
-            "is_authenticated": False,
-            "auth_message": "TikTokのAPIキーが設定されていません。.envファイルにTIKTOK_CLIENT_KEYとTIKTOK_CLIENT_SECRETを設定してください。",
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/tiktok_status.html",
+            {
+                "is_configured": False,
+                "is_authenticated": False,
+                "auth_message": "TikTokのAPIキーが設定されていません。.envファイルにTIKTOK_CLIENT_KEYとTIKTOK_CLIENT_SECRETを設定してください。",
+            },
+        )
 
     try:
         uploader.authenticate()
-        return templates.TemplateResponse("partials/tiktok_status.html", {
-            "request": request,
-            "is_configured": True,
-            "is_authenticated": True,
-            "auth_message": "TikTok認証に成功しました",
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/tiktok_status.html",
+            {
+                "is_configured": True,
+                "is_authenticated": True,
+                "auth_message": "TikTok認証に成功しました",
+            },
+        )
     except Exception as e:
         log_error(f"TikTok認証エラー: {e}")
-        return templates.TemplateResponse("partials/tiktok_status.html", {
-            "request": request,
-            "is_configured": True,
-            "is_authenticated": False,
-            "auth_message": str(e),
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/tiktok_status.html",
+            {
+                "is_configured": True,
+                "is_authenticated": False,
+                "auth_message": str(e),
+            },
+        )
 
 
 @router.post("/tiktok/upload", response_class=HTMLResponse)
@@ -665,29 +714,38 @@ async def tiktok_upload(
 
     # Verify TikTok is configured
     if not config.is_tiktok_configured():
-        return templates.TemplateResponse("partials/tiktok_upload_result.html", {
-            "request": request,
-            "success": False,
-            "error_message": "TikTokのAPIキーが設定されていません",
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/tiktok_upload_result.html",
+            {
+                "success": False,
+                "error_message": "TikTokのAPIキーが設定されていません",
+            },
+        )
 
     # Verify file exists
     video_file = Path(video_path)
     if not video_file.exists():
-        return templates.TemplateResponse("partials/tiktok_upload_result.html", {
-            "request": request,
-            "success": False,
-            "error_message": f"動画ファイルが見つかりません: {video_path}",
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/tiktok_upload_result.html",
+            {
+                "success": False,
+                "error_message": f"動画ファイルが見つかりません: {video_path}",
+            },
+        )
 
     # Check authentication
     if not uploader.is_authenticated():
-        return templates.TemplateResponse("partials/tiktok_upload_result.html", {
-            "request": request,
-            "success": False,
-            "error_message": "TikTokにログインしてください",
-            "need_auth": True,
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/tiktok_upload_result.html",
+            {
+                "success": False,
+                "error_message": "TikTokにログインしてください",
+                "need_auth": True,
+            },
+        )
 
     log_step(f"TikTokアップロード開始: {title}", "📤")
 
@@ -695,22 +753,30 @@ async def tiktok_upload(
     result = uploader.upload(
         video_path=str(video_file),
         title=title,
-        privacy_level=config.tiktok_default_privacy,
+        # 設定から来た文字列をここで検証する。不正な値が TikTok API まで
+        # 到達すると、原因の分かりにくいエラーで失敗する。
+        privacy_level=parse_privacy_level(config.tiktok_default_privacy),
     )
 
     if result.success:
-        log_success(f"TikTokアップロード完了")
-        return templates.TemplateResponse("partials/tiktok_upload_result.html", {
-            "request": request,
-            "success": True,
-            "publish_id": result.publish_id,
-            "video_url": result.video_url,
-            "title": title,
-        })
+        log_success("TikTokアップロード完了")
+        return templates.TemplateResponse(
+            request,
+            "partials/tiktok_upload_result.html",
+            {
+                "success": True,
+                "publish_id": result.publish_id,
+                "video_url": result.video_url,
+                "title": title,
+            },
+        )
     else:
         log_error(f"TikTokアップロード失敗: {result.error_message}")
-        return templates.TemplateResponse("partials/tiktok_upload_result.html", {
-            "request": request,
-            "success": False,
-            "error_message": result.error_message,
-        })
+        return templates.TemplateResponse(
+            request,
+            "partials/tiktok_upload_result.html",
+            {
+                "success": False,
+                "error_message": result.error_message,
+            },
+        )

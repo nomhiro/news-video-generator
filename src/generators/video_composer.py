@@ -1,13 +1,12 @@
 """Video composition using FFmpeg."""
 
 import json
-import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import ClassVar
 
-from src.utils.logger import log_step, log_success, log_error
+from src.utils.logger import log_error, log_step, log_success
 
 
 class VideoCompositionError(Exception):
@@ -44,12 +43,12 @@ class VideoComposer:
     TEXT_MAX_CHARS_PER_LINE = 14  # 1行の最大文字数
 
     # Windows用日本語フォントパス（親しみのある丸ゴシック系を優先）
-    JAPANESE_FONTS_WINDOWS = [
-        "C:/Windows/Fonts/YuGothB.ttc",    # Yu Gothic Bold（太めで見やすい）
-        "C:/Windows/Fonts/meiryob.ttc",    # Meiryo Bold
-        "C:/Windows/Fonts/meiryo.ttc",     # Meiryo
-        "C:/Windows/Fonts/YuGothM.ttc",    # Yu Gothic Medium
-        "C:/Windows/Fonts/msgothic.ttc",   # MS Gothic
+    JAPANESE_FONTS_WINDOWS: ClassVar[list[str]] = [
+        "C:/Windows/Fonts/YuGothB.ttc",  # Yu Gothic Bold（太めで見やすい）
+        "C:/Windows/Fonts/meiryob.ttc",  # Meiryo Bold
+        "C:/Windows/Fonts/meiryo.ttc",  # Meiryo
+        "C:/Windows/Fonts/YuGothM.ttc",  # Yu Gothic Medium
+        "C:/Windows/Fonts/msgothic.ttc",  # MS Gothic
     ]
 
     def _get_japanese_font_path(self) -> str:
@@ -62,7 +61,7 @@ class VideoComposer:
             VideoCompositionError: 使用可能な日本語フォントが見つからない場合
         """
         for font_path in self.JAPANESE_FONTS_WINDOWS:
-            if os.path.exists(font_path):
+            if Path(font_path).exists():
                 # Escape for FFmpeg on Windows: C:/path -> C\:/path
                 escaped_path = font_path.replace(":", "\\:")
                 return escaped_path
@@ -72,7 +71,7 @@ class VideoComposer:
             "- Meiryo\n- Yu Gothic\n- MS Gothic"
         )
 
-    def _wrap_text(self, text: str, max_chars: int = None) -> str:
+    def _wrap_text(self, text: str, max_chars: int | None = None) -> str:
         """テキストを指定文字数で自動改行する。
 
         Args:
@@ -100,7 +99,7 @@ class VideoComposer:
 
         return "\n".join(lines)
 
-    def _create_text_file(self, text: str, output_dir: Optional[Path] = None, index: int = 0) -> Path:
+    def _create_text_file(self, text: str, output_dir: Path | None = None, index: int = 0) -> Path:
         """テキストオーバーレイ用のファイルを作成する。
 
         Args:
@@ -130,11 +129,11 @@ class VideoComposer:
     def compose(
         self,
         audio_path: Path,
-        image_paths: List[Path],
+        image_paths: list[Path],
         output_path: Path,
-        text_overlays: Optional[List[str]] = None,
+        text_overlays: list[str] | None = None,
         language: str = "ja",
-        segment_timings: Optional[List[float]] = None,
+        segment_timings: list[float] | None = None,
         video_format: str = "short",
     ) -> Path:
         """音声と画像から動画を合成する。
@@ -163,7 +162,9 @@ class VideoComposer:
         else:  # "short" or "tiktok"
             output_width = self.OUTPUT_WIDTH  # 1080
             output_height = self.OUTPUT_HEIGHT  # 1920
-            format_label = "TikTok(1080x1920)" if video_format == "tiktok" else "ショート(1080x1920)"
+            format_label = (
+                "TikTok(1080x1920)" if video_format == "tiktok" else "ショート(1080x1920)"
+            )
 
         log_step(f"動画を合成中... ({format_label})", "🎬")
 
@@ -180,9 +181,7 @@ class VideoComposer:
             num_images = len(image_paths)
 
             # Calculate durations for each image
-            durations = self._calculate_durations(
-                num_images, audio_duration, segment_timings
-            )
+            durations = self._calculate_durations(num_images, audio_duration, segment_timings)
 
             # Create concat file with variable durations
             filelist_path = self._create_filelist(image_paths, durations)
@@ -212,14 +211,14 @@ class VideoComposer:
             raise
         except Exception as e:
             log_error(f"動画合成エラー: {e}")
-            raise VideoCompositionError(f"動画合成に失敗しました: {e}")
+            raise VideoCompositionError(f"動画合成に失敗しました: {e}") from e
 
     def _calculate_durations(
         self,
         num_images: int,
         audio_duration: float,
-        segment_timings: Optional[List[float]] = None,
-    ) -> List[float]:
+        segment_timings: list[float] | None = None,
+    ) -> list[float]:
         """各画像の表示時間を計算する。
 
         Args:
@@ -276,8 +275,8 @@ class VideoComposer:
                 ],
                 capture_output=True,
                 text=True,
-                encoding='utf-8',
-                errors='replace',
+                encoding="utf-8",
+                errors="replace",
                 check=True,
             )
 
@@ -286,13 +285,11 @@ class VideoComposer:
             return duration
 
         except subprocess.CalledProcessError as e:
-            raise VideoCompositionError(f"ffprobeの実行に失敗しました: {e.stderr}")
+            raise VideoCompositionError(f"ffprobeの実行に失敗しました: {e.stderr}") from e
         except (KeyError, ValueError, json.JSONDecodeError) as e:
-            raise VideoCompositionError(f"音声の長さを解析できませんでした: {e}")
+            raise VideoCompositionError(f"音声の長さを解析できませんでした: {e}") from e
 
-    def _create_filelist(
-        self, image_paths: List[Path], durations: List[float]
-    ) -> Path:
+    def _create_filelist(self, image_paths: list[Path], durations: list[float]) -> Path:
         """FFmpeg concatデマクサー用のファイルリストを作成する。
 
         Args:
@@ -306,7 +303,9 @@ class VideoComposer:
         fd, filelist_path = tempfile.mkstemp(suffix=".txt")
 
         with open(fd, "w", encoding="utf-8") as f:
-            for img_path, duration in zip(image_paths, durations):
+            # strict=True: 画像と表示時間の数は _calculate_durations で
+            # 必ず一致するはずなので、ずれたら黙って画像を落とすのではなく失敗させる
+            for img_path, duration in zip(image_paths, durations, strict=True):
                 # Use forward slashes and escape single quotes
                 safe_path = str(img_path.resolve()).replace("\\", "/").replace("'", "'\\''")
                 f.write(f"file '{safe_path}'\n")
@@ -324,10 +323,10 @@ class VideoComposer:
         filelist_path: Path,
         audio_path: Path,
         output_path: Path,
-        text_overlays: Optional[List[str]] = None,
-        durations: Optional[List[float]] = None,
+        text_overlays: list[str] | None = None,
+        durations: list[float] | None = None,
         num_images: int = 0,
-        segment_timings: Optional[List[float]] = None,
+        segment_timings: list[float] | None = None,
         audio_duration: float = 0.0,
         output_width: int = 1080,
         output_height: int = 1920,
@@ -364,10 +363,16 @@ class VideoComposer:
             try:
                 font_path = self._get_japanese_font_path()
 
-                # segment_timingsがある場合は音声タイミングを直接使用
-                use_segment_timings = segment_timings and len(segment_timings) >= len(text_overlays)
-                if use_segment_timings:
-                    log_step(f"音声タイミングを使用: {[f'{t:.2f}s' for t in segment_timings[:len(text_overlays)+1]]}", "🎯")
+                # segment_timingsがある場合は音声タイミングを直接使用。
+                # フラグではなく絞り込んだローカル変数に入れることで、
+                # 以降のブロックで None ではないことが型として保証される。
+                timings: list[float] | None = None
+                if segment_timings and len(segment_timings) >= len(text_overlays):
+                    timings = segment_timings
+                    log_step(
+                        f"音声タイミングを使用: {[f'{t:.2f}s' for t in timings[: len(text_overlays) + 1]]}",
+                        "🎯",
+                    )
 
                 # フォールバック用の累積時間
                 cumulative_time = 0.0
@@ -384,13 +389,18 @@ class VideoComposer:
                     text_file_path = str(text_file.resolve()).replace("\\", "/").replace(":", "\\:")
 
                     # Calculate timing: 音声タイミングを優先、なければdurationsベース
-                    if use_segment_timings and i < len(segment_timings):
-                        start_time = segment_timings[i]
-                        if i + 1 < len(segment_timings):
-                            end_time = segment_timings[i + 1]
+                    if timings is not None and i < len(timings):
+                        start_time = timings[i]
+                        if i + 1 < len(timings):
+                            end_time = timings[i + 1]
                         else:
-                            end_time = audio_duration if audio_duration > 0 else start_time + durations[i]
-                        log_step(f"テキスト{i+1}: '{text[:15]}...' → {start_time:.2f}s - {end_time:.2f}s", "📝")
+                            end_time = (
+                                audio_duration if audio_duration > 0 else start_time + durations[i]
+                            )
+                        log_step(
+                            f"テキスト{i + 1}: '{text[:15]}...' → {start_time:.2f}s - {end_time:.2f}s",
+                            "📝",
+                        )
                     else:
                         # フォールバック: durationsベースの累積時間
                         start_time = cumulative_time
@@ -458,8 +468,15 @@ class VideoComposer:
 
         try:
             log_step(f"FFmpegフィルター: {video_filter[:200]}...", "🔧")
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', check=True, timeout=300
+            # check=True なので失敗時は例外になる。戻り値は使わない。
+            subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+                timeout=300,
             )
         except subprocess.CalledProcessError as e:
             # Cleanup temp files before raising
@@ -467,12 +484,13 @@ class VideoComposer:
                 text_file.unlink(missing_ok=True)
             raise VideoCompositionError(
                 f"FFmpegの実行に失敗しました:\nstdout: {e.stdout}\nstderr: {e.stderr}"
-            )
-        except subprocess.TimeoutExpired:
+            ) from e
+        except subprocess.TimeoutExpired as e:
             # Cleanup temp files before raising
             for text_file in text_files:
                 text_file.unlink(missing_ok=True)
-            raise VideoCompositionError("FFmpegの実行がタイムアウトしました")
+            # TimeoutExpired はタイムアウト値と部分出力を持つので連結して残す
+            raise VideoCompositionError("FFmpegの実行がタイムアウトしました") from e
 
         # Cleanup text overlay temp files on success
         for text_file in text_files:

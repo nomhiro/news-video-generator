@@ -2,10 +2,9 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Tuple
 
 from src.models.news import NewsArticle
-from src.utils.logger import log_step, log_error, log_warning
+from src.utils.logger import log_error, log_step, log_warning
 
 
 class ArticleScraper:
@@ -43,14 +42,15 @@ class ArticleScraper:
             from googlenewsdecoder import new_decoderv1
 
             result = new_decoderv1(url)
-            if result.get("status") and result.get("decoded_url"):
-                return result["decoded_url"]
+            decoded = result.get("decoded_url")
+            if result.get("status") and isinstance(decoded, str) and decoded:
+                return decoded
             return url
         except Exception as e:
             log_warning(f"Failed to resolve Google News URL: {e}")
             return url
 
-    def _extract_content(self, url: str) -> Tuple[str, Optional[str]]:
+    def _extract_content(self, url: str) -> tuple[str, str | None]:
         """URLから記事本文とサムネイルを抽出する（同期処理）。
 
         Args:
@@ -104,9 +104,7 @@ class ArticleScraper:
         try:
             loop = asyncio.get_event_loop()
             content, thumbnail = await loop.run_in_executor(
-                self._executor,
-                self._extract_content,
-                article.url
+                self._executor, self._extract_content, article.url
             )
 
             article.content = content
@@ -119,8 +117,8 @@ class ArticleScraper:
         return article
 
     async def scrape_batch(
-        self, articles: List[NewsArticle], show_progress: bool = True
-    ) -> List[NewsArticle]:
+        self, articles: list[NewsArticle], show_progress: bool = True
+    ) -> list[NewsArticle]:
         """複数記事を並行スクレイピングする。
 
         Args:
@@ -154,10 +152,7 @@ class ArticleScraper:
         # Count successes
         success_count = sum(1 for a in scraped if a.content)
         if show_progress:
-            log_step(
-                f"スクレイピング完了: {success_count}/{len(need_scraping)}件成功",
-                "✅"
-            )
+            log_step(f"スクレイピング完了: {success_count}/{len(need_scraping)}件成功", "✅")
 
         return result
 

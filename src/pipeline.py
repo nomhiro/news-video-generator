@@ -2,18 +2,18 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from src.models.news import NewsArticle
+    pass
 
 from config import Config
-from src.models.script import Script
-from src.generators.script_generator import ScriptGenerator
-from src.generators.voice_generator import VoiceGenerator
 from src.generators.image_generator import ImageGenerator
+from src.generators.script_generator import ScriptGenerator
 from src.generators.video_composer import VideoComposer
-from src.utils.logger import log_step, log_success, log_error
+from src.generators.voice_generator import VoiceGenerator
+from src.models.script import Script
+from src.utils.logger import log_error, log_step, log_success
 
 
 class PipelineError(Exception):
@@ -69,10 +69,11 @@ class Pipeline:
             str: サニタイズされたファイル名
         """
         import re
+
         # ファイル名に使えない文字を置換
-        sanitized = re.sub(r'[\\/*?:"<>|]', '', name)
+        sanitized = re.sub(r'[\\/*?:"<>|]', "", name)
         # 連続する空白を1つに
-        sanitized = re.sub(r'\s+', ' ', sanitized)
+        sanitized = re.sub(r"\s+", " ", sanitized)
         # 前後の空白を削除
         sanitized = sanitized.strip()
         # 長さを制限
@@ -84,9 +85,12 @@ class Pipeline:
         return sanitized
 
     def run(
-        self, news_topic: str, languages: List[str] = None, output_name: str = None,
-        video_format: str = "short"
-    ) -> Dict[str, Any]:
+        self,
+        news_topic: str,
+        languages: list[str] | None = None,
+        output_name: str | None = None,
+        video_format: str = "short",
+    ) -> dict[str, Any]:
         """パイプライン全体を実行する。
 
         Args:
@@ -122,17 +126,15 @@ class Pipeline:
         try:
             # 1. Generate scripts for each language
             log_step("台本を生成中...", "📝")
-            scripts: Dict[str, Script] = {}
-            script_paths: Dict[str, Path] = {}
+            scripts: dict[str, Script] = {}
+            script_paths: dict[str, Path] = {}
 
             for lang in languages:
                 script = self.script_generator.generate(news_topic, lang, video_format)
                 scripts[lang] = script
 
                 # Save script to file
-                script_path = (
-                    self.config.output_dir / "scripts" / f"{base_name}_{lang}.json"
-                )
+                script_path = self.config.output_dir / "scripts" / f"{base_name}_{lang}.json"
                 script.to_json_file(script_path)
                 script_paths[lang] = script_path
 
@@ -141,32 +143,33 @@ class Pipeline:
             first_lang = languages[0]
             image_dir = self.config.output_dir / "images" / base_name
             image_paths = self.image_generator.generate_batch(
-                scripts[first_lang].image_prompts, image_dir, language=first_lang,
-                video_format=video_format
+                scripts[first_lang].image_prompts,
+                image_dir,
+                language=first_lang,
+                video_format=video_format,
             )
 
             # 3. Generate voices for each language (with timing if available)
             log_step("音声を生成中...", "🎙️")
-            audio_paths: Dict[str, Path] = {}
-            segment_timings: Dict[str, List[float]] = {}
+            audio_paths: dict[str, Path] = {}
+            segment_timings: dict[str, list[float]] = {}
 
             for lang in languages:
-                audio_path = (
-                    self.config.output_dir / "audio" / f"{base_name}_{lang}.mp3"
-                )
+                audio_path = self.config.output_dir / "audio" / f"{base_name}_{lang}.mp3"
 
                 # segment_narrationsがある場合はタイミング付き生成
                 if scripts[lang].segment_narrations:
                     _, timings = self.voice_generator.generate_with_timings(
-                        scripts[lang].segment_narrations, lang, audio_path,
-                        speaking_rate=speaking_rate
+                        scripts[lang].segment_narrations,
+                        lang,
+                        audio_path,
+                        speaking_rate=speaking_rate,
                     )
                     segment_timings[lang] = timings
                 else:
                     # フォールバック: 従来の生成方式
                     self.voice_generator.generate(
-                        scripts[lang].full_narration, lang, audio_path,
-                        speaking_rate=speaking_rate
+                        scripts[lang].full_narration, lang, audio_path, speaking_rate=speaking_rate
                     )
                     segment_timings[lang] = []
 
@@ -174,12 +177,10 @@ class Pipeline:
 
             # 4. Compose videos for each language (with timing if available)
             log_step("動画を合成中...", "🎬")
-            video_paths: Dict[str, Path] = {}
+            video_paths: dict[str, Path] = {}
 
             for lang in languages:
-                video_path = (
-                    self.config.output_dir / "videos" / f"{base_name}_{lang}.mp4"
-                )
+                video_path = self.config.output_dir / "videos" / f"{base_name}_{lang}.mp4"
                 self.video_composer.compose(
                     audio_paths[lang],
                     image_paths,
@@ -204,11 +205,11 @@ class Pipeline:
 
         except Exception as e:
             log_error(f"パイプラインエラー: {e}")
-            raise PipelineError(f"パイプライン実行に失敗しました: {e}")
+            raise PipelineError(f"パイプライン実行に失敗しました: {e}") from e
 
     def run_from_article(
-        self, article: Any, languages: List[str] = None, video_format: str = "short"
-    ) -> Dict[str, Any]:
+        self, article: Any, languages: list[str] | None = None, video_format: str = "short"
+    ) -> dict[str, Any]:
         """ニュース記事から動画を生成する。
 
         Args:

@@ -1,0 +1,169 @@
+[project]
+name = "news-video-generator"
+version = "0.1.0"
+description = "ニューストピックから YouTube Shorts / TikTok / 長尺向けの動画を自動生成する"
+readme = "README.md"
+requires-python = ">=3.13"
+
+# 依存は「実際に import しているもの」だけを直接依存として列挙する。
+# 再現性は uv.lock が担保する。上限バージョンは、メジャー更新で
+# 実際に壊れる（あるいは壊れた）ものだけに付ける。
+dependencies = [
+    # --- Azure OpenAI (台本生成 + 画像生成) ---
+    # 2.x の responses.parse / images.generate に依存しているため 3 を許さない。
+    # 下限が 2.53.0 なのは、images.generate の size が任意解像度の文字列を
+    # 受け付けるよう型が緩和された最初の確認済みバージョンだから。
+    # gpt-image-2 は 1152x2048 のような値を要求するため、これより古いと
+    # 型エラーになる（実行時は通るが型検査が通らない）。
+    "openai>=2.53.0,<3",
+    # Structured Outputs のスキーマを Pydantic モデルで定義しているため直接依存
+    "pydantic>=2.10,<3",
+    "tenacity>=9.0.0",
+    "python-dotenv>=1.0.0",
+
+    # --- Web (FastAPI + HTMX) ---
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "jinja2>=3.1",            # fastapi.templating.Jinja2Templates が要求
+    "python-multipart>=0.0.20",  # Form() の解釈に必要
+
+    # --- ニュース取得・本文抽出 ---
+    "feedparser>=6.0",
+    "httpx>=0.28",
+    "googlenewsdecoder>=0.1.7",
+    # newspaper3k は 2018年で開発停止。Phase 3 で trafilatura に置換する。
+    "newspaper3k>=0.2.8",
+    "lxml>=5.0",
+    "lxml-html-clean>=0.4",   # newspaper3k が lxml.html.clean を要求
+
+    # --- 音声合成 (Google Cloud TTS) ---
+    # Phase 3 で Azure AI Speech に移行し、以下4つはまとめて削除する
+    "google-cloud-texttospeech>=2.16",
+    "pydub>=0.25",
+    "mutagen>=1.47",
+    "audioop-lts>=0.2",       # Python 3.13 で stdlib から audioop が削除されたため
+
+    # --- YouTube アップロード ---
+    "google-api-python-client>=2.100",
+    "google-auth-oauthlib>=1.0",
+    "google-auth-httplib2>=0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pillow>=10.0",  # 生成画像の寸法を検証するため
+]
+
+[tool.uv]
+# Phase 1 時点ではまだ正式なパッケージではない（import は `from src...` /
+# `from config import ...` の形でカレントディレクトリに依存している）。
+# Phase 2 で src/newsvideo/ へ再構成する際に package = true へ切り替える。
+package = false
+
+# ============================================================
+# Ruff (lint + format)
+# ============================================================
+[tool.ruff]
+line-length = 100  # 既存コードの実測: p99=86、100超は27行
+target-version = "py313"
+extend-exclude = [".venv", "output", "data"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort (import 順序・自動修正可)
+    "UP",   # pyupgrade (古い書き方の近代化・自動修正可)
+    "B",    # flake8-bugbear (実際のバグパターン)
+    "C4",   # flake8-comprehensions
+    "PTH",  # flake8-use-pathlib (os.path -> pathlib)
+    "RUF",  # ruff 固有
+]
+ignore = [
+    # 行長は formatter に任せる。プロンプト定数のような分割できない
+    # 長い文字列リテラルで E501 が大量に出るため lint では見ない。
+    "E501",
+    # 日本語コメント・docstring を多用するため、全角文字の混在を許す
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # open() は問題ない。加えて video_composer は tempfile.mkstemp が返す
+    # ファイルディスクリプタを open(fd) に渡しており、Path.open では書けない。
+    "PTH123",
+    # __all__ は提供元（YouTube / TikTok）ごとにコメント付きでまとめてある。
+    # アルファベット順に並べ替えるとそのグルーピングが壊れて読みにくくなる。
+    "RUF022",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI は Depends() / Form() / Query() などを引数の既定値に置く設計で、
+# これは framework の正しい使い方なので B008 の対象から外す。
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.File",
+    "fastapi.Header",
+    "fastapi.Cookie",
+]
+
+# ============================================================
+# mypy
+# ============================================================
+[tool.mypy]
+python_version = "3.13"
+files = ["config.py", "main.py", "web_app.py", "src", "tests"]
+# 既存コードは型ヒントが比較的よく付いているが、テスト0件の状態から
+# 一気に strict にすると修正が本筋の作業を圧迫する。
+# まず「型注釈がある箇所の誤りを確実に検出する」水準から始め、
+# フェーズごとに厳しくしていく。
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_optional = true
+strict_equality = true
+check_untyped_defs = true
+# 段階的に true へ上げていく設定（現時点では未達）
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+# 型スタブを提供していないサードパーティ
+module = [
+    "newspaper.*",
+    "googlenewsdecoder.*",
+    "pydub.*",
+    "mutagen.*",
+    "feedparser.*",
+    "googleapiclient.*",
+    "google_auth_oauthlib.*",
+    "google.*",
+]
+ignore_missing_imports = true
+
+# ============================================================
+# pytest
+# ============================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    # 既定では課金・低速なテストを除外する。CI もこの既定で走る。
+    # 明示的に走らせたいときは `-m slow` / `-m live` を渡せば
+    # コマンドラインの -m が addopts より優先される。
+    "-m", "not slow and not live",
+]
+markers = [
+    "slow: ffmpeg など外部プロセスを実際に起動するテスト",
+    "live: 実際の外部API（Azure OpenAI 等）を呼び、課金が発生するテスト",
+]

@@ -1,9 +1,9 @@
 """Configuration management for News Video Generator."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
-import os
+
 from dotenv import load_dotenv
 
 
@@ -47,7 +47,7 @@ class Config:
     image_max_concurrency: int = 3
 
     # Google Cloud TTS Settings
-    google_credentials_path: Optional[str] = None  # Uses ADC if not set
+    google_credentials_path: str | None = None  # Uses ADC if not set
 
     # Google Cloud Project Settings (for TTS)
     google_cloud_project: str = ""
@@ -65,20 +65,22 @@ class Config:
     news_fetch_limit: int = 10  # Articles per category
 
     # AI News Settings
-    ai_search_queries: List[str] = field(default_factory=lambda: [
-        "生成AI",
-        "ChatGPT",
-        "Claude AI",
-        "Claude Code",
-        "Gemini AI",
-        "GitHub Copilot",
-        "大規模言語モデル LLM",
-        "OpenAI",
-        "Anthropic",
-        "Stable Diffusion",
-        "Midjourney",
-        "画像生成AI",
-    ])
+    ai_search_queries: list[str] = field(
+        default_factory=lambda: [
+            "生成AI",
+            "ChatGPT",
+            "Claude AI",
+            "Claude Code",
+            "Gemini AI",
+            "GitHub Copilot",
+            "大規模言語モデル LLM",
+            "OpenAI",
+            "Anthropic",
+            "Stable Diffusion",
+            "Midjourney",
+            "画像生成AI",
+        ]
+    )
     ai_news_limit_per_query: int = 5  # Articles per search query
 
     # Web Server Settings
@@ -98,7 +100,7 @@ class Config:
     tiktok_default_privacy: str = "SELF_ONLY"  # "PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"
 
     @classmethod
-    def _parse_ai_search_queries(cls, env_value: str) -> List[str]:
+    def _parse_ai_search_queries(cls, env_value: str) -> list[str]:
         """環境変数からAI検索クエリをパースする。
 
         Args:
@@ -139,19 +141,13 @@ class Config:
             # 既定値は置かない。Azure のデプロイ名は環境固有であり、
             # コード側の既定値は「動くはず」という誤解を生む。
             azure_openai_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", ""),
-            azure_openai_image_deployment=os.getenv(
-                "AZURE_OPENAI_IMAGE_DEPLOYMENT", ""
-            ),
+            azure_openai_image_deployment=os.getenv("AZURE_OPENAI_IMAGE_DEPLOYMENT", ""),
             image_max_concurrency=int(os.getenv("IMAGE_MAX_CONCURRENCY", "3")),
             google_credentials_path=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
             google_cloud_project=os.getenv("GOOGLE_CLOUD_PROJECT", ""),
             google_cloud_location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            voice_name_ja=os.getenv(
-                "GOOGLE_TTS_VOICE_JA", "ja-JP-Chirp3-HD-Zephyr"
-            ),
-            voice_name_en=os.getenv(
-                "GOOGLE_TTS_VOICE_EN", "en-US-Chirp3-HD-Zephyr"
-            ),
+            voice_name_ja=os.getenv("GOOGLE_TTS_VOICE_JA", "ja-JP-Chirp3-HD-Zephyr"),
+            voice_name_en=os.getenv("GOOGLE_TTS_VOICE_EN", "en-US-Chirp3-HD-Zephyr"),
             news_data_dir=Path(os.getenv("NEWS_DATA_DIR", "./data/news")),
             news_fetch_limit=int(os.getenv("NEWS_FETCH_LIMIT", "10")),
             ai_search_queries=cls._parse_ai_search_queries(os.getenv("AI_SEARCH_QUERIES", "")),
@@ -161,23 +157,17 @@ class Config:
             youtube_client_secrets_file=os.getenv(
                 "YOUTUBE_CLIENT_SECRETS_FILE", "client_secrets.json"
             ),
-            youtube_token_file=os.getenv(
-                "YOUTUBE_TOKEN_FILE", "youtube_token.json"
-            ),
-            youtube_default_privacy=os.getenv(
-                "YOUTUBE_DEFAULT_PRIVACY", "public"
-            ),
+            youtube_token_file=os.getenv("YOUTUBE_TOKEN_FILE", "youtube_token.json"),
+            youtube_default_privacy=os.getenv("YOUTUBE_DEFAULT_PRIVACY", "public"),
             # TikTok settings
             tiktok_client_key=os.getenv("TIKTOK_CLIENT_KEY", ""),
             tiktok_client_secret=os.getenv("TIKTOK_CLIENT_SECRET", ""),
             tiktok_token_file=os.getenv("TIKTOK_TOKEN_FILE", "tiktok_token.json"),
-            tiktok_redirect_uri=os.getenv(
-                "TIKTOK_REDIRECT_URI", "http://127.0.0.1:8090/callback"
-            ),
+            tiktok_redirect_uri=os.getenv("TIKTOK_REDIRECT_URI", "http://127.0.0.1:8090/callback"),
             tiktok_default_privacy=os.getenv("TIKTOK_DEFAULT_PRIVACY", "SELF_ONLY"),
         )
 
-    def validate(self) -> List[str]:
+    def validate(self) -> list[str]:
         """設定の検証。エラーメッセージのリストを返す。
 
         Returns:

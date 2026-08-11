@@ -1,7 +1,5 @@
 """Script generation using Azure OpenAI Responses API with Structured Outputs."""
 
-from typing import Optional
-
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -18,7 +16,7 @@ from tenacity import (
 )
 
 from src.models.script import Script, ScriptDraft
-from src.utils.logger import log_step, log_success, log_error, log_warning
+from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
 class ScriptGenerationError(Exception):
@@ -533,7 +531,9 @@ Before output, verify:
         )
         self.model = deployment
 
-    def generate(self, news_topic: str, language: str = "ja", video_format: str = "short") -> Script:
+    def generate(
+        self, news_topic: str, language: str = "ja", video_format: str = "short"
+    ) -> Script:
         """ニューストピックから台本を生成する。
 
         Args:
@@ -555,7 +555,7 @@ Before output, verify:
 
         # Script のバリデータ（配列長の一致・空要素の禁止）で弾かれた場合は
         # モデルの引き直しで直ることがあるため、そこだけ再試行する。
-        last_validation_error: Optional[ValidationError] = None
+        last_validation_error: ValidationError | None = None
         for attempt in range(self.VALIDATION_RETRIES):
             try:
                 draft = self._request_script(instructions, news_topic)
@@ -570,7 +570,7 @@ Before output, verify:
                 break
             except Exception as e:
                 log_error(f"API呼び出しエラー: {e}")
-                raise ScriptGenerationError(f"台本生成に失敗しました: {e}")
+                raise ScriptGenerationError(f"台本生成に失敗しました: {e}") from e
 
             # full_narration はセグメントの連結で導出される
             script = draft.to_script(language)
@@ -630,7 +630,7 @@ Before output, verify:
         return draft
 
     @staticmethod
-    def _summarize_validation_error(error: Optional[ValidationError]) -> str:
+    def _summarize_validation_error(error: ValidationError | None) -> str:
         """ValidationError を1行のメッセージに要約する。
 
         Args:
@@ -669,4 +669,3 @@ Before output, verify:
             if language == "ja":
                 return self.SYSTEM_PROMPT_JA
             return self.SYSTEM_PROMPT_EN
-

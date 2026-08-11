@@ -7,11 +7,9 @@ import webbrowser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
-
 
 # TikTok OAuth2 endpoints
 TIKTOK_AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/"
@@ -91,7 +89,7 @@ class TikTokAuth:
         self.client_secret = client_secret
         self.token_file = Path(token_file)
         self.redirect_uri = redirect_uri
-        self._credentials: Optional[TikTokCredentials] = None
+        self._credentials: TikTokCredentials | None = None
 
     def get_credentials(self) -> TikTokCredentials:
         """Get valid TikTok API credentials.
@@ -129,12 +127,16 @@ class TikTokAuth:
 
         # Run OAuth2 flow
         self._run_oauth_flow()
+        if self._credentials is None:
+            # None を返すと呼び出し側で access_token 参照時に
+            # AttributeError になり原因が分かりにくいため、ここで失敗させる
+            raise TikTokAuthError("OAuth2 フローが完了しましたが認証情報を取得できませんでした")
         return self._credentials
 
     def _load_credentials(self) -> None:
         """Load credentials from token file."""
         try:
-            with open(self.token_file, "r", encoding="utf-8") as f:
+            with open(self.token_file, encoding="utf-8") as f:
                 data = json.load(f)
             self._credentials = TikTokCredentials.from_dict(data)
         except (json.JSONDecodeError, KeyError):
@@ -175,9 +177,7 @@ class TikTokAuth:
         token_data = result.get("data", result)
         self._credentials = TikTokCredentials(
             access_token=token_data["access_token"],
-            refresh_token=token_data.get(
-                "refresh_token", self._credentials.refresh_token
-            ),
+            refresh_token=token_data.get("refresh_token", self._credentials.refresh_token),
             expires_at=time.time() + token_data["expires_in"],
             open_id=token_data.get("open_id", self._credentials.open_id),
             scope=token_data.get("scope", self._credentials.scope),
@@ -219,11 +219,11 @@ class TikTokAuth:
             if "address already in use" in str(e).lower():
                 raise TikTokAuthError(
                     f"ポート{port}が使用中です。他のアプリケーションを終了してから再試行してください。"
-                )
-            raise TikTokAuthError(f"OAuth2 server failed to start: {e}")
+                ) from e
+            raise TikTokAuthError(f"OAuth2 server failed to start: {e}") from e
 
         # Open browser for user authentication
-        print(f"ブラウザでTikTok認証ページを開いています...")
+        print("ブラウザでTikTok認証ページを開いています...")
         print(f"自動で開かない場合は以下のURLを開いてください:\n{auth_url}")
         webbrowser.open(auth_url)
 
@@ -309,8 +309,8 @@ def _create_callback_handler(expected_state: str, callback_path: str):
     class CallbackHandler(BaseHTTPRequestHandler):
         """HTTP handler for OAuth callback."""
 
-        code: Optional[str] = None
-        error: Optional[str] = None
+        code: str | None = None
+        error: str | None = None
 
         def do_GET(self):
             """Handle OAuth callback GET request."""
@@ -339,7 +339,9 @@ def _create_callback_handler(expected_state: str, callback_path: str):
             # Get authorization code
             CallbackHandler.code = params.get("code", [""])[0]
             if CallbackHandler.code:
-                self._send_response("TikTok認証成功! このウィンドウを閉じてください。", success=True)
+                self._send_response(
+                    "TikTok認証成功! このウィンドウを閉じてください。", success=True
+                )
             else:
                 CallbackHandler.error = "No authorization code received"
                 self._send_response("認証コードを取得できませんでした。", success=False)

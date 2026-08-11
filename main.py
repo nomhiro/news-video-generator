@@ -51,14 +51,13 @@ Examples:
         "-o", "--output", default="./output", help="出力ディレクトリ (default: ./output)"
     )
     parser.add_argument(
-        "-f", "--format",
+        "-f",
+        "--format",
         default="short",
         choices=["short", "tiktok", "long"],
-        help="動画形式: short(35秒), tiktok(60-90秒), long(5分) (default: short)"
+        help="動画形式: short(35秒), tiktok(60-90秒), long(5分) (default: short)",
     )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="詳細なログを出力"
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="詳細なログを出力")
 
     args = parser.parse_args()
 
@@ -83,8 +82,12 @@ Examples:
     # Run pipeline
     pipeline = Pipeline(config)
     try:
-        format_names = {"short": "ショート(35秒)", "tiktok": "TikTok(60-90秒)", "long": "ロング(5分)"}
-        print(f"🚀 動画生成を開始します")
+        format_names = {
+            "short": "ショート(35秒)",
+            "tiktok": "TikTok(60-90秒)",
+            "long": "ロング(5分)",
+        }
+        print("🚀 動画生成を開始します")
         print(f"   トピック: {args.topic}")
         print(f"   言語: {', '.join(args.languages)}")
         print(f"   形式: {format_names.get(args.format, args.format)}")

@@ -3,12 +3,11 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from src.models.news import NewsArticle, NewsCategory
 from src.news.sources.google_news import GoogleNewsSource
 from src.news.sources.scraper import ArticleScraper
-from src.utils.logger import log_step, log_success, log_error
+from src.utils.logger import log_error, log_step, log_success
 
 
 class NewsAggregator:
@@ -46,7 +45,7 @@ class NewsAggregator:
         """
         return self.data_dir / f"{category.value}.json"
 
-    def _load_category(self, category: NewsCategory) -> List[NewsArticle]:
+    def _load_category(self, category: NewsCategory) -> list[NewsArticle]:
         """カテゴリのニュースをJSONから読み込む。
 
         Args:
@@ -61,7 +60,7 @@ class NewsAggregator:
             return []
 
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 data = json.load(f)
 
             return [NewsArticle.from_dict(item) for item in data]
@@ -70,9 +69,7 @@ class NewsAggregator:
             log_error(f"Error loading {file_path}: {e}")
             return []
 
-    def _save_category(
-        self, category: NewsCategory, articles: List[NewsArticle]
-    ) -> None:
+    def _save_category(self, category: NewsCategory, articles: list[NewsArticle]) -> None:
         """カテゴリのニュースをJSONに保存する。
 
         Args:
@@ -88,7 +85,7 @@ class NewsAggregator:
 
     async def fetch_and_store(
         self, limit_per_category: int = 10
-    ) -> Dict[NewsCategory, List[NewsArticle]]:
+    ) -> dict[NewsCategory, list[NewsArticle]]:
         """ニュースを取得してJSONに保存する。
 
         既存の記事は選択状態を保持しながらマージします。
@@ -104,7 +101,7 @@ class NewsAggregator:
         # Fetch from Google News
         fetched = await self.google_news.fetch_all_categories(limit_per_category)
 
-        result: Dict[NewsCategory, List[NewsArticle]] = {}
+        result: dict[NewsCategory, list[NewsArticle]] = {}
 
         for category, new_articles in fetched.items():
             # Load existing articles to preserve selection state
@@ -132,8 +129,8 @@ class NewsAggregator:
         return result
 
     async def fetch_ai_news_and_store(
-        self, search_queries: List[str], limit_per_query: int = 5
-    ) -> List[NewsArticle]:
+        self, search_queries: list[str], limit_per_query: int = 5
+    ) -> list[NewsArticle]:
         """AI関連ニュースを取得してJSONに保存する。
 
         Args:
@@ -146,9 +143,7 @@ class NewsAggregator:
         log_step("AI関連ニュースを取得・保存中...", "🤖")
 
         # AIニュースを取得
-        new_articles = await self.google_news.fetch_ai_news(
-            search_queries, limit_per_query
-        )
+        new_articles = await self.google_news.fetch_ai_news(search_queries, limit_per_query)
 
         # AIカテゴリ用のJSON保存
         category = NewsCategory.AI
@@ -174,9 +169,7 @@ class NewsAggregator:
 
         return merged
 
-    def get_articles_by_category(
-        self, category: NewsCategory
-    ) -> List[NewsArticle]:
+    def get_articles_by_category(self, category: NewsCategory) -> list[NewsArticle]:
         """カテゴリの記事を取得する。
 
         Args:
@@ -188,30 +181,23 @@ class NewsAggregator:
         articles = self._load_category(category)
 
         # Sort by published_at descending
-        return sorted(
-            articles,
-            key=lambda a: a.published_at or datetime.min,
-            reverse=True
-        )
+        return sorted(articles, key=lambda a: a.published_at or datetime.min, reverse=True)
 
-    def get_all_articles(self) -> Dict[NewsCategory, List[NewsArticle]]:
+    def get_all_articles(self) -> dict[NewsCategory, list[NewsArticle]]:
         """全カテゴリの記事を取得する。
 
         Returns:
             Dict[NewsCategory, List[NewsArticle]]: カテゴリ別の記事
         """
-        return {
-            category: self.get_articles_by_category(category)
-            for category in NewsCategory
-        }
+        return {category: self.get_articles_by_category(category) for category in NewsCategory}
 
-    def get_selected_articles(self) -> List[NewsArticle]:
+    def get_selected_articles(self) -> list[NewsArticle]:
         """選択された記事を取得する。
 
         Returns:
             List[NewsArticle]: 選択済み記事のリスト
         """
-        selected = []
+        selected: list[NewsArticle] = []
 
         for category in NewsCategory:
             articles = self._load_category(category)
@@ -219,7 +205,7 @@ class NewsAggregator:
 
         return selected
 
-    def toggle_selection(self, article_id: str) -> Optional[bool]:
+    def toggle_selection(self, article_id: str) -> bool | None:
         """記事の選択状態を切り替える。
 
         Args:
@@ -280,7 +266,7 @@ class NewsAggregator:
 
         return False
 
-    async def scrape_selected_content(self) -> List[NewsArticle]:
+    async def scrape_selected_content(self) -> list[NewsArticle]:
         """選択記事の本文をスクレイピングする。
 
         Returns:
@@ -309,7 +295,7 @@ class NewsAggregator:
 
         return scraped
 
-    def get_article_by_id(self, article_id: str) -> Optional[NewsArticle]:
+    def get_article_by_id(self, article_id: str) -> NewsArticle | None:
         """IDで記事を取得する。
 
         Args:

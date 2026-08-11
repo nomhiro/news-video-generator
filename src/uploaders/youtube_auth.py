@@ -1,12 +1,10 @@
 """YouTube OAuth2 authentication module."""
 
-import os
 from pathlib import Path
-from typing import Optional
 
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 
 # YouTube Data API v3 scope for uploading videos
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -14,6 +12,7 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
 class YouTubeAuthError(Exception):
     """Exception raised for YouTube authentication errors."""
+
     pass
 
 
@@ -34,7 +33,7 @@ class YouTubeAuth:
         """
         self.client_secrets_file = Path(client_secrets_file)
         self.token_file = Path(token_file)
-        self._credentials: Optional[Credentials] = None
+        self._credentials: Credentials | None = None
 
     def get_credentials(self) -> Credentials:
         """Get valid YouTube API credentials.
@@ -56,9 +55,7 @@ class YouTubeAuth:
 
         # Try to load from file
         if self.token_file.exists():
-            self._credentials = Credentials.from_authorized_user_file(
-                str(self.token_file), SCOPES
-            )
+            self._credentials = Credentials.from_authorized_user_file(str(self.token_file), SCOPES)
 
         # Check if credentials are valid or can be refreshed
         if self._credentials:
@@ -69,7 +66,7 @@ class YouTubeAuth:
                     self._credentials.refresh(Request())
                     self._save_credentials()
                     return self._credentials
-                except Exception as e:
+                except Exception:
                     # Token refresh failed, need to re-authenticate
                     pass
 
@@ -86,9 +83,7 @@ class YouTubeAuth:
             )
 
         try:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(self.client_secrets_file), SCOPES
-            )
+            flow = InstalledAppFlow.from_client_secrets_file(str(self.client_secrets_file), SCOPES)
             # This will open a browser for the user to authenticate
             # Use port 8089 to avoid conflicts with common services
             self._credentials = flow.run_local_server(
@@ -104,11 +99,11 @@ class YouTubeAuth:
         except OSError as e:
             if "address already in use" in str(e).lower():
                 raise YouTubeAuthError(
-                    f"ポート8089が使用中です。他のアプリケーションを終了してから再試行してください。"
-                )
-            raise YouTubeAuthError(f"OAuth2 authentication failed: {e}")
+                    "ポート8089が使用中です。他のアプリケーションを終了してから再試行してください。"
+                ) from e
+            raise YouTubeAuthError(f"OAuth2 authentication failed: {e}") from e
         except Exception as e:
-            raise YouTubeAuthError(f"OAuth2 authentication failed: {e}")
+            raise YouTubeAuthError(f"OAuth2 authentication failed: {e}") from e
 
     def _save_credentials(self) -> None:
         """Save credentials to the token file."""
@@ -127,9 +122,7 @@ class YouTubeAuth:
 
         if self.token_file.exists():
             try:
-                creds = Credentials.from_authorized_user_file(
-                    str(self.token_file), SCOPES
-                )
+                creds = Credentials.from_authorized_user_file(str(self.token_file), SCOPES)
                 if creds.valid:
                     self._credentials = creds
                     return True

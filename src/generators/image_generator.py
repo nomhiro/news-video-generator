@@ -3,7 +3,7 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Literal
 
 from openai import (
     APIConnectionError,
@@ -20,7 +20,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from src.utils.logger import log_step, log_success, log_error, log_warning
+from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
 class ImageGenerationError(Exception):
@@ -38,7 +38,7 @@ class ContentFilterError(ImageGenerationError):
     pass
 
 
-def validate_size(size: str) -> Tuple[int, int]:
+def validate_size(size: str) -> tuple[int, int]:
     """gpt-image-2 のサイズ制約を満たしているか検証する。
 
     gpt-image-2 の制約:
@@ -60,7 +60,9 @@ def validate_size(size: str) -> Tuple[int, int]:
         width_str, height_str = size.lower().split("x")
         width, height = int(width_str), int(height_str)
     except ValueError:
-        raise ValueError(f"サイズの形式が不正です: {size!r} (期待: '<幅>x<高さ>')")
+        # int() や unpack が出す低レベルなメッセージは利用者に有用でないため、
+        # 意図的にチェーンを切って呼び出し側に分かる文言だけを返す。
+        raise ValueError(f"サイズの形式が不正です: {size!r} (期待: '<幅>x<高さ>')") from None
 
     if width <= 0 or height <= 0:
         raise ValueError(f"サイズが正の値ではありません: {size}")
@@ -82,8 +84,7 @@ def validate_size(size: str) -> Tuple[int, int]:
     pixels = width * height
     if not (655_360 <= pixels <= 8_294_400):
         raise ValueError(
-            f"総ピクセル数は 655,360〜8,294,400 でなければなりません: "
-            f"{size} ({pixels:,}px)"
+            f"総ピクセル数は 655,360〜8,294,400 でなければなりません: {size} ({pixels:,}px)"
         )
 
     return width, height
@@ -130,8 +131,10 @@ class ImageGenerator:
     SIZE_VERTICAL = "1152x2048"  # 9:16 (short / tiktok)
     SIZE_HORIZONTAL = "2048x1152"  # 16:9 (long)
 
-    QUALITY = "high"
-    OUTPUT_FORMAT = "png"
+    # openai SDK は quality / output_format を Literal で型付けしているため、
+    # 素の str ではなく Literal として宣言する（そうしないと overload に合致しない）
+    QUALITY: Literal["low", "medium", "high"] = "high"
+    OUTPUT_FORMAT: Literal["png", "jpeg"] = "png"
     MAX_RETRIES = 4
 
     # gpt-image-2 の既定クォータは 5 images/min per deployment。
@@ -144,7 +147,7 @@ class ImageGenerator:
         endpoint: str,
         api_key: str,
         deployment: str,
-        max_concurrency: Optional[int] = None,
+        max_concurrency: int | None = None,
     ):
         """ImageGeneratorを初期化する。
 
@@ -186,11 +189,11 @@ class ImageGenerator:
 
     def generate_batch(
         self,
-        prompts: List[str],
+        prompts: list[str],
         output_dir: Path,
         language: str = "ja",
         video_format: str = "short",
-    ) -> List[Path]:
+    ) -> list[Path]:
         """複数のプロンプトから画像を生成する。
 
         プロンプトごとに1リクエストを投げる。gpt-image-2 の n パラメータは
@@ -222,15 +225,14 @@ class ImageGenerator:
         }
         format_label = format_labels.get(video_format, f"ショート({size})")
         log_step(
-            f"{len(prompts)}枚の画像を生成中... ({format_label}, "
-            f"並行数={self.max_concurrency})",
+            f"{len(prompts)}枚の画像を生成中... ({format_label}, 並行数={self.max_concurrency})",
             "🎨",
         )
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # 順序を保つため index を持ち回す
-        def task(indexed: Tuple[int, str]) -> Path:
+        def task(indexed: tuple[int, str]) -> Path:
             index, prompt = indexed
             enhanced_prompt = self._enhance_prompt(prompt, language, video_format)
             output_path = output_dir / f"image_{index:03d}.png"
@@ -245,14 +247,12 @@ class ImageGenerator:
             except ImageGenerationError:
                 raise
             except Exception as e:
-                raise ImageGenerationError(f"予期しないエラー: {e}")
+                raise ImageGenerationError(f"予期しないエラー: {e}") from e
 
         log_success(f"{len(image_paths)}枚の画像を生成しました")
         return image_paths
 
-    def _generate_single(
-        self, prompt: str, output_path: Path, size: str, index: int
-    ) -> Path:
+    def _generate_single(self, prompt: str, output_path: Path, size: str, index: int) -> Path:
         """単一の画像を生成して保存する。
 
         Args:
@@ -277,10 +277,10 @@ class ImageGenerator:
         except BadRequestError as e:
             log_error(f"画像{index}: リクエストが拒否されました - {e}")
             log_error(f"画像{index}: プロンプト = {prompt}")
-            raise ImageGenerationError(f"画像{index}の生成に失敗しました: {e}")
+            raise ImageGenerationError(f"画像{index}の生成に失敗しました: {e}") from e
         except Exception as e:
             log_error(f"画像{index}の生成に失敗: {e}")
-            raise ImageGenerationError(f"画像{index}の生成に失敗しました: {e}")
+            raise ImageGenerationError(f"画像{index}の生成に失敗しました: {e}") from e
 
         output_path.write_bytes(image_bytes)
         log_step(f"画像{index}: {output_path.name} ({len(image_bytes):,} bytes)", "🖼️")
@@ -317,13 +317,13 @@ class ImageGenerator:
             response = self.client.images.generate(
                 model=self.deployment,
                 prompt=prompt,
+                # openai 2.53.0 で size の型が Union[str, Literal[...]] に緩和され、
+                # gpt-image-2 の任意解像度を型安全に渡せるようになった。
+                # （それ以前は閉じた Literal で、extra_body 経由が必要だった）
+                size=size,
                 quality=self.QUALITY,
                 n=1,
                 output_format=self.OUTPUT_FORMAT,
-                # size は openai SDK の型注釈が閉じた Literal になっており
-                # gpt-image-2 の任意解像度を渡せないため extra_body 経由にする。
-                # SDK は extra_body をリクエストボディにマージする。
-                extra_body={"size": size},
             )
         except BadRequestError as e:
             if _is_content_filter_error(e):
@@ -346,8 +346,7 @@ class ImageGenerator:
         if not b64_data:
             # gpt-image-2 は常に base64 を返す。url が返ることはない。
             raise ImageGenerationError(
-                "APIレスポンスに b64_json が含まれていません "
-                f"(url={response.data[0].url!r})"
+                f"APIレスポンスに b64_json が含まれていません (url={response.data[0].url!r})"
             )
 
         return base64.b64decode(b64_data)
@@ -392,9 +391,22 @@ class ImageGenerator:
 
         # 実在人物の肖像を避ける
         person_keywords = (
-            "person", "people", "man", "woman", "minister", "president",
-            "leader", "politician", "ceo", "executive", "speaker", "figure",
-            "human", "face", "portrait", "headshot",
+            "person",
+            "people",
+            "man",
+            "woman",
+            "minister",
+            "president",
+            "leader",
+            "politician",
+            "ceo",
+            "executive",
+            "speaker",
+            "figure",
+            "human",
+            "face",
+            "portrait",
+            "headshot",
         )
         if any(kw in prompt.lower() for kw in person_keywords):
             parts.append(

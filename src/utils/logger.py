@@ -2,7 +2,6 @@
 
 import logging
 import sys
-from typing import Optional
 
 
 def setup_logger(name: str, verbose: bool = False) -> logging.Logger:
@@ -29,7 +28,7 @@ def setup_logger(name: str, verbose: bool = False) -> logging.Logger:
 
 
 # Default logger instance
-_logger: Optional[logging.Logger] = None
+_logger: logging.Logger | None = None
 
 
 def _get_logger() -> logging.Logger:

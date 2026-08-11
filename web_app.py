@@ -17,8 +17,8 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from config import Config
-from src.web.routes import router
 from src.web.dependencies import setup_dependencies
+from src.web.routes import router
 
 
 def create_app() -> FastAPI:
@@ -50,39 +50,26 @@ def create_app() -> FastAPI:
 
 def main():
     """メインエントリーポイント。"""
-    import sys
     import io
+    import sys
 
     # Fix Windows console encoding for emoji
     if sys.platform == "win32":
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(
-        description="News Video Generator Web Server"
-    )
+    parser = argparse.ArgumentParser(description="News Video Generator Web Server")
     parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="サーバーホストアドレス (default: 127.0.0.1)"
+        "--host", default="127.0.0.1", help="サーバーホストアドレス (default: 127.0.0.1)"
     )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="サーバーポート番号 (default: 8000)"
-    )
-    parser.add_argument(
-        "--reload",
-        action="store_true",
-        help="開発用自動リロード"
-    )
+    parser.add_argument("--port", type=int, default=8000, help="サーバーポート番号 (default: 8000)")
+    parser.add_argument("--reload", action="store_true", help="開発用自動リロード")
 
     args = parser.parse_args()
 
-    print(f"News Video Generator Web Server")
+    print("News Video Generator Web Server")
     print(f"   URL: http://{args.host}:{args.port}")
-    print(f"   Press Ctrl+C to stop")
+    print("   Press Ctrl+C to stop")
     print("")
 
     uvicorn.run(
