@@ -223,16 +223,19 @@ async def generate_videos(
     Returns:
         HTMLResponse: 生成ステータスパーシャルHTML
     """
-    # Check if already running
-    if state.is_running:
+    # Check if already running.
+    # 生成は別スレッドで進行するため、フィールドを個別に読むと
+    # 中途半端な組み合わせを観測しうる。写しを一度に取る。
+    running = state.snapshot()
+    if running.is_running:
         return templates.TemplateResponse(
             request,
             "partials/generation_status.html",
             {
                 "status": "running",
-                "total_count": state.total_count,
-                "completed_count": state.completed_count,
-                "current_article": state.current_article,
+                "total_count": running.total_count,
+                "completed_count": running.completed_count,
+                "current_article": running.current_article,
             },
         )
 
@@ -282,7 +285,7 @@ async def generate_videos(
     )
 
 
-async def generate_videos_task(
+def generate_videos_task(
     articles: list[NewsArticle],
     pipeline: Pipeline,
     aggregator: NewsAggregator,
@@ -290,6 +293,24 @@ async def generate_videos_task(
     video_format: str = "short",
 ) -> None:
     """バックグラウンドで動画を生成するタスク。
+
+    **この関数は同期関数でなければならない。**
+
+    Starlette の BackgroundTask は次のように実装されている
+    （starlette/background.py）。
+
+        if self.is_async:
+            await self.func(...)          # イベントループ上で実行
+        else:
+            await run_in_threadpool(...)  # 別スレッドで実行
+
+    `pipeline.run()` は完全に同期で、ネットワークI/O・`time.sleep()`・
+    ffmpeg の `subprocess.run()` を含み、数分かかる。これを `async def` から
+    呼ぶとイベントループが占有され、生成中は Web サーバー全体が応答しなくなる
+    （進捗ポーリング用の `/status` すら返らない）。
+
+    同期関数にしておくことで Starlette が threadpool へ回してくれる。
+    `async def` に戻してはいけない。
 
     Args:
         articles: 生成対象の記事リスト
@@ -351,19 +372,22 @@ async def get_status(
     Returns:
         HTMLResponse: ステータスパーシャルHTML
     """
-    status = state.get_status()
+    # 生成は別スレッドで進行するので、一貫した写しを一度に取る。
+    # フィールドを個別に読むと「completed_count は増えたが
+    # completed_articles にはまだ入っていない」状態を表示しうる。
+    snapshot = state.snapshot()
 
     return templates.TemplateResponse(
         request,
         "partials/generation_status.html",
         {
-            "status": status,
-            "total_count": state.total_count,
-            "completed_count": state.completed_count,
-            "current_article": state.current_article,
-            "completed_articles": state.completed_articles,
-            "failed_articles": state.failed_articles,
-            "error_message": state.error_message,
+            "status": snapshot.status,
+            "total_count": snapshot.total_count,
+            "completed_count": snapshot.completed_count,
+            "current_article": snapshot.current_article,
+            "completed_articles": snapshot.completed_articles,
+            "failed_articles": snapshot.failed_articles,
+            "error_message": snapshot.error_message,
         },
     )
 

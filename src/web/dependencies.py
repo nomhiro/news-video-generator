@@ -1,6 +1,7 @@
 """FastAPI dependency injection setup."""
 
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass
 
 from fastapi import FastAPI
 
@@ -11,55 +12,147 @@ from src.uploaders.tiktok_uploader import TikTokUploader
 from src.uploaders.youtube_uploader import YouTubeUploader
 
 
-@dataclass
-class GenerationState:
-    """動画生成の状態を管理するクラス。"""
+@dataclass(frozen=True)
+class GenerationSnapshot:
+    """ある時点の生成状態の写し。
 
-    is_running: bool = False
-    total_count: int = 0
-    completed_count: int = 0
-    current_article: str | None = None
-    error_message: str | None = None
-    completed_articles: list[str] = field(default_factory=list)
-    failed_articles: list[str] = field(default_factory=list)
+    `/status` はこの写しを読む。写しを取る理由は、生成が別スレッドで
+    走っており、複数フィールドを個別に読むと「completed_count は更新済みだが
+    completed_articles はまだ」という中途半端な組み合わせを観測しうるため。
+
+    Attributes:
+        status: "idle" / "running" / "success" / "error"
+        is_running: 生成中かどうか
+        total_count: 対象件数
+        completed_count: 完了件数
+        current_article: いま処理中の記事タイトル
+        error_message: エラーメッセージ
+        completed_articles: 成功した記事タイトル
+        failed_articles: 失敗した記事タイトル
+    """
+
+    status: str
+    is_running: bool
+    total_count: int
+    completed_count: int
+    current_article: str | None
+    error_message: str | None
+    completed_articles: tuple[str, ...]
+    failed_articles: tuple[str, ...]
+
+
+class GenerationState:
+    """動画生成の状態を管理するクラス。
+
+    生成は Starlette の threadpool（イベントループ外のスレッド）で走り、
+    `/status` はイベントループ側から読む。両者が同時に触るため、
+    更新と読み取りをロックで守る。
+
+    設計上の制約: 状態はプロセスメモリにしかないので、再起動で消え、
+    レプリカを増やすと共有されない。Phase 4 でジョブテーブルに移す。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._is_running = False
+        self._total_count = 0
+        self._completed_count = 0
+        self._current_article: str | None = None
+        self._error_message: str | None = None
+        self._completed_articles: list[str] = []
+        self._failed_articles: list[str] = []
+
+    @property
+    def is_running(self) -> bool:
+        """生成中かどうか。"""
+        with self._lock:
+            return self._is_running
 
     def start(self, total: int) -> None:
-        """生成を開始する。"""
-        self.is_running = True
-        self.total_count = total
-        self.completed_count = 0
-        self.current_article = None
-        self.error_message = None
-        self.completed_articles = []
-        self.failed_articles = []
+        """生成を開始する。
+
+        Args:
+            total: 対象件数
+        """
+        with self._lock:
+            self._is_running = True
+            self._total_count = total
+            self._completed_count = 0
+            self._current_article = None
+            self._error_message = None
+            self._completed_articles = []
+            self._failed_articles = []
 
     def update(self, article_title: str) -> None:
-        """現在処理中の記事を更新する。"""
-        self.current_article = article_title
+        """現在処理中の記事を更新する。
+
+        Args:
+            article_title: 記事タイトル
+        """
+        with self._lock:
+            self._current_article = article_title
 
     def complete_one(self, article_title: str, success: bool = True) -> None:
-        """1件の処理を完了する。"""
-        self.completed_count += 1
-        if success:
-            self.completed_articles.append(article_title)
-        else:
-            self.failed_articles.append(article_title)
+        """1件の処理を完了する。
+
+        Args:
+            article_title: 記事タイトル
+            success: 成功したかどうか
+        """
+        with self._lock:
+            self._completed_count += 1
+            if success:
+                self._completed_articles.append(article_title)
+            else:
+                self._failed_articles.append(article_title)
 
     def finish(self, error: str | None = None) -> None:
-        """生成を終了する。"""
-        self.is_running = False
-        self.current_article = None
-        self.error_message = error
+        """生成を終了する。
 
-    def get_status(self) -> str:
-        """現在のステータスを取得する。"""
-        if self.is_running:
+        Args:
+            error: エラーメッセージ（正常終了なら None）
+        """
+        with self._lock:
+            self._is_running = False
+            self._current_article = None
+            self._error_message = error
+
+    def snapshot(self) -> GenerationSnapshot:
+        """一貫した状態の写しを返す。
+
+        Returns:
+            GenerationSnapshot: ロック内で一度に読み取った状態
+        """
+        with self._lock:
+            return GenerationSnapshot(
+                status=self._status_locked(),
+                is_running=self._is_running,
+                total_count=self._total_count,
+                completed_count=self._completed_count,
+                current_article=self._current_article,
+                error_message=self._error_message,
+                completed_articles=tuple(self._completed_articles),
+                failed_articles=tuple(self._failed_articles),
+            )
+
+    def _status_locked(self) -> str:
+        """ステータス文字列を返す。呼び出し側がロックを保持していること。"""
+        if self._is_running:
             return "running"
-        elif self.error_message:
+        if self._error_message:
             return "error"
-        elif self.completed_count > 0:
+        if self._completed_count > 0:
             return "success"
         return "idle"
+
+    def get_status(self) -> str:
+        """現在のステータスを取得する。
+
+        Returns:
+            str: "idle" / "running" / "success" / "error"
+        """
+        with self._lock:
+            return self._status_locked()
 
 
 # Global instances (set by setup_dependencies)

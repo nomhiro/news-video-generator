@@ -95,16 +95,22 @@ az cognitiveservices account deployment list -n <resource> -g <resource-group> -
 
 リファクタリング途中のため、以下は意図的に残している。
 
-- **`src/web/routes.py:generate_videos_task` がイベントループを占有する。**
-  `async def` なのに同期ブロッキングの `pipeline.run()` を呼ぶため、
-  生成中は Web サーバー全体が応答しない（`/status` のポーリングも止まる）。
 - **`src/web/dependencies.py` がモジュールレベルの可変グローバルを DI に使っている。**
-  テスト時に差し替えられない。進捗状態 `GenerationState` もプロセスメモリのみで、
-  再起動で消える。
+  進捗状態 `GenerationState` もプロセスメモリのみで、再起動で消え、
+  レプリカを増やすと共有されない。Phase 4 でジョブテーブルに移す。
 - **`data/news/*.json` を書き換え可能なデータストアとして使っている。** 排他制御がない。
-- **ナレーションの文字数指示が守られない。** short で「合計250〜330文字」と指示しても
-  484文字（47%超過）を返し、35秒目標が59.6秒になる実測がある。
-  `estimated_duration` もモデルの自己申告で実尺と無関係。
+
+### `generate_videos_task` を `async def` にしてはいけない
+
+`src/web/routes.py` の `generate_videos_task` は**同期関数でなければならない**。
+Starlette の `BackgroundTask` は非同期関数をイベントループ上で直接 await するため、
+同期ブロッキングの `pipeline.run()`（数分かかる）を `async def` から呼ぶと
+**生成中に Web サーバー全体が応答しなくなる**（`/status` のポーリングも止まる）。
+
+`tests/test_web_background.py` が2つの角度から見張っている。関数が同期であることの
+検査と、uvicorn を実際に起動して生成中に `/status` が返ることの検査。
+後者は TestClient では書けない（TestClient はバックグラウンドタスクを
+リクエスト処理内で完了させてしまい、この状況を再現できない）。
 
 ## 規約
 
