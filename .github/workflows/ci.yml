@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  # 週次でモデルの廃止スケジュールを見張る。
+  # コードが変わらなくてもベンダー側の廃止日は近づくため、
+  # push 契機だけでは気付けない（実際に9か月見逃した）。
+  schedule:
+    - cron: "0 0 * * 1"  # 毎週月曜 00:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        # --frozen: uv.lock から外れた解決を許さない。
+        # ロックファイルの更新漏れをここで検出する。
+        run: uv sync --frozen --all-groups
+
+      - name: Lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Test
+        # 既定の addopts が slow / live を除外するため、
+        # ffmpeg も外部APIも不要で、シークレットを一切使わない。
+        run: uv run pytest
+
+  # 廃止スケジュールだけを見張る独立したジョブ。
+  # 週次 cron でここだけが落ちれば「移行が必要」というシグナルになる。
+  model-shutdowns:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Check for models nearing shutdown
+        run: uv run pytest tests/test_model_registry.py -v

@@ -1,118 +1,159 @@
 # News Video Generator
 
-ニューストピックからYouTube Shorts / TikTok向けのショート動画を自動生成するシステム
+ニューストピックから YouTube Shorts / TikTok / 長尺向けの動画を自動生成するツール。
 
-## 🎯 概要
+台本・音声・画像・字幕を生成し、ffmpeg で1本の動画に合成する。
+YouTube と TikTok へのアップロードにも対応する。
 
-このプロジェクトは **Spec Kit** を使った仕様駆動開発（Spec-Driven Development）で実装します。
+| 工程 | 使用サービス |
+|---|---|
+| 台本生成 | Azure OpenAI（Responses API + Structured Outputs） |
+| 画像生成 | Azure OpenAI `gpt-image-2` |
+| 音声合成 | Google Cloud Text-to-Speech（Chirp 3 HD） |
+| 動画合成 | ffmpeg |
+| ニュース取得 | Google News RSS |
+| アップロード | YouTube Data API v3 / TikTok Content Posting API |
 
-### 主要機能
-1. **台本生成**: Claude APIでニュースから動画用台本を生成
-2. **音声生成**: ElevenLabs APIでナレーション音声を生成
-3. **画像生成**: fal.ai (Flux)でシーン画像を生成
-4. **動画合成**: FFmpegで音声+画像を動画に合成
+出力形式は3種類。
 
-### 出力
-- 日本語版動画 (MP4, 1080x1920, 30-60秒)
-- 英語版動画 (MP4, 1080x1920, 30-60秒)
+| 形式 | 解像度 | 長さの目安 | 用途 |
+|---|---|---|---|
+| `short` | 1080x1920 | 約35秒 | YouTube Shorts |
+| `tiktok` | 1080x1920 | 60〜90秒 | TikTok |
+| `long` | 1920x1080 | 約5分 | YouTube 通常動画 |
 
 ---
 
-## 🚀 Spec Kit で実装する手順
+## セットアップ
 
-### Step 1: プロジェクトをセットアップ
+### 1. 必要なもの
+
+- **Python 3.13 以上**
+- **[uv](https://docs.astral.sh/uv/)** — 依存管理
+- **ffmpeg / ffprobe** — PATH に入っていること
 
 ```bash
-# このフォルダをダウンロードして移動
-cd news_video_generator
-
-# Spec Kit で初期化（specs/ フォルダが既にあるのでスキップ可能）
-# uvx --from git+https://github.com/github/spec-kit.git specify init . --ai claude
+# ffmpeg のインストール
+winget install FFmpeg          # Windows
+brew install ffmpeg            # macOS
+sudo apt install ffmpeg        # Linux
 ```
 
-### Step 2: Claude Code を起動
+### 2. クラウド側の準備
+
+**Azure OpenAI（必須）**
+
+Azure AI Foundry で **2つのデプロイ**を作成する。
+
+| 用途 | モデル | 備考 |
+|---|---|---|
+| 台本生成 | `gpt-5.1` 以降 | Responses API と Structured Outputs に対応している世代が必要 |
+| 画像生成 | `gpt-image-2` | GA なのでアクセス申請は不要 |
+
+作成したデプロイ名を確認する。**デプロイ名はモデル名と一致しないことが多い**ので、
+必ず実際の名前を使うこと。
 
 ```bash
-claude
+az cognitiveservices account deployment list -n <resource> -g <resource-group> -o table
 ```
 
-### Step 3: 仕様を確認させる
+> **画像生成のクォータについて**
+> `gpt-image-2` の既定クォータは 5 images/min 程度で、これが生成速度の律速になる。
+> ショート1本で6枚、長尺で10枚以上使うため、実用するならクォータの引き上げ申請を推奨する。
 
-```
-specs/フォルダにある仕様書を読んでプロジェクトの概要を理解してください
-```
+**Google Cloud Text-to-Speech（必須）**
 
-### Step 4: 実装を開始
+Text-to-Speech API を有効にしたプロジェクトを用意し、次のいずれかで認証する。
 
-```
-/speckit.implement
-```
+- サービスアカウント JSON を作成し、パスを `GOOGLE_APPLICATION_CREDENTIALS` に設定
+- または `gcloud auth application-default login` で ADC を使う（この場合は変数を設定しない）
 
-または、タスクを1つずつ実行：
+**YouTube / TikTok アップロード（任意）**
 
-```
-specs/tasks.md のTask 1.1から順番に実装してください
-```
+- YouTube: Google Cloud Console で OAuth クライアントを作成し、`client_secrets.json` として置く
+- TikTok: TikTok Developer Portal でアプリを作成（必要スコープ: `video.publish`, `video.upload`）
 
----
+### 3. 環境変数
 
-## 📁 ドキュメント構成
-
-```
-specs/
-├── constitution.md    # プロジェクト方針・制約
-├── spec.md           # 機能仕様・ユーザーストーリー
-├── plan.md           # 技術計画・アーキテクチャ
-└── tasks.md          # 実装タスク一覧 ★ここが重要
-
-docs/
-├── REQUIREMENTS.md   # 詳細な要件定義
-├── SPECIFICATION.md  # 詳細な技術仕様
-└── SPECKIT_GUIDE.md  # Spec Kit の使い方
+```bash
+cp .env.example .env
+# .env を編集して各値を設定する
 ```
 
-### 読む順番
-1. `specs/constitution.md` - プロジェクトの基本ルール
-2. `specs/spec.md` - 何を作るか
-3. `specs/plan.md` - どう作るか
-4. `specs/tasks.md` - 具体的な実装タスク
+最低限必要なのは以下。全項目の説明は `.env.example` にある。
 
----
-
-## ⚡ クイックスタート（Spec Kit なし）
-
-Spec Kit を使わずに直接 Claude Code に指示する場合：
-
+```dotenv
+AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
+AZURE_OPENAI_API_KEY=<key>
+AZURE_OPENAI_DEPLOYMENT=<台本生成のデプロイ名>
+AZURE_OPENAI_IMAGE_DEPLOYMENT=<画像生成のデプロイ名>
+GOOGLE_CLOUD_PROJECT=<project-id>
+GOOGLE_APPLICATION_CREDENTIALS=<service-account.json のパス>
 ```
-このプロジェクトを実装してください。
 
-仕様: specs/spec.md
-技術計画: specs/plan.md
-タスク: specs/tasks.md
+### 4. 依存のインストール
 
-tasks.md のTask 1.1から順番に実装し、
-各タスクのAcceptance Criteriaを満たしてください。
+```bash
+uv sync
 ```
 
 ---
 
-## 🔧 必要な準備
+## 使い方
 
-### APIキー
-実装前に以下のアカウントを準備してください：
+### CLI で1本生成する
 
-1. **Anthropic** - Claude API（お持ちの場合はそのまま使用）
-2. **ElevenLabs** - https://elevenlabs.io/ （無料枠あり）
-3. **fal.ai** - https://fal.ai/ （無料枠あり）
+```bash
+uv run python main.py "OpenAI が新モデルを発表" -l ja -f short -v
+```
 
-### システム要件
-- Python 3.11+
-- FFmpeg（動画合成に必要）
+| オプション | 説明 |
+|---|---|
+| `-l`, `--languages` | `ja` / `en`（複数指定可。既定は `ja en`） |
+| `-f`, `--format` | `short` / `tiktok` / `long`（既定は `short`） |
+| `-o`, `--output` | 出力ディレクトリ（既定は `./output`） |
+| `-v`, `--verbose` | 詳細ログ |
+
+生成物は `output/` 以下に出る。
+
+```
+output/
+├── scripts/<timestamp>_<lang>.json   # 台本（レビュー用）
+├── images/<timestamp>/image_*.png    # 生成画像
+├── audio/<timestamp>_<lang>.mp3      # ナレーション
+└── videos/<timestamp>_<lang>.mp4     # 完成動画
+```
+
+### Web UI で使う
+
+```bash
+uv run python web_app.py
+```
+
+<http://127.0.0.1:8000> を開く。ニュースを取得して記事を選び、動画を生成して
+そのまま YouTube / TikTok にアップロードできる。
+
+> **既知の制約**: 動画生成中は Web サーバー全体が応答しなくなる。
+> 生成が終わるまで画面の操作はできない（リファクタリングで対応予定）。
 
 ---
 
-## 📚 参考ドキュメント
+## 開発
 
-- `docs/REQUIREMENTS.md` - 詳細な要件定義
-- `docs/SPECIFICATION.md` - 詳細な技術仕様
-- `docs/SPECKIT_GUIDE.md` - Spec Kit の詳しい使い方
+```bash
+uv run ruff check . && uv run ruff format .   # lint と整形
+uv run mypy                                    # 型チェック
+uv run pytest                                  # テスト
+uv run pytest -m slow                           # ffmpeg を実際に起動するテスト
+uv run pytest -m live                           # 実APIを叩く（課金あり）
+```
+
+`pytest` は既定で `slow` と `live` を除外するため、外部サービスも ffmpeg も不要で走る。
+CI（`.github/workflows/ci.yml`）もこの既定で動く。
+
+CI には週次の cron ジョブがあり、使用中の AI モデルが廃止予定に近づくと失敗する。
+使用モデルは `src/model_registry.py` に集約されている。
+
+プロジェクト固有の注意点（デプロイ名とモデル名の違い、画像の生成解像度が
+出力解像度と異なる理由、台本スキーマの制約など）は [`CLAUDE.md`](CLAUDE.md) に
+まとめてある。

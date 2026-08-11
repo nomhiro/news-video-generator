@@ -65,3 +65,23 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Type checking / linting caches
+.mypy_cache/
+.ruff_cache/
+
+# Claude Code
+# settings.json（共有設定）は追跡する。以下は個人・セッション固有のもの。
+.claude/settings.local.json
+.claude/plans/
+
+# Runtime data
+# data/news/*.json は取得したニュースと、その選択状態・生成済みフラグを
+# 書き換える実行時のデータストア。追跡するとアプリを動かすたびに差分が出る。
+# ディレクトリ構造だけ .gitkeep で保持する。
+data/news/*
+!data/news/.gitkeep
+
+# MCP server artifacts
+.playwright-mcp/
+.serena/
