@@ -17,6 +17,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from config import Config
 from src.pipeline import Pipeline
 from src.utils.logger import setup_logger
@@ -64,20 +66,22 @@ Examples:
     # Setup logger
     setup_logger("news_video_generator", verbose=args.verbose)
 
-    # Load config
-    config = Config.from_env()
-    config.output_dir = Path(args.output)
-
-    # Validate config
-    errors = config.validate()
-    if errors:
+    # Load config.
+    # pydantic-settings が必須項目の欠落や不正な値をここで検出する。
+    # 使う直前に落ちるより、起動時に落ちた方が原因が分かりやすい。
+    try:
+        config = Config.from_env()
+    except ValidationError as e:
         print("❌ 設定エラー:")
-        for error in errors:
-            print(f"   {error}")
+        for error in e.errors():
+            field = ".".join(str(loc) for loc in error["loc"]) or "(不明)"
+            print(f"   {field.upper()}: {error['msg']}")
         print("")
-        print("💡 ヒント: .envファイルにAPIキーを設定してください")
+        print("💡 ヒント: .envファイルに必要な値を設定してください")
         print("   .env.exampleを参考にしてください")
         return 1
+
+    config.output_dir = Path(args.output)
 
     # Run pipeline
     pipeline = Pipeline(config)

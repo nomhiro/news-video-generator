@@ -10,96 +10,239 @@ import re
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr, ValidationError
 
-from config import Config
+from config import DEFAULT_AI_SEARCH_QUERIES, Config
 from tests.conftest import REPO_ROOT
 
-
-def _minimal_config(**overrides: object) -> Config:
-    """検証を通る最小の設定を作る。"""
-    values: dict[str, object] = {
-        "azure_openai_endpoint": "https://example.openai.azure.com",
-        "azure_openai_api_key": "dummy-key",
-        "azure_openai_deployment": "gpt-5.1",
-        "azure_openai_image_deployment": "gpt-image-2-1",
-        "google_cloud_project": "dummy-project",
-    }
-    values.update(overrides)
-    return Config(**values)  # type: ignore[arg-type]
+REQUIRED_VALUES: dict[str, object] = {
+    "azure_openai_endpoint": "https://example.openai.azure.com",
+    "azure_openai_api_key": "dummy-key",
+    "azure_openai_deployment": "gpt-5.1",
+    "azure_openai_image_deployment": "gpt-image-2-1",
+    "google_cloud_project": "dummy-project",
+}
 
 
-def test_minimal_config_validates() -> None:
-    assert _minimal_config().validate() == []
+def _config(**overrides: object) -> Config:
+    """検証を通る最小の設定を作り、必要な項目だけ差し替える。
 
-
-@pytest.mark.parametrize(
-    ("field", "expected_message"),
-    [
-        ("azure_openai_endpoint", "AZURE_OPENAI_ENDPOINT"),
-        ("azure_openai_api_key", "AZURE_OPENAI_API_KEY"),
-        ("azure_openai_deployment", "AZURE_OPENAI_DEPLOYMENT"),
-        ("azure_openai_image_deployment", "AZURE_OPENAI_IMAGE_DEPLOYMENT"),
-        ("google_cloud_project", "GOOGLE_CLOUD_PROJECT"),
-    ],
-)
-def test_missing_required_value_is_reported(field: str, expected_message: str) -> None:
-    """必須値が欠けたら、環境変数名を含むエラーを返すこと。"""
-    errors = _minimal_config(**{field: ""}).validate()
-    assert any(expected_message in e for e in errors), errors
-
-
-def test_image_deployment_has_no_default() -> None:
-    """画像デプロイ名に既定値を置かないこと。
-
-    デプロイ名はモデル名と一致しないことが多く（gpt-image-2 の
-    デプロイ名が "gpt-image-2-1" だった）、推測した既定値は
-    unknown_model という分かりにくい 400 を招く。
+    `_env_file=None` で `.env` を読ませない。読ませると開発者の
+    ローカル設定でテスト結果が変わる。
     """
-    from dataclasses import fields
-
-    field = next(f for f in fields(Config) if f.name == "azure_openai_image_deployment")
-    assert field.default == ""
-
-
-def test_rejects_zero_concurrency() -> None:
-    errors = _minimal_config(image_max_concurrency=0).validate()
-    assert any("IMAGE_MAX_CONCURRENCY" in e for e in errors)
+    values = {**REQUIRED_VALUES, **overrides}
+    # _env_file は pydantic-settings が実行時に解釈する引数で、
+    # 生成された __init__ の型には現れないため型検査を抑制する。
+    return Config(_env_file=None, **values)  # type: ignore[arg-type,call-arg]
 
 
-def test_tiktok_is_optional() -> None:
-    """TikTok 未設定でも設定検証は通ること（任意機能なので）。"""
-    config = _minimal_config()
-    assert config.validate() == []
-    assert config.is_tiktok_configured() is False
+def test_minimal_config_is_valid() -> None:
+    config = _config()
+    assert config.azure_openai_deployment == "gpt-5.1"
 
 
-def test_tiktok_configured_requires_both_values() -> None:
-    assert _minimal_config(tiktok_client_key="k").is_tiktok_configured() is False
-    assert _minimal_config(tiktok_client_secret="s").is_tiktok_configured() is False
+@pytest.mark.parametrize("field", sorted(REQUIRED_VALUES))
+def test_required_field_missing_raises(field: str) -> None:
+    """必須項目が欠けたら起動時に失敗すること。
+
+    使う直前に None を踏むより、起動時に落ちた方が原因が分かりやすい。
+    """
+    values = {k: v for k, v in REQUIRED_VALUES.items() if k != field}
+    with pytest.raises(ValidationError) as exc_info:
+        Config(_env_file=None, **values)  # type: ignore[arg-type,call-arg]
+    assert field in str(exc_info.value)
+
+
+# --------------------------------------------------------------------------
+# シークレットの取り扱い
+# --------------------------------------------------------------------------
+
+
+def test_api_key_is_a_secret() -> None:
+    """APIキーが SecretStr であること。"""
+    assert isinstance(_config().azure_openai_api_key, SecretStr)
+
+
+def test_secrets_do_not_leak_into_repr() -> None:
+    """設定を文字列化してもキーの平文が出ないこと。
+
+    設定オブジェクトは例外やログに丸ごと出力されることがあるため、
+    ここが漏れると実害がある。
+    """
+    config = _config(
+        azure_openai_api_key="super-secret-key",
+        tiktok_client_secret="tiktok-secret-value",
+    )
+    for rendered in (repr(config), str(config), str(config.model_dump())):
+        assert "super-secret-key" not in rendered
+        assert "tiktok-secret-value" not in rendered
+
+
+def test_secret_value_is_retrievable() -> None:
+    """必要な場所では平文を取り出せること。"""
+    config = _config(azure_openai_api_key="the-key")
+    assert config.azure_openai_api_key.get_secret_value() == "the-key"
+
+
+# --------------------------------------------------------------------------
+# 検証ルール
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("endpoint", ["example.openai.azure.com", "my-resource", "ftp://x"])
+def test_endpoint_must_be_a_url(endpoint: str) -> None:
+    """リソース名だけを入れる間違いを起動時に弾くこと。"""
+    with pytest.raises(ValidationError, match="http"):
+        _config(azure_openai_endpoint=endpoint)
+
+
+def test_endpoint_trailing_slash_is_normalized() -> None:
+    """末尾のスラッシュを落とすこと。
+
+    落とさないと base_url が `.../openai/v1` を二重に持つ形になる。
+    """
     assert (
-        _minimal_config(tiktok_client_key="k", tiktok_client_secret="s").is_tiktok_configured()
-        is True
+        _config(azure_openai_endpoint="https://example.openai.azure.com/").azure_openai_endpoint
+        == "https://example.openai.azure.com"
     )
 
 
+@pytest.mark.parametrize("value", [0, -1, 21])
+def test_concurrency_out_of_range_is_rejected(value: int) -> None:
+    with pytest.raises(ValidationError):
+        _config(image_max_concurrency=value)
+
+
+@pytest.mark.parametrize("privacy", ["public", "private", "unlisted"])
+def test_youtube_privacy_accepts_api_values(privacy: str) -> None:
+    assert _config(youtube_default_privacy=privacy).youtube_default_privacy == privacy
+
+
+@pytest.mark.parametrize("privacy", ["PUBLIC", "hidden", "friends", ""])
+def test_youtube_privacy_rejects_other_values(privacy: str) -> None:
+    """不正な値はアップロード時ではなく起動時に弾くこと。
+
+    アップロード時に落ちると、そこまでの生成（画像6枚＋音声）が無駄になる。
+    """
+    with pytest.raises(ValidationError, match="YOUTUBE_DEFAULT_PRIVACY"):
+        _config(youtube_default_privacy=privacy)
+
+
+@pytest.mark.parametrize(
+    "privacy",
+    ["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"],
+)
+def test_tiktok_privacy_accepts_api_values(privacy: str) -> None:
+    assert _config(tiktok_default_privacy=privacy).tiktok_default_privacy == privacy
+
+
+@pytest.mark.parametrize("privacy", ["PRIVATE", "public", "everyone"])
+def test_tiktok_privacy_rejects_other_values(privacy: str) -> None:
+    with pytest.raises(ValidationError, match="TIKTOK_DEFAULT_PRIVACY"):
+        _config(tiktok_default_privacy=privacy)
+
+
+def test_web_port_out_of_range_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _config(web_port=70000)
+
+
+# --------------------------------------------------------------------------
+# TikTok は任意機能
+# --------------------------------------------------------------------------
+
+
+def test_tiktok_is_optional() -> None:
+    config = _config()
+    assert config.is_tiktok_configured() is False
+
+
+def test_tiktok_needs_both_values() -> None:
+    assert _config(tiktok_client_key="k").is_tiktok_configured() is False
+    assert _config(tiktok_client_secret="s").is_tiktok_configured() is False
+    assert _config(tiktok_client_key="k", tiktok_client_secret="s").is_tiktok_configured() is True
+
+
+# --------------------------------------------------------------------------
+# AI検索クエリのパース
+# --------------------------------------------------------------------------
+
+
+def test_ai_search_queries_have_a_default() -> None:
+    assert _config().ai_search_queries == list(DEFAULT_AI_SEARCH_QUERIES)
+
+
+def test_ai_search_queries_parse_from_comma_separated_string() -> None:
+    """環境変数にはカンマ区切りで書けること。
+
+    pydantic は list 型を JSON として解釈しようとするため、
+    素直な書き方を通すには変換が必要になる。
+    """
+    config = _config(ai_search_queries=" 生成AI , ChatGPT ,, Claude ")
+    assert config.ai_search_queries == ["生成AI", "ChatGPT", "Claude"]
+
+
+def test_empty_ai_search_queries_falls_back_to_default() -> None:
+    assert _config(ai_search_queries="").ai_search_queries == list(DEFAULT_AI_SEARCH_QUERIES)
+
+
+def test_ai_search_queries_accept_a_list() -> None:
+    assert _config(ai_search_queries=["a", "b"]).ai_search_queries == ["a", "b"]
+
+
+# --------------------------------------------------------------------------
+# 呼び出し側の名前に合わせるプロパティ
+# --------------------------------------------------------------------------
+
+
+def test_voice_name_properties_mirror_the_env_fields() -> None:
+    config = _config(google_tts_voice_ja="ja-JP-X", google_tts_voice_en="en-US-Y")
+    assert config.voice_name_ja == "ja-JP-X"
+    assert config.voice_name_en == "en-US-Y"
+
+
+def test_google_credentials_path_defaults_to_none() -> None:
+    """未設定なら None（ADC を使う）。"""
+    assert _config().google_credentials_path is None
+
+
+def test_google_credentials_path_mirrors_the_env_field() -> None:
+    config = _config(google_application_credentials="/path/to/sa.json")
+    assert config.google_credentials_path == "/path/to/sa.json"
+
+
+# --------------------------------------------------------------------------
+# ディレクトリ作成
+# --------------------------------------------------------------------------
+
+
 def test_ensure_output_dirs_creates_all_subdirs(tmp_path: Path) -> None:
-    config = _minimal_config(output_dir=tmp_path / "out")
+    config = _config(output_dir=tmp_path / "out")
     config.ensure_output_dirs()
     for subdir in ("audio", "images", "videos", "scripts"):
         assert (tmp_path / "out" / subdir).is_dir()
 
 
-def test_ai_search_queries_have_a_default() -> None:
-    assert _minimal_config().ai_search_queries
+def test_ensure_news_dirs_creates_the_directory(tmp_path: Path) -> None:
+    config = _config(news_data_dir=tmp_path / "news")
+    config.ensure_news_dirs()
+    assert (tmp_path / "news").is_dir()
 
 
-def test_ai_search_queries_parse_from_comma_separated_string() -> None:
-    parsed = Config._parse_ai_search_queries(" 生成AI , ChatGPT ,, Claude ")
-    assert parsed == ["生成AI", "ChatGPT", "Claude"]
+# --------------------------------------------------------------------------
+# 環境変数から読めること
+# --------------------------------------------------------------------------
 
 
-def test_ai_search_queries_fall_back_when_empty() -> None:
-    assert Config._parse_ai_search_queries("") == _minimal_config().ai_search_queries
+def test_reads_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """フィールド名の大文字がそのまま環境変数名になること。"""
+    for field, value in REQUIRED_VALUES.items():
+        monkeypatch.setenv(field.upper(), str(value))
+    monkeypatch.setenv("IMAGE_MAX_CONCURRENCY", "7")
+
+    config = Config(_env_file=None)  # type: ignore[call-arg]
+    assert config.azure_openai_deployment == "gpt-5.1"
+    assert config.image_max_concurrency == 7
 
 
 # --------------------------------------------------------------------------
@@ -112,25 +255,25 @@ def _documented_env_keys() -> set[str]:
     return set(re.findall(r"^([A-Z][A-Z0-9_]*)=", text, flags=re.MULTILINE))
 
 
-def _env_keys_read_by_config() -> set[str]:
-    text = (REPO_ROOT / "config.py").read_text(encoding="utf-8")
-    return set(re.findall(r'os\.getenv\(\s*"([A-Z][A-Z0-9_]*)"', text))
+def _settings_env_keys() -> set[str]:
+    """Config が読む環境変数名（フィールド名の大文字）。"""
+    return {name.upper() for name in Config.model_fields}
 
 
-def test_every_env_var_config_reads_is_documented() -> None:
-    """config.py が読む環境変数がすべて .env.example に載っていること。
+def test_every_setting_is_documented() -> None:
+    """Config の全項目が .env.example に載っていること。
 
     載っていないと、新しい設定項目の存在に誰も気付けない。
     """
-    undocumented = _env_keys_read_by_config() - _documented_env_keys()
-    assert not undocumented, f".env.example に記載が無い環境変数があります: {sorted(undocumented)}"
+    undocumented = _settings_env_keys() - _documented_env_keys()
+    assert not undocumented, f".env.example に記載が無い設定があります: {sorted(undocumented)}"
 
 
-def test_env_example_documents_no_unused_keys() -> None:
-    """.env.example に、コードが読まないキーが残っていないこと。
+def test_env_example_documents_no_unknown_keys() -> None:
+    """.env.example に、Config が読まないキーが残っていないこと。
 
     実装が使っていない ANTHROPIC_API_KEY / ELEVENLABS_* / FAL_KEY が
     「必要」と書かれ続けていた再発を防ぐ。
     """
-    stale = _documented_env_keys() - _env_keys_read_by_config()
-    assert not stale, f".env.example にコードが読まないキーが残っています: {sorted(stale)}"
+    stale = _documented_env_keys() - _settings_env_keys()
+    assert not stale, f".env.example に Config が読まないキーが残っています: {sorted(stale)}"

@@ -41,9 +41,10 @@ class Pipeline:
             config: アプリケーション設定
         """
         self.config = config
+        api_key = config.azure_openai_api_key.get_secret_value()
         self.script_generator = ScriptGenerator(
             config.azure_openai_endpoint,
-            config.azure_openai_api_key,
+            api_key,
             config.azure_openai_deployment,
         )
         self.voice_generator = VoiceGenerator(
@@ -53,7 +54,7 @@ class Pipeline:
         )
         self.image_generator = ImageGenerator(
             endpoint=config.azure_openai_endpoint,
-            api_key=config.azure_openai_api_key,
+            api_key=api_key,
             deployment=config.azure_openai_image_deployment,
             max_concurrency=config.image_max_concurrency,
         )

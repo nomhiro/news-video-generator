@@ -198,8 +198,8 @@ def setup_dependencies(app: FastAPI, config: Config) -> None:
 
     # Initialize TikTok uploader
     _tiktok_uploader = TikTokUploader(
-        client_key=config.tiktok_client_key,
-        client_secret=config.tiktok_client_secret,
+        client_key=config.tiktok_client_key.get_secret_value(),
+        client_secret=config.tiktok_client_secret.get_secret_value(),
         token_file=config.tiktok_token_file,
         redirect_uri=config.tiktok_redirect_uri,
     )
