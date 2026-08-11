@@ -3,9 +3,12 @@
 # ============================================================
 
 # Core Dependencies
-openai>=1.0.0              # OpenAI/Azure OpenAI API client
+# openai は台本生成(Responses API)と画像生成(gpt-image-2)の両方で使う。
+# responses.parse / images.generate を使うため 2.x が必須。
+openai>=2.15.0             # Azure OpenAI API client (台本生成 + 画像生成)
 requests>=2.31.0           # HTTP requests for API calls
 python-dotenv>=1.0.0       # Environment variable management
+tenacity>=9.0.0            # Retry with exponential backoff (レートリミット対策)
 
 # Google Cloud Text-to-Speech (Chirp 3 HD Voices)
 google-cloud-texttospeech>=2.16.0
@@ -15,8 +18,9 @@ pydub>=0.25.0              # Audio segment manipulation
 mutagen>=1.47.0            # Audio metadata (duration) extraction
 audioop-lts>=0.2.0         # Python 3.13+ compatibility (audioop removed from stdlib)
 
-# Google Gemini 3 Pro Image (画像生成 - Nano Banana Pro)
-google-genai>=1.10.0
+# Image processing
+# 画像生成は Azure OpenAI (gpt-image-2) を openai SDK 経由で使うため
+# google-genai は不要。Pillow は生成画像のサイズ検証などで使用。
 Pillow>=10.0.0
 
 # Web Framework (FastAPI + HTMX)

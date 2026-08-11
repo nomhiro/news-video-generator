@@ -51,7 +51,10 @@ class Pipeline:
             credentials_path=config.google_credentials_path,
         )
         self.image_generator = ImageGenerator(
-            api_key=config.gemini_api_key,
+            endpoint=config.azure_openai_endpoint,
+            api_key=config.azure_openai_api_key,
+            deployment=config.azure_openai_image_deployment,
+            max_concurrency=config.image_max_concurrency,
         )
         self.video_composer = VideoComposer()
 

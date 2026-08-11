@@ -14,11 +14,12 @@ class Config:
     Attributes:
         azure_openai_endpoint: Azure OpenAI endpoint URL
         azure_openai_api_key: Azure OpenAI API key
-        azure_openai_deployment: Azure OpenAI deployment name (model)
+        azure_openai_deployment: 台本生成モデルのデプロイ名
+        azure_openai_image_deployment: 画像生成モデルのデプロイ名 (gpt-image-2)
+        image_max_concurrency: 画像生成の同時リクエスト数
         google_credentials_path: Google Cloud認証情報JSONファイルのパス (optional)
         google_cloud_project: Google Cloud project ID (for TTS)
         google_cloud_location: Google Cloud region (default: us-central1)
-        gemini_api_key: Gemini API key (for Image Generation - Gemini 3 Pro Image)
         voice_name_ja: Japanese voice name for Google Cloud TTS
         voice_name_en: English voice name for Google Cloud TTS
         output_dir: Output directory path
@@ -28,10 +29,22 @@ class Config:
         news_fetch_limit: Max articles per category
     """
 
-    # Azure OpenAI Settings
+    # Azure OpenAI Settings (台本生成)
     azure_openai_endpoint: str
     azure_openai_api_key: str
     azure_openai_deployment: str
+
+    # Azure OpenAI Settings (画像生成 - gpt-image-2)
+    # 台本生成と同じエンドポイント・APIキーを使い、デプロイ名だけが異なる。
+    # 既定値は置かない。デプロイ名はモデル名と一致しないことが多く
+    # (例: モデル gpt-image-2 のデプロイ名が "gpt-image-2-1")、
+    # 推測した既定値は unknown_model という分かりにくい 400 を招く。
+    azure_openai_image_deployment: str = ""
+
+    # 画像生成の同時リクエスト数。
+    # gpt-image-2 の既定クォータは 5 images/min per deployment のため、
+    # 引き上げ申請が通るまでは小さく保つ。
+    image_max_concurrency: int = 3
 
     # Google Cloud TTS Settings
     google_credentials_path: Optional[str] = None  # Uses ADC if not set
@@ -39,9 +52,6 @@ class Config:
     # Google Cloud Project Settings (for TTS)
     google_cloud_project: str = ""
     google_cloud_location: str = "us-central1"
-
-    # Gemini API Settings (for Image Generation - Gemini 3 Pro Image)
-    gemini_api_key: str = ""
 
     # Voice Settings (Google Cloud TTS Chirp 3 HD)
     voice_name_ja: str = "ja-JP-Chirp3-HD-Zephyr"
@@ -126,11 +136,16 @@ class Config:
         return cls(
             azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
             azure_openai_api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
-            azure_openai_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
+            # 既定値は置かない。Azure のデプロイ名は環境固有であり、
+            # コード側の既定値は「動くはず」という誤解を生む。
+            azure_openai_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", ""),
+            azure_openai_image_deployment=os.getenv(
+                "AZURE_OPENAI_IMAGE_DEPLOYMENT", ""
+            ),
+            image_max_concurrency=int(os.getenv("IMAGE_MAX_CONCURRENCY", "3")),
             google_credentials_path=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
             google_cloud_project=os.getenv("GOOGLE_CLOUD_PROJECT", ""),
             google_cloud_location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
             voice_name_ja=os.getenv(
                 "GOOGLE_TTS_VOICE_JA", "ja-JP-Chirp3-HD-Zephyr"
             ),
@@ -174,12 +189,20 @@ class Config:
         if not self.azure_openai_api_key:
             errors.append("AZURE_OPENAI_API_KEY が設定されていません")
         if not self.azure_openai_deployment:
-            errors.append("AZURE_OPENAI_DEPLOYMENT が設定されていません")
+            errors.append(
+                "AZURE_OPENAI_DEPLOYMENT が設定されていません "
+                "(台本生成モデルのデプロイ名。例: gpt-5.1)"
+            )
+        if not self.azure_openai_image_deployment:
+            errors.append(
+                "AZURE_OPENAI_IMAGE_DEPLOYMENT が設定されていません "
+                "(画像生成モデルのデプロイ名。例: gpt-image-2)"
+            )
+        if self.image_max_concurrency < 1:
+            errors.append("IMAGE_MAX_CONCURRENCY は1以上でなければなりません")
         # Note: google_credentials_path is optional (uses ADC if not set)
         if not self.google_cloud_project:
             errors.append("GOOGLE_CLOUD_PROJECT が設定されていません")
-        if not self.gemini_api_key:
-            errors.append("GEMINI_API_KEY が設定されていません")
         return errors
 
     def is_tiktok_configured(self) -> bool:
