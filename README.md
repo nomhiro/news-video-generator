@@ -151,6 +151,18 @@ uv run pytest -m live                           # 実APIを叩く（課金あり
 `pytest` は既定で `slow` と `live` を除外するため、外部サービスも ffmpeg も不要で走る。
 CI（`.github/workflows/ci.yml`）もこの既定で動く。
 
+### CSS
+
+テンプレートに新しい Tailwind クラスを足したときだけ、CSS を再生成する。
+
+```bash
+npm install       # 初回のみ
+npm run build:css
+```
+
+`static/css/app.css` は生成物だがコミットしてある。**アプリの実行に Node は不要**。
+CDN を使わない理由は [`CLAUDE.md`](CLAUDE.md) に書いてある。
+
 CI には週次の cron ジョブがあり、使用中の AI モデルが廃止予定に近づくと失敗する。
 使用モデルは `src/model_registry.py` に集約されている。
 

@@ -85,3 +85,9 @@ data/news/*
 # MCP server artifacts
 .playwright-mcp/
 .serena/
+*.png
+!static/**/*.png
+
+# Node (CSS のビルドにのみ使う)
+# 生成物 static/css/app.css は追跡する。アプリの実行に Node は不要。
+node_modules/

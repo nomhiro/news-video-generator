@@ -15,6 +15,8 @@ uv run mypy                                       # 型チェック
 uv run pytest                                     # テスト（slow/live は既定で除外）
 uv run pytest -m slow                             # ffmpeg を実際に起動するテスト
 uv run pytest -m live                             # 実APIを叩く（課金あり）
+
+npm run build:css                                 # テンプレートのクラスを変えたとき
 ```
 
 `-f` は `short`（縦・約35秒）/ `tiktok`（縦・60〜90秒）/ `long`（横・約5分）。
@@ -85,6 +87,18 @@ az cognitiveservices account deployment list -n <resource> -g <resource-group> -
 
 `segment_narrations` / `image_prompts` / `text_overlays` の要素数が一致することは
 音声のタイミング同期と動画合成の前提なので、バリデータで強制している。
+
+### テンプレートに Tailwind クラスを足したら CSS を再生成する
+
+`static/css/app.css` は Tailwind v4 の生成物で、**テンプレートで実際に使われている
+クラスだけ**が入っている。新しいユーティリティクラスを使ったら
+`npm run build:css` を実行しないと、そのスタイルは効かない。
+
+CDN（`cdn.tailwindcss.com`）は使わない。公式が本番非推奨としており、
+ブラウザ側で JIT コンパイルするため初回描画が遅く、オフラインで動かない。
+HTMX も `static/vendor/htmx.min.js` にベンダリングしてある（2.0.4）。
+
+Node は CSS のビルドにだけ必要で、アプリの実行には不要。
 
 ### AIモデルを変えたら登録簿を更新する
 
