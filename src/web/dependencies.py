@@ -1,9 +1,11 @@
 """FastAPI dependency injection setup."""
 
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
 
 from config import Config
 from src.news.aggregator import NewsAggregator
@@ -155,130 +157,139 @@ class GenerationState:
             return self._status_locked()
 
 
-# Global instances (set by setup_dependencies)
-#
-# 設計上の負債: モジュールレベルの可変グローバルを DI として使っているため、
-# テスト時に差し替えられず、起動前は None という状態を型で表現するしかない。
-# Phase 5 で FastAPI の lifespan + app.state による DI に置き換える。
-# それまでは None を許す型にして、getter 側で未初期化を検出する。
-_config: Config | None = None
-_aggregator: NewsAggregator | None = None
-_pipeline: Pipeline | None = None
-_generation_state: GenerationState = GenerationState()
-_youtube_uploader: YouTubeUploader | None = None
-_tiktok_uploader: TikTokUploader | None = None
+@dataclass
+class AppContext:
+    """アプリの寿命に紐づく依存の集まり。
+
+    以前はモジュールレベルの可変グローバルに入れていた。差し替えた理由:
+
+    - テストで差し替えられなかった。`monkeypatch.setattr` でモジュール属性を
+      書き換える必要があり、FastAPI が用意している
+      `app.dependency_overrides` が使えなかった
+    - 起動前は全てが None という状態を型で表現するしかなく、
+      getter ごとに未初期化チェックが必要だった
+    - 複数のアプリインスタンスを同時に持てなかった（テストで実際に困る）
+
+    今は `lifespan` で組み立てて `app.state` に置く。寿命がアプリと
+    一致し、テストは `dependency_overrides` で差し替えられる。
+
+    Attributes:
+        config: アプリケーション設定
+        aggregator: ニュース取得・管理
+        pipeline: 動画生成パイプライン
+        generation_state: 生成の進捗
+        youtube_uploader: YouTube アップローダ
+        tiktok_uploader: TikTok アップローダ
+    """
+
+    config: Config
+    aggregator: NewsAggregator
+    pipeline: Pipeline
+    generation_state: GenerationState
+    youtube_uploader: YouTubeUploader
+    tiktok_uploader: TikTokUploader
+
+    @classmethod
+    def build(cls, config: Config) -> "AppContext":
+        """設定から依存を組み立てる。
+
+        Args:
+            config: アプリケーション設定
+
+        Returns:
+            AppContext: 組み立て済みの依存
+        """
+        config.ensure_news_dirs()
+        config.ensure_output_dirs()
+
+        return cls(
+            config=config,
+            aggregator=NewsAggregator(config.news_data_dir),
+            pipeline=Pipeline(config),
+            generation_state=GenerationState(),
+            youtube_uploader=YouTubeUploader(
+                client_secrets_file=config.youtube_client_secrets_file,
+                token_file=config.youtube_token_file,
+            ),
+            tiktok_uploader=TikTokUploader(
+                client_key=config.tiktok_client_key.get_secret_value(),
+                client_secret=config.tiktok_client_secret.get_secret_value(),
+                token_file=config.tiktok_token_file,
+                redirect_uri=config.tiktok_redirect_uri,
+            ),
+        )
 
 
-def setup_dependencies(app: FastAPI, config: Config) -> None:
-    """依存関係を設定する。
+def get_context(request: Request) -> AppContext:
+    """リクエストからアプリの依存を取り出す。
+
+    Args:
+        request: FastAPI リクエスト
+
+    Returns:
+        AppContext: lifespan が組み立てた依存
+
+    Raises:
+        RuntimeError: lifespan を通らずにアプリが動いている場合
+    """
+    context: AppContext | None = getattr(request.app.state, "context", None)
+    if context is None:
+        # TestClient を `with` 無しで使うと lifespan が走らない
+        raise RuntimeError(
+            "AppContext が未初期化です。lifespan が実行されていません"
+            "（TestClient は `with TestClient(app) as client:` で使う）"
+        )
+    return context
+
+
+# 個別の依存を取り出す関数。
+# ルート側は `Depends(get_aggregator)` のように書けるので、
+# 何に依存しているかがシグネチャから読める。
+
+
+def get_config(context: AppContext = Depends(get_context)) -> Config:
+    """設定を取得する。"""
+    return context.config
+
+
+def get_aggregator(context: AppContext = Depends(get_context)) -> NewsAggregator:
+    """NewsAggregatorを取得する。"""
+    return context.aggregator
+
+
+def get_pipeline(context: AppContext = Depends(get_context)) -> Pipeline:
+    """Pipelineを取得する。"""
+    return context.pipeline
+
+
+def get_generation_state(context: AppContext = Depends(get_context)) -> GenerationState:
+    """GenerationStateを取得する。"""
+    return context.generation_state
+
+
+def get_youtube_uploader(context: AppContext = Depends(get_context)) -> YouTubeUploader:
+    """YouTubeUploaderを取得する。"""
+    return context.youtube_uploader
+
+
+def get_tiktok_uploader(context: AppContext = Depends(get_context)) -> TikTokUploader:
+    """TikTokUploaderを取得する。"""
+    return context.tiktok_uploader
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """アプリの起動時に依存を組み立て、終了時に片付ける。
 
     Args:
         app: FastAPIアプリケーション
-        config: アプリケーション設定
+
+    Yields:
+        None
     """
-    global _config, _aggregator, _pipeline, _youtube_uploader, _tiktok_uploader
-
-    _config = config
-
-    # Ensure directories exist
-    config.ensure_news_dirs()
-    config.ensure_output_dirs()
-
-    # Initialize aggregator
-    _aggregator = NewsAggregator(config.news_data_dir)
-
-    # Initialize pipeline
-    _pipeline = Pipeline(config)
-
-    # Initialize YouTube uploader
-    _youtube_uploader = YouTubeUploader(
-        client_secrets_file=config.youtube_client_secrets_file,
-        token_file=config.youtube_token_file,
-    )
-
-    # Initialize TikTok uploader
-    _tiktok_uploader = TikTokUploader(
-        client_key=config.tiktok_client_key.get_secret_value(),
-        client_secret=config.tiktok_client_secret.get_secret_value(),
-        token_file=config.tiktok_token_file,
-        redirect_uri=config.tiktok_redirect_uri,
-    )
-
-
-def get_config() -> Config:
-    """設定を取得する。
-
-    Returns:
-        Config: アプリケーション設定
-
-    Raises:
-        RuntimeError: setup_dependencies が呼ばれていない場合
-    """
-    if _config is None:
-        raise RuntimeError("setup_dependencies() が呼ばれていません")
-    return _config
-
-
-def get_aggregator() -> NewsAggregator:
-    """NewsAggregatorを取得する。
-
-    Returns:
-        NewsAggregator: ニュース取得・管理インスタンス
-
-    Raises:
-        RuntimeError: setup_dependencies が呼ばれていない場合
-    """
-    if _aggregator is None:
-        raise RuntimeError("setup_dependencies() が呼ばれていません")
-    return _aggregator
-
-
-def get_pipeline() -> Pipeline:
-    """Pipelineを取得する。
-
-    Returns:
-        Pipeline: 動画生成パイプラインインスタンス
-
-    Raises:
-        RuntimeError: setup_dependencies が呼ばれていない場合
-    """
-    if _pipeline is None:
-        raise RuntimeError("setup_dependencies() が呼ばれていません")
-    return _pipeline
-
-
-def get_generation_state() -> GenerationState:
-    """GenerationStateを取得する。
-
-    Returns:
-        GenerationState: 動画生成状態インスタンス
-    """
-    return _generation_state
-
-
-def get_youtube_uploader() -> YouTubeUploader:
-    """YouTubeUploaderを取得する。
-
-    Returns:
-        YouTubeUploader: YouTubeアップローダーインスタンス
-
-    Raises:
-        RuntimeError: setup_dependencies が呼ばれていない場合
-    """
-    if _youtube_uploader is None:
-        raise RuntimeError("setup_dependencies() が呼ばれていません")
-    return _youtube_uploader
-
-
-def get_tiktok_uploader() -> TikTokUploader:
-    """TikTokUploaderを取得する。
-
-    Returns:
-        TikTokUploader: TikTokアップローダーインスタンス
-
-    Raises:
-        RuntimeError: setup_dependencies が呼ばれていない場合
-    """
-    if _tiktok_uploader is None:
-        raise RuntimeError("setup_dependencies() が呼ばれていません")
-    return _tiktok_uploader
+    app.state.context = AppContext.build(Config.from_env())
+    try:
+        yield
+    finally:
+        app.state.context.aggregator.close()
+        app.state.context = None

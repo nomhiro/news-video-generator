@@ -120,10 +120,22 @@ Node は CSS のビルドにだけ必要で、アプリの実行には不要。
 
 リファクタリング途中のため、以下は意図的に残している。
 
-- **`src/web/dependencies.py` がモジュールレベルの可変グローバルを DI に使っている。**
-  進捗状態 `GenerationState` もプロセスメモリのみで、再起動で消え、
-  レプリカを増やすと共有されない。Phase 4 でジョブテーブルに移す。
+- **進捗状態 `GenerationState` がプロセスメモリにしかない。**
+  再起動で消え、レプリカを増やすと共有されない。Phase 4 でジョブテーブルに移す。
 - **`data/news/*.json` を書き換え可能なデータストアとして使っている。** 排他制御がない。
+
+### Web の依存は lifespan で組み立てる
+
+`src/web/dependencies.py` の `AppContext` が依存をまとめ、`lifespan` が
+起動時に組み立てて `app.state.context` に置く。ルートは
+`Depends(get_aggregator)` のように受け取る。
+
+テストでは `app.dependency_overrides[get_pipeline] = ...` で差し替える。
+以前はモジュールのグローバル変数を monkeypatch で書き換えるしかなかった。
+
+`TestClient` は `with TestClient(app) as client:` の形で使う。
+`with` を使わないと lifespan が走らず、依存が未初期化のまま
+`RuntimeError` になる。
 
 ### `generate_videos_task` を `async def` にしてはいけない
 

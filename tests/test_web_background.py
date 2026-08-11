@@ -47,7 +47,7 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def test_real_server_answers_while_generation_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_real_server_answers_while_generation_blocks() -> None:
     """実際のサーバーで、生成中に /status が応答すること。
 
     **TestClient では検証できない。** TestClient はバックグラウンドタスクを
@@ -61,7 +61,7 @@ def test_real_server_answers_while_generation_blocks(monkeypatch: pytest.MonkeyP
     from fastapi import FastAPI
 
     from src.models.news import NewsArticle, NewsCategory
-    from src.web import dependencies
+    from src.web.dependencies import get_aggregator, get_generation_state, get_pipeline
 
     article = NewsArticle(
         id="test-1",
@@ -97,12 +97,14 @@ def test_real_server_answers_while_generation_blocks(monkeypatch: pytest.MonkeyP
             return {"status": "success"}
 
     state = GenerationState()
-    monkeypatch.setattr(dependencies, "_aggregator", FakeAggregator())
-    monkeypatch.setattr(dependencies, "_pipeline", BlockingPipeline())
-    monkeypatch.setattr(dependencies, "_generation_state", state)
 
     app = FastAPI()
     app.include_router(routes.router)
+    # 依存は FastAPI の仕組みで差し替える。
+    # 以前はモジュールのグローバル変数を monkeypatch で書き換えるしかなかった。
+    app.dependency_overrides[get_aggregator] = lambda: FakeAggregator()
+    app.dependency_overrides[get_pipeline] = lambda: BlockingPipeline()
+    app.dependency_overrides[get_generation_state] = lambda: state
 
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))

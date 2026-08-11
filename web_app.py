@@ -16,8 +16,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from config import Config
-from src.web.dependencies import setup_dependencies
+from src.web.dependencies import lifespan
 from src.web.routes import router
 
 
@@ -31,6 +30,9 @@ def create_app() -> FastAPI:
         title="News Video Generator",
         description="HTMX + Tailwind CSSを使用したニュース取得・動画生成システム",
         version="1.0.0",
+        # 依存の組み立ては lifespan が行い、app.state に置く。
+        # 設定の読み込みもここで起きるため、値が足りなければ起動時に落ちる。
+        lifespan=lifespan,
     )
 
     # Mount static files
@@ -40,10 +42,6 @@ def create_app() -> FastAPI:
 
     # Include routes
     app.include_router(router)
-
-    # Setup dependencies
-    config = Config.from_env()
-    setup_dependencies(app, config)
 
     return app
 

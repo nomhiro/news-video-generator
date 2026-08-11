@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+from config import Config
 from src.models.news import NewsArticle, NewsCategory
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
@@ -84,7 +85,11 @@ async def get_news_by_category(
 
 
 @router.post("/news/fetch", response_class=HTMLResponse)
-async def fetch_news(request: Request, aggregator: NewsAggregator = Depends(get_aggregator)):
+async def fetch_news(
+    request: Request,
+    aggregator: NewsAggregator = Depends(get_aggregator),
+    config: Config = Depends(get_config),
+):
     """最新ニュースを取得する（HTMXパーシャル）。
 
     Args:
@@ -94,8 +99,6 @@ async def fetch_news(request: Request, aggregator: NewsAggregator = Depends(get_
     Returns:
         HTMLResponse: カテゴリタブパーシャルHTML
     """
-    config = get_config()
-
     # 通常カテゴリのニュースを取得
     await aggregator.fetch_and_store()
 
@@ -486,7 +489,7 @@ async def youtube_authenticate(
 
 
 @router.get("/videos", response_class=HTMLResponse)
-async def list_videos(request: Request):
+async def list_videos(request: Request, config: Config = Depends(get_config)):
     """生成済み動画一覧を表示する。
 
     Args:
@@ -496,10 +499,6 @@ async def list_videos(request: Request):
         HTMLResponse: 動画一覧パーシャルHTML
     """
     import json
-
-    from src.web.dependencies import get_config
-
-    config = get_config()
 
     videos_dir = config.output_dir / "videos"
     scripts_dir = config.output_dir / "scripts"
@@ -555,6 +554,7 @@ async def youtube_upload(
     title: str = Form(...),
     description: str = Form(""),
     uploader: YouTubeUploader = Depends(get_youtube_uploader),
+    config: Config = Depends(get_config),
 ):
     """動画をYouTubeにアップロードする。
 
@@ -569,10 +569,6 @@ async def youtube_upload(
     Returns:
         HTMLResponse: アップロード結果パーシャルHTML
     """
-    from src.web.dependencies import get_config
-
-    config = get_config()
-
     # Verify file exists
     video_file = Path(video_path)
     if not video_file.exists():
@@ -639,7 +635,9 @@ async def youtube_upload(
 
 @router.get("/tiktok/status", response_class=HTMLResponse)
 async def tiktok_auth_status(
-    request: Request, uploader: TikTokUploader = Depends(get_tiktok_uploader)
+    request: Request,
+    uploader: TikTokUploader = Depends(get_tiktok_uploader),
+    config: Config = Depends(get_config),
 ):
     """TikTok認証状態を取得する。
 
@@ -650,7 +648,6 @@ async def tiktok_auth_status(
     Returns:
         HTMLResponse: 認証状態パーシャルHTML
     """
-    config = get_config()
     is_configured = config.is_tiktok_configured()
     is_authenticated = uploader.is_authenticated() if is_configured else False
 
@@ -666,7 +663,9 @@ async def tiktok_auth_status(
 
 @router.post("/tiktok/auth", response_class=HTMLResponse)
 async def tiktok_authenticate(
-    request: Request, uploader: TikTokUploader = Depends(get_tiktok_uploader)
+    request: Request,
+    uploader: TikTokUploader = Depends(get_tiktok_uploader),
+    config: Config = Depends(get_config),
 ):
     """TikTok認証を実行する。
 
@@ -677,8 +676,6 @@ async def tiktok_authenticate(
     Returns:
         HTMLResponse: 認証結果パーシャルHTML
     """
-    config = get_config()
-
     if not config.is_tiktok_configured():
         return templates.TemplateResponse(
             request,
@@ -721,6 +718,7 @@ async def tiktok_upload(
     video_path: str = Form(...),
     title: str = Form(...),
     uploader: TikTokUploader = Depends(get_tiktok_uploader),
+    config: Config = Depends(get_config),
 ):
     """動画をTikTokにアップロードする。
 
@@ -734,8 +732,6 @@ async def tiktok_upload(
     Returns:
         HTMLResponse: アップロード結果パーシャルHTML
     """
-    config = get_config()
-
     # Verify TikTok is configured
     if not config.is_tiktok_configured():
         return templates.TemplateResponse(
