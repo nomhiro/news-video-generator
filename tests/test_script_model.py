@@ -14,7 +14,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from src.models.script import Script, ScriptDraft, _join_narration
+from src.models.script import Script, ScriptDraft, _join_narration, estimate_duration_sec
 
 
 def _draft(**overrides: object) -> ScriptDraft:
@@ -142,12 +142,106 @@ def test_to_script_sets_language_from_caller() -> None:
 
 def test_to_script_preserves_all_other_fields() -> None:
     """導出以外のフィールドがそのまま引き継がれること。"""
-    draft = _draft(title="固有タイトル", estimated_duration=42)
+    draft = _draft(title="固有タイトル")
     script = draft.to_script("ja")
     assert script.title == "固有タイトル"
-    assert script.estimated_duration == 42
     assert script.segment_narrations == draft.segment_narrations
     assert script.image_prompts == draft.image_prompts
+    assert script.hashtags == draft.hashtags
+    assert script.conclusion == draft.conclusion
+
+
+def test_to_script_overrides_model_reported_duration() -> None:
+    """estimated_duration にモデルの自己申告を使わないこと。
+
+    実測でモデルは 35 と申告しながら実尺59.6秒の台本を返した。
+    申告値は当てにならないので文字数から推定する。
+    """
+    draft = _draft(estimated_duration=999)
+    script = draft.to_script("ja")
+    assert script.estimated_duration != 999
+    # 12文字 ÷ 6.0文字/秒 = 2秒
+    assert script.estimated_duration == 2
+
+
+def test_to_script_uses_measured_duration_when_given() -> None:
+    """実測値が渡されたらそれを採用すること。"""
+    draft = _draft(estimated_duration=999)
+    script = draft.to_script("ja", actual_duration_sec=42.4)
+    assert script.estimated_duration == 42
+
+
+@pytest.mark.parametrize(
+    ("narration", "language", "expected"),
+    [
+        ("あ" * 60, "ja", 10),  # 60文字 ÷ 6.0 = 10秒
+        ("あ" * 255, "ja", 42),  # 実測（255文字 → 42.8秒）とほぼ一致
+        ("あ" * 300, "ja", 50),  # 300文字 ÷ 6.0 = 50秒
+        (" ".join(["word"] * 26), "en", 10),  # 26語 ÷ 2.6 = 10秒
+        ("", "ja", 1),  # 空でも最低1秒
+    ],
+)
+def test_estimate_duration_sec(narration: str, language: str, expected: int) -> None:
+    assert estimate_duration_sec(narration, language) == expected
+
+
+# --------------------------------------------------------------------------
+# 分量の予算チェック
+#
+# プロンプトの文字数指示は守られない（実測で47%超過）ため、
+# 検査して引き直させる。
+# --------------------------------------------------------------------------
+
+
+def test_length_within_budget_passes() -> None:
+    draft = _draft(segment_narrations=["あ" * 40, "い" * 40, "う" * 40])
+    assert draft.check_length_budget("ja", (100, 150)) is None
+
+
+def test_length_at_the_limit_is_allowed() -> None:
+    """上限ちょうどは許すこと（境界の扱いを固定する）。"""
+    draft = _draft(segment_narrations=["あ" * 100, "い" * 100, "う" * 100])
+    assert draft.check_length_budget("ja", (200, 300)) is None
+
+
+def test_length_over_budget_is_reported_with_percentage() -> None:
+    """超過は割合付きで報告すること。ログから深刻度が分かるように。"""
+    # 実測で踏んだ状況を再現: 上限330文字に対して484文字（47%超過）
+    draft = _draft(
+        segment_narrations=["あ" * 162, "い" * 161, "う" * 161],
+        image_prompts=["p1", "p2", "p3"],
+        text_overlays=["o1", "o2", "o3"],
+    )
+    problem = draft.check_length_budget("ja", (250, 330))
+    assert problem is not None
+    assert "長すぎます" in problem
+    assert "484文字" in problem
+    assert "47%" in problem
+
+
+def test_length_far_below_budget_is_reported() -> None:
+    """極端に短い場合も報告すること（内容が足りていない）。"""
+    draft = _draft(segment_narrations=["あ", "い", "う"])
+    problem = draft.check_length_budget("ja", (200, 300))
+    assert problem is not None
+    assert "短すぎます" in problem
+
+
+def test_slightly_below_budget_is_tolerated() -> None:
+    """下限をやや下回る程度は許すこと。
+
+    短すぎるより「尺を稼ぐために内容を薄く伸ばす」方が有害なので、
+    下限は緩く見る。
+    """
+    draft = _draft(segment_narrations=["あ" * 40, "い" * 40, "う" * 40])
+    assert draft.check_length_budget("ja", (150, 300)) is None
+
+
+def test_english_budget_counts_characters_not_words() -> None:
+    """英語も文字数で超過判定すること（1語≒6文字換算）。"""
+    draft = _draft(segment_narrations=["word " * 20, "word " * 20, "word " * 20])
+    problem = draft.check_length_budget("en", (50, 100))
+    assert problem is not None
 
 
 def test_script_round_trips_through_json_file(tmp_path) -> None:

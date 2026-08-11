@@ -20,6 +20,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from src.models.formats import get_spec
 from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
@@ -124,12 +125,9 @@ class ImageGenerator:
         max_concurrency: 同時に投げる画像生成リクエスト数
     """
 
-    # gpt-image-2 は任意解像度に対応するが両辺が16の倍数である必要がある。
-    # 下記はいずれも厳密な 9:16 / 16:9 で、全制約を満たす。
-    # 動画の最終出力（1080x1920 / 1920x1080）へはアスペクト比一致の
-    # 単純縮小で変換できるため、クロップやレターボックスが発生しない。
-    SIZE_VERTICAL = "1152x2048"  # 9:16 (short / tiktok)
-    SIZE_HORIZONTAL = "2048x1152"  # 16:9 (long)
+    # 生成サイズは formats.py（FormatSpec.image_size）が持つ。
+    # gpt-image-2 は両辺が16の倍数であることを要求するため、動画の出力解像度
+    # 1080x1920 をそのまま指定できない。詳細は formats.py と validate_size()。
 
     # openai SDK は quality / output_format を Literal で型付けしているため、
     # 素の str ではなく Literal として宣言する（そうしないと overload に合致しない）
@@ -179,13 +177,15 @@ class ImageGenerator:
     def _size_for_format(self, video_format: str) -> str:
         """動画形式に対応する生成サイズを返す。
 
+        サイズは formats.py が単一の情報源。
+
         Args:
             video_format: 動画形式 ("short", "tiktok", "long")
 
         Returns:
             str: "<幅>x<高さ>" 形式のサイズ
         """
-        return self.SIZE_HORIZONTAL if video_format == "long" else self.SIZE_VERTICAL
+        return get_spec(video_format).image_size
 
     def generate_batch(
         self,

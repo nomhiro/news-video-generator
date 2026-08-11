@@ -9,16 +9,17 @@
 import pytest
 
 from src.generators.image_generator import ImageGenerator, validate_size
+from src.models.formats import SPECS, VideoFormat
 
 
 def test_vertical_constant_is_valid() -> None:
     """ショート/TikTok 用の定数が制約を満たすこと。"""
-    assert validate_size(ImageGenerator.SIZE_VERTICAL) == (1152, 2048)
+    assert validate_size(SPECS[VideoFormat.SHORT].image_size) == (1152, 2048)
 
 
 def test_horizontal_constant_is_valid() -> None:
     """ロング用の定数が制約を満たすこと。"""
-    assert validate_size(ImageGenerator.SIZE_HORIZONTAL) == (2048, 1152)
+    assert validate_size(SPECS[VideoFormat.LONG].image_size) == (2048, 1152)
 
 
 def test_constants_are_exact_video_aspect_ratios() -> None:
@@ -27,10 +28,10 @@ def test_constants_are_exact_video_aspect_ratios() -> None:
     一致していれば ffmpeg は単純な縮小だけで済み、
     クロップやレターボックスが入らない。
     """
-    w, h = validate_size(ImageGenerator.SIZE_VERTICAL)
+    w, h = validate_size(SPECS[VideoFormat.SHORT].image_size)
     assert w / h == pytest.approx(1080 / 1920)  # 9:16
 
-    w, h = validate_size(ImageGenerator.SIZE_HORIZONTAL)
+    w, h = validate_size(SPECS[VideoFormat.LONG].image_size)
     assert w / h == pytest.approx(1920 / 1080)  # 16:9
 
 
@@ -91,10 +92,10 @@ def test_upper_case_x_is_accepted() -> None:
 @pytest.mark.parametrize(
     ("video_format", "expected"),
     [
-        ("short", ImageGenerator.SIZE_VERTICAL),
-        ("tiktok", ImageGenerator.SIZE_VERTICAL),
-        ("long", ImageGenerator.SIZE_HORIZONTAL),
-        ("unknown", ImageGenerator.SIZE_VERTICAL),  # 不明な形式は縦を既定にする
+        ("short", SPECS[VideoFormat.SHORT].image_size),
+        ("tiktok", SPECS[VideoFormat.SHORT].image_size),
+        ("long", SPECS[VideoFormat.LONG].image_size),
+        ("unknown", SPECS[VideoFormat.SHORT].image_size),  # 不明な形式は縦を既定にする
     ],
 )
 def test_size_for_format(video_format: str, expected: str) -> None:

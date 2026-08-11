@@ -15,6 +15,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from src.models.formats import FormatSpec, get_spec
 from src.models.script import Script, ScriptDraft
 from src.utils.logger import log_error, log_step, log_success, log_warning
 
@@ -38,9 +39,13 @@ class ScriptGenerator:
 
     # 通信エラー・レートリミット・5xx に対する試行回数
     API_RETRIES = 4
-    # スキーマは適合しているが内容の整合性検証（配列長の一致など）で
-    # 弾かれた場合の再生成回数
+    # スキーマは適合しているが内容の整合性検証（配列長の一致、
+    # 分量の超過など）で弾かれた場合の再生成回数
     VALIDATION_RETRIES = 3
+
+    # プロンプト内で分量の指示を差し込む位置。
+    # formats.py の仕様から生成するため、プロンプト側には値を書かない。
+    NARRATION_SPEC_TOKEN = "<<NARRATION_SPEC>>"
 
     SYSTEM_PROMPT_JA = """<role>
 あなたはYouTube ShortsやTikTok向けのニュース解説動画の台本ライターです。
@@ -61,7 +66,7 @@ class ScriptGenerator:
 </critical_constraints>
 
 <content_rules>
-- segment_narrations: ナレーションを6つのセグメントに分けて書く。各セグメントは40〜55文字の自然な話し言葉で1〜2文にまとめる（合計250〜330文字）。6つすべてに内容を入れ、空のセグメントを作らない
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: 必ず英語で記述（画像生成モデル用）、各プロンプトに "cinematic, high quality" を含める
 - text_overlays: 各画像に対応する短文（15-25文字）
 - title: 40文字程度（【】や！で注目を集める、数字や疑問形を活用）
@@ -134,7 +139,7 @@ class ScriptGenerator:
 </critical_constraints>
 
 <content_rules>
-- segment_narrations: ナレーションを10個のセグメントに分けて書く。各セグメント200〜250文字（合計2000〜2500文字）。10個すべてに内容を入れ、空のセグメントを作らない
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: 必ず英語で記述
   - 1枚目: サムネイル的（cinematic, high quality, eye-catching thumbnail style）
   - 2枚目以降: 解説資料風（infographic style, educational diagram, data visualization）
@@ -221,7 +226,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 </critical_constraints>
 
 <content_rules>
-- segment_narrations: Write the narration as 6 segments. Each segment is 20-25 words of natural spoken English (120-150 words total). Fill all 6; never leave a segment empty
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: In English, include "cinematic, high quality" in each
 - text_overlays: Short text for each image (8-15 words)
 - title: Around 50 characters (use attention-grabbing words like SHOCKING, BREAKING)
@@ -294,7 +299,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 </critical_constraints>
 
 <content_rules>
-- segment_narrations: Write the narration as 10 segments. Each segment is 75-90 words (750-900 words total). Fill all 10; never leave a segment empty
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: In English
   - First image: Thumbnail-style (cinematic, high quality, eye-catching)
   - Second onwards: Educational style (infographic, educational diagram, data visualization)
@@ -382,7 +387,7 @@ TikTokの収益化には60秒以上の動画が必要です。
 </critical_constraints>
 
 <content_rules>
-- segment_narrations: ナレーションを6つのセグメントに分けて書く。各セグメント85〜110文字（合計500〜650文字、60〜90秒に相当）。6つすべてに内容を入れ、空のセグメントを作らない
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: 必ず英語で記述（画像生成モデル用）、各プロンプトに "cinematic, high quality" を含める
 - text_overlays: 各画像に対応する短文（15-25文字）
 - title: 40文字程度（【】や！で注目を集める、数字や疑問形を活用）
@@ -457,7 +462,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 </critical_constraints>
 
 <content_rules>
-- segment_narrations: Write the narration as 6 segments. Each segment is 42-58 words (250-350 words total, equals 60-90 seconds). Fill all 6; never leave a segment empty
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: In English, include "cinematic, high quality" in each
 - text_overlays: Short text for each image (8-15 words)
 - title: Around 50 characters (use attention-grabbing words like SHOCKING, BREAKING)
@@ -547,24 +552,26 @@ Before output, verify:
         Raises:
             ScriptGenerationError: 台本生成に失敗した場合
         """
-        format_labels = {"long": "ロング", "tiktok": "TikTok", "short": "ショート"}
-        format_label = format_labels.get(video_format, "ショート")
-        log_step(f"台本を生成中... ({language}, {format_label})", "")
+        spec = get_spec(video_format)
+        budget = spec.char_budget(language)
+        log_step(f"台本を生成中... ({language}, {spec.label})", "")
 
         instructions = self._build_system_prompt(language, video_format)
 
-        # Script のバリデータ（配列長の一致・空要素の禁止）で弾かれた場合は
-        # モデルの引き直しで直ることがあるため、そこだけ再試行する。
-        last_validation_error: ValidationError | None = None
+        # モデルの出力がスキーマに適合していても、内容が使えないことがある。
+        # 引き直しで直る種類の問題（配列長の不一致、空セグメント、
+        # 分量の超過）はここで再試行する。
+        last_problem: str | None = None
         for attempt in range(self.VALIDATION_RETRIES):
+            remaining = self.VALIDATION_RETRIES - attempt - 1
             try:
                 draft = self._request_script(instructions, news_topic)
             except ValidationError as e:
-                last_validation_error = e
-                if attempt < self.VALIDATION_RETRIES - 1:
+                last_problem = self._summarize_validation_error(e)
+                if remaining:
                     log_warning(
                         f"台本の検証に失敗（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
-                        f"再生成します: {self._summarize_validation_error(e)}"
+                        f"再生成します: {last_problem}"
                     )
                     continue
                 break
@@ -572,18 +579,34 @@ Before output, verify:
                 log_error(f"API呼び出しエラー: {e}")
                 raise ScriptGenerationError(f"台本生成に失敗しました: {e}") from e
 
-            # full_narration はセグメントの連結で導出される
+            # 分量の検査。プロンプトの文字数指示は守られないため
+            # （実測で47%超過）、ここで弾いて引き直す。
+            problem = draft.check_length_budget(language, budget)
+            if problem is not None:
+                last_problem = problem
+                if remaining:
+                    log_warning(
+                        f"分量が範囲外（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
+                        f"再生成します: {problem}"
+                    )
+                    continue
+                # 最終試行でも収まらなければ、生成を止めるより
+                # 長いまま進める方が実用的。警告だけ残す。
+                log_warning(f"分量が範囲外のまま採用します: {problem}")
+
+            # full_narration はセグメントの連結で導出される。
+            # estimated_duration はモデルの自己申告ではなく文字数から推定する。
             script = draft.to_script(language)
             log_success(
                 f"{language}台本を生成しました "
                 f"({len(script.segment_narrations)}セグメント, "
-                f"{len(script.full_narration)}文字)"
+                f"{len(script.full_narration)}文字, "
+                f"推定{script.estimated_duration}秒)"
             )
             return script
 
-        detail = self._summarize_validation_error(last_validation_error)
-        log_error(f"台本の検証に失敗: {detail}")
-        raise ScriptGenerationError(f"生成された台本が不正です: {detail}")
+        log_error(f"台本の検証に失敗: {last_problem}")
+        raise ScriptGenerationError(f"生成された台本が不正です: {last_problem}")
 
     @retry(
         retry=retry_if_exception_type(
@@ -658,14 +681,51 @@ Before output, verify:
             str: システムプロンプト
         """
         if video_format == "long":
-            if language == "ja":
-                return self.SYSTEM_PROMPT_LONG_JA
-            return self.SYSTEM_PROMPT_LONG_EN
+            template = (
+                self.SYSTEM_PROMPT_LONG_JA if language == "ja" else self.SYSTEM_PROMPT_LONG_EN
+            )
         elif video_format == "tiktok":
-            if language == "ja":
-                return self.SYSTEM_PROMPT_TIKTOK_JA
-            return self.SYSTEM_PROMPT_TIKTOK_EN
+            template = (
+                self.SYSTEM_PROMPT_TIKTOK_JA if language == "ja" else self.SYSTEM_PROMPT_TIKTOK_EN
+            )
         else:  # "short"
-            if language == "ja":
-                return self.SYSTEM_PROMPT_JA
-            return self.SYSTEM_PROMPT_EN
+            template = self.SYSTEM_PROMPT_JA if language == "ja" else self.SYSTEM_PROMPT_EN
+
+        # 分量の指示はプロンプトに埋め込まず、formats.py から生成する。
+        # ハードコードしていると仕様と指示がずれる（実際にずれていた）。
+        return template.replace(
+            self.NARRATION_SPEC_TOKEN,
+            self._narration_spec(language, get_spec(video_format)),
+        )
+
+    @staticmethod
+    def _narration_spec(language: str, spec: FormatSpec) -> str:
+        """`formats.py` の仕様から、分量の指示文を組み立てる。
+
+        Args:
+            language: 言語コード
+            spec: 形式の仕様
+
+        Returns:
+            str: プロンプトに差し込む1行
+        """
+        n = spec.segment_count
+        if language == "ja":
+            per_low, per_high = spec.chars_per_segment
+            total_low, total_high = spec.total_chars
+            return (
+                f"ナレーションを{n}個のセグメントに分けて書く。"
+                f"各セグメントは{per_low}〜{per_high}文字の自然な話し言葉"
+                f"（全体で{total_low}〜{total_high}文字）。"
+                f"{n}個すべてに内容を入れ、空のセグメントを作らない。"
+                f"全体で{total_high}文字を超えないこと（超えると尺が伸びすぎて再生成になる）"
+            )
+        per_low, per_high = spec.words_per_segment
+        total_low, total_high = spec.total_words
+        return (
+            f"Write the narration as {n} segments. "
+            f"Each segment is {per_low}-{per_high} words of natural spoken English "
+            f"({total_low}-{total_high} words total). "
+            f"Fill all {n}; never leave a segment empty. "
+            f"Do not exceed {total_high} words total — going over forces a regeneration"
+        )

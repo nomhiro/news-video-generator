@@ -12,6 +12,7 @@ from src.generators.image_generator import ImageGenerator
 from src.generators.script_generator import ScriptGenerator
 from src.generators.video_composer import VideoComposer
 from src.generators.voice_generator import VoiceGenerator
+from src.models.formats import get_spec
 from src.models.script import Script
 from src.utils.logger import log_error, log_step, log_success
 
@@ -108,9 +109,9 @@ class Pipeline:
         if languages is None:
             languages = ["ja", "en"]
 
-        # 話速を動画形式に応じて設定
-        speaking_rates = {"long": 1.1, "tiktok": 1.15, "short": 1.25}
-        speaking_rate = speaking_rates.get(video_format, 1.25)
+        # 形式ごとのパラメータは formats.py が単一の情報源
+        spec = get_spec(video_format)
+        speaking_rate = spec.speaking_rate
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 

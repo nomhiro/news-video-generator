@@ -6,7 +6,8 @@ import tempfile
 from pathlib import Path
 from typing import ClassVar
 
-from src.utils.logger import log_error, log_step, log_success
+from src.models.formats import FormatSpec, get_spec
+from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
 class VideoCompositionError(Exception):
@@ -16,10 +17,11 @@ class VideoCompositionError(Exception):
 
 
 class VideoComposer:
-    """FFmpegを使用して動画を合成するクラス。"""
+    """FFmpegを使用して動画を合成するクラス。
 
-    OUTPUT_WIDTH = 1080
-    OUTPUT_HEIGHT = 1920
+    出力解像度と形式ごとのパラメータは `src/models/formats.py` が持つ。
+    """
+
     FRAME_RATE = 30
     VIDEO_CODEC = "libx264"
     AUDIO_CODEC = "aac"
@@ -153,20 +155,12 @@ class VideoComposer:
         Raises:
             VideoCompositionError: 動画合成に失敗した場合
         """
-        # 動画形式に応じて解像度を設定
-        # TikTok format uses vertical 1080x1920 like short format
-        if video_format == "long":
-            output_width = 1920
-            output_height = 1080
-            format_label = "ロング(1920x1080)"
-        else:  # "short" or "tiktok"
-            output_width = self.OUTPUT_WIDTH  # 1080
-            output_height = self.OUTPUT_HEIGHT  # 1920
-            format_label = (
-                "TikTok(1080x1920)" if video_format == "tiktok" else "ショート(1080x1920)"
-            )
+        # 解像度は formats.py が単一の情報源
+        spec = get_spec(video_format)
+        output_width = spec.output_width
+        output_height = spec.output_height
 
-        log_step(f"動画を合成中... ({format_label})", "🎬")
+        log_step(f"動画を合成中... ({spec.label} {output_width}x{output_height})", "🎬")
 
         if not audio_path.exists():
             raise VideoCompositionError(f"音声ファイルが見つかりません: {audio_path}")
@@ -177,7 +171,7 @@ class VideoComposer:
 
         try:
             # Get audio duration
-            audio_duration = self._get_audio_duration(audio_path)
+            audio_duration = self._get_media_duration(audio_path)
             num_images = len(image_paths)
 
             # Calculate durations for each image
@@ -204,7 +198,13 @@ class VideoComposer:
             # Cleanup temp file
             filelist_path.unlink(missing_ok=True)
 
-            log_success("動画を合成しました")
+            # 実尺を測って許容範囲に収まっているか確認する。
+            # モデルが自己申告する estimated_duration は実尺と一致しない
+            # （35と申告して実測59.6秒だった）ため、ここで実測で見る。
+            actual = self._get_media_duration(output_path)
+            self._warn_if_duration_out_of_range(actual, spec)
+
+            log_success(f"動画を合成しました ({actual:.1f}秒)")
             return output_path
 
         except VideoCompositionError:
@@ -212,6 +212,29 @@ class VideoComposer:
         except Exception as e:
             log_error(f"動画合成エラー: {e}")
             raise VideoCompositionError(f"動画合成に失敗しました: {e}") from e
+
+    @staticmethod
+    def _warn_if_duration_out_of_range(actual_sec: float, spec: FormatSpec) -> None:
+        """完成した動画の尺が形式の想定範囲から外れていたら警告する。
+
+        失敗させずに警告に留める理由: 動画自体は再生でき、投稿もできる。
+        止めてしまうと生成コスト（画像6枚＋音声）が無駄になる。
+        分量の抑制は台本生成側の再生成で行い、ここは最後の観測点にする。
+
+        Args:
+            actual_sec: ffprobe で測った実際の秒数
+            spec: 形式の仕様
+        """
+        if spec.max_duration_sec and actual_sec > spec.max_duration_sec:
+            log_warning(
+                f"{spec.label}の想定尺を超えています: "
+                f"{actual_sec:.1f}秒 (上限{spec.max_duration_sec:.0f}秒)"
+            )
+        elif spec.min_duration_sec and actual_sec < spec.min_duration_sec:
+            log_warning(
+                f"{spec.label}の想定尺に届いていません: "
+                f"{actual_sec:.1f}秒 (下限{spec.min_duration_sec:.0f}秒)"
+            )
 
     def _calculate_durations(
         self,
@@ -250,14 +273,17 @@ class VideoComposer:
         log_step(f"均等分割を使用: {duration_per_image:.2f}秒/画像", "⏱️")
         return [duration_per_image] * num_images
 
-    def _get_audio_duration(self, audio_path: Path) -> float:
-        """音声ファイルの長さを取得する。
+    def _get_media_duration(self, media_path: Path) -> float:
+        """メディアファイルの長さを ffprobe で取得する。
+
+        音声にも動画にも使う。合成後の動画の実尺を測るのは、
+        モデルが自己申告する estimated_duration が実尺と一致しないため。
 
         Args:
-            audio_path: 音声ファイルパス
+            media_path: 音声または動画のファイルパス
 
         Returns:
-            float: 音声の長さ（秒）
+            float: 長さ（秒）
 
         Raises:
             VideoCompositionError: 長さの取得に失敗した場合
@@ -271,7 +297,7 @@ class VideoComposer:
                     "-print_format",
                     "json",
                     "-show_format",
-                    str(audio_path),
+                    str(media_path),
                 ],
                 capture_output=True,
                 text=True,

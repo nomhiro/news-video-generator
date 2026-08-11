@@ -40,6 +40,34 @@ class _HasAlignedSegments(Protocol):
     text_overlays: list[str]
 
 
+# 話速 1.1〜1.25 での実測に基づく読み上げ速度。
+# 42.82秒 / 255文字 ≒ 6.0 文字/秒（日本語, 話速1.25）
+# 英語は 1語 ≒ 2.6 語/秒 相当。
+_CHARS_PER_SECOND_JA = 6.0
+_WORDS_PER_SECOND_EN = 2.6
+
+
+def estimate_duration_sec(narration: str, language: str) -> int:
+    """ナレーションの分量から尺を推定する。
+
+    モデルが自己申告する ``estimated_duration`` は実尺と一致しない
+    （35と申告して実測59.6秒だった）。文字数からの推定の方が当たる。
+    最終的な検証は合成後の ffprobe で行う。
+
+    Args:
+        narration: ナレーション全文
+        language: 言語コード ("ja" or "en")
+
+    Returns:
+        int: 推定秒数（最低1秒）
+    """
+    if language == "ja":
+        seconds = len(narration) / _CHARS_PER_SECOND_JA
+    else:
+        seconds = len(narration.split()) / _WORDS_PER_SECOND_EN
+    return max(1, round(seconds))
+
+
 def _validate_aligned_segments(model: _HasAlignedSegments) -> None:
     """segment_narrations / image_prompts / text_overlays の整合性を検証する。
 
@@ -121,22 +149,68 @@ class ScriptDraft(BaseModel):
         _validate_aligned_segments(self)
         return self
 
-    def to_script(self, language: str) -> "Script":
-        """言語を与えて `Script` に変換する。
-
-        `full_narration` はセグメントの連結で導出する。
+    def narration_length(self, language: str) -> int:
+        """導出されるナレーション全体の文字数。
 
         Args:
             language: 言語コード ("ja" or "en")
 
         Returns:
+            int: 文字数
+        """
+        return len(_join_narration(self.segment_narrations, language))
+
+    def check_length_budget(self, language: str, budget: tuple[int, int]) -> str | None:
+        """ナレーションの分量が許容範囲に収まっているか調べる。
+
+        モデルはプロンプトの文字数指示を守らない。実測では
+        「合計250〜330文字」の指示に対して 484文字（47%超過）を返し、
+        35秒目標の動画が59.6秒になった。指示ではなく検査で抑える。
+
+        下限は緩く見る（短すぎる方が実害が小さく、内容を薄く伸ばす
+        誘導を避けたい）。上限は超えたら再生成させる。
+
+        Args:
+            language: 言語コード
+            budget: (下限, 上限) の文字数
+
+        Returns:
+            範囲外なら理由の文字列。収まっていれば None
+        """
+        low, high = budget
+        actual = self.narration_length(language)
+        if actual > high:
+            over = round((actual / high - 1) * 100)
+            return f"ナレーションが長すぎます: {actual}文字 (上限{high}文字を{over}%超過)"
+        # 下限の半分を切るのは、明らかに内容が足りていない
+        if actual < low // 2:
+            return f"ナレーションが短すぎます: {actual}文字 (目標下限{low}文字)"
+        return None
+
+    def to_script(self, language: str, actual_duration_sec: float | None = None) -> "Script":
+        """言語を与えて `Script` に変換する。
+
+        `full_narration` はセグメントの連結で導出する。
+        `estimated_duration` はモデルの自己申告を使わず、
+        文字数からの推定、または実測値で置き換える。
+
+        Args:
+            language: 言語コード ("ja" or "en")
+            actual_duration_sec: 音声生成後に実測した秒数。
+                与えられればこれを採用する
+
+        Returns:
             Script: 完成した台本
         """
-        return Script(
-            language=language,
-            full_narration=_join_narration(self.segment_narrations, language),
-            **self.model_dump(),
-        )
+        narration = _join_narration(self.segment_narrations, language)
+        if actual_duration_sec is not None:
+            duration = round(actual_duration_sec)
+        else:
+            duration = estimate_duration_sec(narration, language)
+
+        payload = self.model_dump()
+        payload["estimated_duration"] = duration
+        return Script(language=language, full_narration=narration, **payload)
 
 
 class Script(BaseModel):
