@@ -20,29 +20,25 @@ dependencies = [
     "pydantic>=2.10,<3",
     "tenacity>=9.0.0",
     "python-dotenv>=1.0.0",
-
     # --- Web (FastAPI + HTMX) ---
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
-    "jinja2>=3.1",            # fastapi.templating.Jinja2Templates が要求
-    "python-multipart>=0.0.20",  # Form() の解釈に必要
-
+    "jinja2>=3.1", # fastapi.templating.Jinja2Templates が要求
+    "python-multipart>=0.0.20", # Form() の解釈に必要
     # --- ニュース取得・本文抽出 ---
     "feedparser>=6.0",
     "httpx>=0.28",
     "googlenewsdecoder>=0.1.7",
-    # newspaper3k は 2018年で開発停止。Phase 3 で trafilatura に置換する。
-    "newspaper3k>=0.2.8",
-    "lxml>=5.0",
-    "lxml-html-clean>=0.4",   # newspaper3k が lxml.html.clean を要求
-
+    # newspaper3k(最終リリース2018年)からの置換。活発に保守され、
+    # nltk/jieba3k/tinysegmenter 等の重い依存も引きずらない。
+    "trafilatura>=2.0",
+    "lxml>=5.0", # trafilatura の HTML パースに使う
     # --- 音声合成 (Google Cloud TTS) ---
     # Phase 3 で Azure AI Speech に移行し、以下4つはまとめて削除する
     "google-cloud-texttospeech>=2.16",
     "pydub>=0.25",
     "mutagen>=1.47",
-    "audioop-lts>=0.2",       # Python 3.13 で stdlib から audioop が削除されたため
-
+    "audioop-lts>=0.2", # Python 3.13 で stdlib から audioop が削除されたため
     # --- YouTube アップロード ---
     "google-api-python-client>=2.100",
     "google-auth-oauthlib>=1.0",
@@ -54,7 +50,8 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.8",
     "mypy>=1.13",
-    "pillow>=10.0",  # 生成画像の寸法を検証するため
+    "pillow>=10.0", # 生成画像の寸法を検証するため
+    "pytest-asyncio>=1.4.0",
 ]
 
 [tool.uv]
@@ -138,7 +135,7 @@ disallow_untyped_decorators = false
 [[tool.mypy.overrides]]
 # 型スタブを提供していないサードパーティ
 module = [
-    "newspaper.*",
+    "trafilatura.*",
     "googlenewsdecoder.*",
     "pydub.*",
     "mutagen.*",
@@ -163,6 +160,7 @@ addopts = [
     # コマンドラインの -m が addopts より優先される。
     "-m", "not slow and not live",
 ]
+asyncio_mode = "auto"
 markers = [
     "slow: ffmpeg など外部プロセスを実際に起動するテスト",
     "live: 実際の外部API（Azure OpenAI 等）を呼び、課金が発生するテスト",

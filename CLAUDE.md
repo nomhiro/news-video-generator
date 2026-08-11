@@ -28,6 +28,10 @@ uv run pytest -m live                             # 実APIを叩く（課金あ�
 
 **Google Cloud Text-to-Speech** — 音声合成。サービスアカウント JSON か ADC。
 
+記事本文の抽出は **trafilatura**。取得は httpx で行い（User-Agent とタイムアウトを
+制御するため）、抽出結果が100文字未満なら記事ページでないと判断して破棄する
+（一覧ページからナビゲーションの断片が返ることがある）。
+
 環境変数の一覧は `.env.example` を参照。`config.py` が読む変数と `.env.example` の
 記載は `tests/test_config.py` が双方向に突き合わせているので、
 新しい設定を足すときは両方を更新する（片方だけだとテストが落ちる）。
