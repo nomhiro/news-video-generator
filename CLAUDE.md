@@ -8,6 +8,7 @@ CLI と Web UI の2つの入口がある。
 ```bash
 uv sync                          # 依存をロックファイルから同期
 uv run alembic upgrade head       # DB スキーマを当てる（Web 起動時に自動でも走る）
+uv run python -m scripts.push_tokens              # ローカルの OAuth トークンを Blob へ
 uv run python main.py "トピック" -l ja -f short     # 動画を1本生成
 uv run python web_app.py                          # Web UI (http://127.0.0.1:8000)
 
@@ -187,8 +188,38 @@ Node は CSS のビルドにだけ必要で、アプリの実行には不要。
 - **`data/news/*.json` を書き換え可能なデータストアとして使っている。**
   同一プロセス内はロックで守っているが、複数プロセスからは守れない。
   Phase 4 で SQLite に移す。
-- **YouTube / TikTok の OAuth トークンがローカルファイル。**
-  コンテナでは再認証が必要になる。保存先の抽象化が要る。
+
+### OAuth トークンも保存先を差し替える
+
+YouTube / TikTok のトークンと `client_secrets.json` は
+`src/storage/tokens.py` の `TokenStore` 経由で読み書きする。
+`TOKEN_STORE=local`（既定）はファイル、`blob` は Blob Storage の
+専用コンテナ（`tokens`）。
+
+コンテナで local だと、再起動でトークンが消えて毎回ブラウザ認証が必要になる。
+YouTube の OAuth は `InstalledAppFlow`（localhost にリダイレクト）なので
+コンテナの中では実質的に完了できない。**認証はローカルで1回行い、
+`uv run python -m scripts.push_tokens` で保存先に送る**運用にする。
+
+- **`Credentials.from_authorized_user_file` は使えない。** 保存先が Blob の
+  ときローカルにファイルが無いので、`from_authorized_user_info` /
+  `InstalledAppFlow.from_client_config`（どちらも dict を受ける）を使う。
+- **壊れた値は「無い」として扱う**（`read_json`）。トークン更新が中断されて
+  壊れた JSON が残った場合、例外にすると認証フローにも入れず画面から
+  復帰できない。
+- **保存先に到達できないときは未認証として返す。** 例外を投げると、
+  画面を開くだけで 500 になる。未認証なら認証ボタンが出る。
+- ローカル保存は一時ファイル + `replace` で原子的に書く。更新中に落ちると
+  壊れた JSON が残り、次回の起動で再認証になる。
+- 名前（`youtube_token` / `youtube_client_secrets` / `tiktok_token`）は
+  ローカルと Blob で共通。`config.token_paths` の対応表とずれると、
+  local ↔ blob を行き来したときに別のものを指す。
+
+Key Vault ではなく Blob にしている。生成物用に**すでに Entra ID 専用の
+ストレージアカウントがある**（共有キー認証は無効、匿名アクセス不可、
+7日のソフトデリート）ため、認証経路とコードを流用できる。
+トークンが利用者ごとに増える、監査が要件になる段階で Key Vault に移す
+（`TokenStore` の実装を1つ足すだけで済む）。
 
 ### 生成の進捗はジョブ表に持つ（プロセスメモリではない）
 

@@ -8,6 +8,8 @@ from typing import Literal, cast
 
 import httpx
 
+from src.storage.tokens import TokenStore
+
 from .tiktok_auth import TikTokAuth, TikTokAuthError
 
 # TikTok Content Posting API endpoints
@@ -75,7 +77,7 @@ class TikTokUploader:
         self,
         client_key: str,
         client_secret: str,
-        token_file: str = "tiktok_token.json",
+        token_store: TokenStore,
         redirect_uri: str = "http://127.0.0.1:8090/callback",
     ):
         """Initialize TikTok uploader.
@@ -83,13 +85,13 @@ class TikTokUploader:
         Args:
             client_key: TikTok app client key
             client_secret: TikTok app client secret
-            token_file: Path where the authenticated token will be saved
+            token_store: トークンの保存先
             redirect_uri: OAuth redirect URI
         """
         self.auth = TikTokAuth(
             client_key=client_key,
             client_secret=client_secret,
-            token_file=token_file,
+            token_store=token_store,
             redirect_uri=redirect_uri,
         )
 

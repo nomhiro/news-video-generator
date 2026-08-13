@@ -158,6 +158,20 @@ class Config(BaseSettings):
     web_host: str = Field(default="127.0.0.1")
     web_port: int = Field(default=8000, ge=1, le=65535)
 
+    # --- OAuth トークンの保存先 ---
+    #
+    # local はローカルのファイル（従来どおり）、blob は Azure Blob Storage。
+    #
+    # コンテナで local だと、再起動でトークンが消えて毎回ブラウザ認証が
+    # 必要になる。YouTube の OAuth は localhost にリダイレクトする方式
+    # （InstalledAppFlow）なので、コンテナの中では実質的に完了できない。
+    # blob にすれば、認証はローカルで1回行い、コンテナは読むだけで済む。
+    token_store: Literal["local", "blob"] = Field(default="local")
+
+    # トークン用の Blob コンテナ。生成物とは分けている
+    # （トークンは長期の資格情報で、生成物より扱いが重い）。
+    azure_token_container: str = Field(default="tokens")
+
     # --- YouTube アップロード（任意） ---
     youtube_client_secrets_file: str = Field(default="client_secrets.json")
     youtube_token_file: str = Field(default="youtube_token.json")
@@ -223,9 +237,17 @@ class Config(BaseSettings):
         画像6枚と音声・動画を作りきったあとに保存先が無いと分かることになり、
         時間とクォータを最も無駄にする。
         """
-        if self.artifact_store == "blob" and not self.azure_storage_account_url:
+        needs_blob = [
+            name
+            for name, value in (
+                ("ARTIFACT_STORE", self.artifact_store),
+                ("TOKEN_STORE", self.token_store),
+            )
+            if value == "blob"
+        ]
+        if needs_blob and not self.azure_storage_account_url:
             raise ValueError(
-                "ARTIFACT_STORE=blob には AZURE_STORAGE_ACCOUNT_URL が必要です"
+                f"{' / '.join(needs_blob)}=blob には AZURE_STORAGE_ACCOUNT_URL が必要です"
                 "（例: https://stnewsvideo.blob.core.windows.net）"
             )
         return self
@@ -286,6 +308,24 @@ class Config(BaseSettings):
             bool: 別リソースなら True
         """
         return self.azure_openai_image_endpoint is not None
+
+    @property
+    def token_paths(self) -> dict[str, Path]:
+        """トークン保存先の 名前 -> ローカルパス。
+
+        `TOKEN_STORE=local` のときに使う。名前は
+        `src/storage/tokens.py` の定数と揃える必要がある
+        （blob 保存でも同じ名前が Blob 名になるので、
+        ローカルと blob を行き来しても同じ値を指す）。
+
+        Returns:
+            dict[str, Path]: 保存先の対応
+        """
+        return {
+            "youtube_token": Path(self.youtube_token_file),
+            "youtube_client_secrets": Path(self.youtube_client_secrets_file),
+            "tiktok_token": Path(self.tiktok_token_file),
+        }
 
     @property
     def voice_name_ja(self) -> str:

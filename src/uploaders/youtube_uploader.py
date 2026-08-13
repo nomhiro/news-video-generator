@@ -10,6 +10,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+from src.storage.tokens import TokenStore
+
 from .youtube_auth import YouTubeAuth, YouTubeAuthError
 
 # Retry settings for resumable uploads
@@ -47,16 +49,14 @@ class YouTubeUploader:
 
     def __init__(
         self,
-        client_secrets_file: str = "client_secrets.json",
-        token_file: str = "youtube_token.json",
+        token_store: TokenStore,
     ):
         """Initialize YouTube uploader.
 
         Args:
-            client_secrets_file: Path to the OAuth2 client secrets JSON file.
-            token_file: Path where the authenticated token will be saved.
+            token_store: トークンと client_secrets の保存先。
         """
-        self.auth = YouTubeAuth(client_secrets_file, token_file)
+        self.auth = YouTubeAuth(token_store)
         self._youtube = None
 
     def _get_youtube_service(self):

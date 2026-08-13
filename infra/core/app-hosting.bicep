@@ -11,7 +11,8 @@
 //     進捗はジョブ表（行）になったが、ファイルが共有されないので
 //     minReplicas/maxReplicas は 1 固定のまま。DATABASE_URL を
 //     PostgreSQL に向ければ外せる
-//   - YouTube / TikTok の OAuth トークンがローカルファイル前提
+//   （OAuth トークンは Blob に置けるようになったが、初回の認証は
+//     ローカルで行い scripts/push_tokens.py で送る運用が必要）
 //
 // 解決済み:
 //   - 音声合成の資格情報。Azure AI Speech へ移したのでキーだけで足り、
@@ -47,6 +48,9 @@ param artifactAccountUrl string = ''
 
 @description('生成物を置く Blob コンテナ名')
 param artifactContainerName string = 'artifacts'
+
+@description('OAuth トークンを置く Blob コンテナ名')
+param tokenContainerName string = 'tokens'
 
 @description('Container App に渡す CPU コア数')
 param cpu string = '1.0'
@@ -172,6 +176,16 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'AZURE_STORAGE_CONTAINER'
               value: artifactContainerName
+            }
+            {
+              // トークンもコンテナのファイルシステムには置けない
+              // （再起動で消え、YouTube の OAuth はコンテナ内で完了できない）。
+              name: 'TOKEN_STORE'
+              value: empty(artifactAccountUrl) ? 'local' : 'blob'
+            }
+            {
+              name: 'AZURE_TOKEN_CONTAINER'
+              value: tokenContainerName
             }
             {
               // DefaultAzureCredential にどのマネージド ID を使うかを教える。

@@ -21,8 +21,11 @@ param tags object
 @description('ストレージアカウント名。3〜24文字の英小文字と数字のみ、グローバルに一意')
 param accountName string
 
-@description('生成物を入れる Blob コンテナ名')
-param containerName string = 'artifacts'
+@description('''作成する Blob コンテナ名。
+生成物（artifacts）と OAuth トークン（tokens）を分けている。
+トークンは長期の資格情報で、生成物より扱いが重いため、
+将来アクセス制御を分けられるようにコンテナを分離しておく。''')
+param containerNames array = ['artifacts', 'tokens']
 
 @description('データ面アクセスを与える principal の objectId。空なら割り当てない')
 param principalId string = ''
@@ -59,9 +62,9 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2025-01-01'
   parent: storage
   name: 'default'
   properties: {
-    // 誤って消した生成物を7日間は戻せるようにする。
-    // 動画1本の生成には画像6枚ぶんのクォータと数分かかるため、
-    // 復元できることの価値がストレージ費用を上回る。
+    // 誤って消した生成物とトークンを7日間は戻せるようにする。
+    // 動画1本の生成には画像6枚ぶんのクォータと数分かかり、
+    // トークンを失うとブラウザでの再認証が必要になる。
     deleteRetentionPolicy: {
       enabled: true
       days: 7
@@ -69,13 +72,15 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2025-01-01'
   }
 }
 
-resource container 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = {
-  parent: blobService
-  name: containerName
-  properties: {
-    publicAccess: 'None'
+resource containers 'Microsoft.Storage/storageAccounts/blobServices/containers@2025-01-01' = [
+  for name in containerNames: {
+    parent: blobService
+    name: name
+    properties: {
+      publicAccess: 'None'
+    }
   }
-}
+]
 
 // Storage Blob Data Contributor: Blob の読み書きと削除ができる。
 // アプリは publish（書き）/ list / fetch（読み）を行うため、
@@ -87,10 +92,12 @@ resource container 'Microsoft.Storage/storageAccounts/blobServices/containers@20
 var blobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 
 // 開発者本人（az login の principal）。ローカルから blob 保存を試すのに必要。
-resource developerAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' =
-  if (!empty(principalId)) {
-    scope: container
-    name: guid(container.id, principalId, blobDataContributorRoleId)
+// アカウント単位ではなくコンテナ単位で与える。将来トークンだけ
+// アクセスを絞りたくなったときに、ここを分けるだけで済む。
+resource developerAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (name, i) in containerNames: if (!empty(principalId)) {
+    scope: containers[i]
+    name: guid(containers[i].id, principalId, blobDataContributorRoleId)
     properties: {
       roleDefinitionId: subscriptionResourceId(
         'Microsoft.Authorization/roleDefinitions',
@@ -99,12 +106,13 @@ resource developerAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' =
       principalId: principalId
     }
   }
+]
 
 // Container App のマネージド ID。deployApp のときだけ渡ってくる。
-resource appAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' =
-  if (!empty(appPrincipalId)) {
-    scope: container
-    name: guid(container.id, appPrincipalId, blobDataContributorRoleId)
+resource appAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (name, i) in containerNames: if (!empty(appPrincipalId)) {
+    scope: containers[i]
+    name: guid(containers[i].id, appPrincipalId, blobDataContributorRoleId)
     properties: {
       roleDefinitionId: subscriptionResourceId(
         'Microsoft.Authorization/roleDefinitions',
@@ -116,9 +124,10 @@ resource appAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' =
       principalType: 'ServicePrincipal'
     }
   }
+]
 
 output accountName string = storage.name
-output containerName string = container.name
+output containerNames array = containerNames
 
 // アプリが AZURE_STORAGE_ACCOUNT_URL に入れる値。
 // primaryEndpoints.blob は末尾に `/` が付き、SDK に渡すと URL が

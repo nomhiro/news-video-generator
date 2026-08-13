@@ -15,6 +15,7 @@ from src.storage.artifacts import ArtifactStore, build_artifact_store
 from src.storage.db import create_db_engine, create_session_factory
 from src.storage.jobs import JobRepository
 from src.storage.schema import upgrade_to_head
+from src.storage.tokens import build_token_store
 from src.uploaders.tiktok_uploader import TikTokUploader
 from src.uploaders.youtube_uploader import YouTubeUploader
 
@@ -78,6 +79,16 @@ class AppContext:
             container_name=config.azure_storage_container,
         )
 
+        # OAuth トークンの保存先。ローカルはファイル、コンテナでは Blob。
+        # コンテナのファイルシステムは再起動で消えるため、ローカル固定だと
+        # 毎回ブラウザ認証が必要になり、そもそも完了できない。
+        token_store = build_token_store(
+            config.token_store,
+            local_paths=config.token_paths,
+            account_url=config.azure_storage_account_url,
+            container_name=config.azure_token_container,
+        )
+
         # スキーマを先に当てる。テーブルが無い状態でワーカーが
         # ポーリングを始めると、意味の分かりにくいエラーが出続ける。
         upgrade_to_head(config.database_url)
@@ -93,14 +104,11 @@ class AppContext:
             artifact_store=artifact_store,
             jobs=jobs,
             worker=JobWorker(jobs, PipelineJobRunner(pipeline, aggregator)),
-            youtube_uploader=YouTubeUploader(
-                client_secrets_file=config.youtube_client_secrets_file,
-                token_file=config.youtube_token_file,
-            ),
+            youtube_uploader=YouTubeUploader(token_store=token_store),
             tiktok_uploader=TikTokUploader(
                 client_key=config.tiktok_client_key.get_secret_value(),
                 client_secret=config.tiktok_client_secret.get_secret_value(),
-                token_file=config.tiktok_token_file,
+                token_store=token_store,
                 redirect_uri=config.tiktok_redirect_uri,
             ),
         )

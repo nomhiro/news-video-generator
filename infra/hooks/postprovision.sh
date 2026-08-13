@@ -65,7 +65,8 @@ storage_container=$(azd env get-value AZURE_STORAGE_CONTAINER)
 
 echo "=== 生成物の保存先 ==="
 echo "  アカウント : ${storage_account}"
-echo "  コンテナ   : ${storage_container}"
+token_container=$(azd env get-value AZURE_TOKEN_CONTAINER)
+echo "  コンテナ   : ${storage_container}（生成物） / ${token_container}（OAuth トークン）"
 echo "  認証       : Entra ID（キーなし。共有キー認証は無効）"
 echo ""
 
@@ -78,7 +79,9 @@ echo "AZURE_SPEECH_API_KEY=${speech_key}"
 echo "AZURE_SPEECH_REGION=${speech_region}"
 echo "AZURE_STORAGE_ACCOUNT_URL=${storage_url}"
 echo "AZURE_STORAGE_CONTAINER=${storage_container}"
-echo "# ARTIFACT_STORE=blob にすると生成物を Blob に保存する（既定は local）"
+echo "AZURE_TOKEN_CONTAINER=${token_container}"
+echo "# ARTIFACT_STORE=blob / TOKEN_STORE=blob にすると Blob に保存する（既定は local）"
+echo "# トークンは先に送る: uv run python -m scripts.push_tokens"
 echo ""
 echo "確認:"
 echo "  uv run pytest -q"

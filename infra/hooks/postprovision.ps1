@@ -72,7 +72,7 @@ $storageContainer = azd env get-value AZURE_STORAGE_CONTAINER
 
 Write-Host '=== 生成物の保存先 ===' -ForegroundColor Green
 Write-Host ("  アカウント : {0}" -f $storageAccount)
-Write-Host ("  コンテナ   : {0}" -f $storageContainer)
+Write-Host ("  コンテナ   : {0}（生成物） / {1}（OAuth トークン）" -f $storageContainer, (azd env get-value AZURE_TOKEN_CONTAINER))
 Write-Host '  認証       : Entra ID（キーなし。共有キー認証は無効）'
 Write-Host ''
 
@@ -85,7 +85,9 @@ Write-Host ("AZURE_SPEECH_API_KEY={0}" -f $speechKey)
 Write-Host ("AZURE_SPEECH_REGION={0}" -f $speechRegion)
 Write-Host ("AZURE_STORAGE_ACCOUNT_URL={0}" -f $storageUrl)
 Write-Host ("AZURE_STORAGE_CONTAINER={0}" -f $storageContainer)
-Write-Host '# ARTIFACT_STORE=blob にすると生成物を Blob に保存する（既定は local）'
+Write-Host ("AZURE_TOKEN_CONTAINER={0}" -f (azd env get-value AZURE_TOKEN_CONTAINER))
+Write-Host '# ARTIFACT_STORE=blob / TOKEN_STORE=blob にすると Blob に保存する（既定は local）'
+Write-Host '# トークンは先に送る: uv run python -m scripts.push_tokens'
 Write-Host ''
 Write-Host '確認:' -ForegroundColor Yellow
 Write-Host '  uv run pytest -q'

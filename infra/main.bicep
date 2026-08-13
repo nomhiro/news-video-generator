@@ -54,6 +54,9 @@ param speechResourceGroupName string = 'rg-newsvideo-speech'
 @description('生成物（台本・画像・音声・動画）を入れる Blob コンテナ名')
 param artifactContainerName string = 'artifacts'
 
+@description('OAuth トークンを入れる Blob コンテナ名。生成物とは分ける')
+param tokenContainerName string = 'tokens'
+
 @description('''アプリのホスティング（Container Apps）も払い出すか。
 既定は false。イメージ自体は検証済みだが、進捗状態と OAuth トークンが
 まだプロセス／ローカルファイル前提
@@ -147,7 +150,7 @@ module storage 'core/storage.bicep' = {
     location: location
     tags: tags
     accountName: storageAccountName
-    containerName: artifactContainerName
+    containerNames: [artifactContainerName, tokenContainerName]
     principalId: principalId
     // Container App のマネージド ID にもアクセスを与える。
     // deployApp が false のときは空文字なので割り当てない。
@@ -166,6 +169,7 @@ module appHosting 'core/app-hosting.bicep' = if (deployApp) {
     registryName: registryName
     artifactAccountUrl: storageAccountUrl
     artifactContainerName: artifactContainerName
+    tokenContainerName: tokenContainerName
   }
 }
 
@@ -184,7 +188,8 @@ output AZURE_OPENAI_IMAGE_CAPACITY int = imageDeploymentCapacity
 
 output AZURE_STORAGE_ACCOUNT_NAME string = storage.outputs.accountName
 output AZURE_STORAGE_ACCOUNT_URL string = storage.outputs.accountUrl
-output AZURE_STORAGE_CONTAINER string = storage.outputs.containerName
+output AZURE_STORAGE_CONTAINER string = artifactContainerName
+output AZURE_TOKEN_CONTAINER string = tokenContainerName
 
 output AZURE_SPEECH_RESOURCE_GROUP string = speechRg.name
 output AZURE_SPEECH_ACCOUNT_NAME string = speech.outputs.accountName
