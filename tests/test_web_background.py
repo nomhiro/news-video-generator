@@ -76,10 +76,10 @@ class FakeAggregator:
 class FakeArticle:
     """`scrape_selected_content` の戻り値として最小限の形。"""
 
-    def __init__(self, article_id: str, title: str):
+    def __init__(self, article_id: str, title: str, content: str = "本文" * 60):
         self.id = article_id
         self.title = title
-        self.content = "本文" * 60
+        self.content = content
 
 
 @pytest.fixture
@@ -110,6 +110,70 @@ def test_generate_only_enqueues(app: tuple[FastAPI, JobRepository]) -> None:
     assert [j.status for j in jobs] == [JobStatus.QUEUED, JobStatus.QUEUED]
     # まだ誰も掴んでいない
     assert all(j.worker_id is None and j.started_at is None for j in jobs)
+
+
+def test_articles_without_content_are_not_dropped(repository: JobRepository) -> None:
+    """本文が取れなかった記事も投入されること。
+
+    以前はここで黙って捨てていた。選択したのにジョブが作られないため、
+    「3件選んだのに2件しか出来ていない」理由を利用者が説明できなかった。
+    投入しておけば、理由付きの失敗として `/status` に並ぶ。
+    """
+    from fastapi.testclient import TestClient
+
+    application = FastAPI()
+    application.include_router(routes.router)
+    application.dependency_overrides[get_jobs] = lambda: repository
+    application.dependency_overrides[get_aggregator] = lambda: FakeAggregator(
+        [
+            FakeArticle("ok", "本文あり"),
+            FakeArticle("ng", "本文なし", content=""),
+        ]
+    )
+
+    with TestClient(application) as client:
+        assert client.post("/generate", data={"video_format": "short"}).status_code == 200
+
+    titles = {j.article_title for j in repository.list_batch(repository.latest_batch_id() or "")}
+    assert titles == {"本文あり", "本文なし"}
+
+
+def test_a_missing_body_fails_with_a_reason(repository: JobRepository) -> None:
+    """本文の無いジョブが、理由の分かる失敗になること。
+
+    画像生成に到達する前に落ちるので、クォータは使わない。
+    """
+    from src.jobs.runner import PipelineJobRunner
+
+    class Store:
+        def get_article_by_id(self, article_id: str) -> FakeArticle | None:
+            return FakeArticle(article_id, "本文なし", content="")
+
+        def mark_as_generated(self, article_id: str) -> bool:  # pragma: no cover
+            raise AssertionError("生成していないのに印を付けてはいけない")
+
+    class ExplodingPipeline:
+        def run(self, *args: object, **kwargs: object) -> dict[str, object]:
+            raise AssertionError("本文が無いのにパイプラインを呼んではいけない")
+
+    repository.enqueue_batch([("ng", "本文なし")], video_format="short")
+    worker = JobWorker(
+        repository, PipelineJobRunner(ExplodingPipeline(), Store()), poll_interval=0.05
+    )
+    worker.start()
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if repository.latest_progress().status == "error":
+                break
+            time.sleep(0.05)
+    finally:
+        worker.stop(timeout=10)
+
+    progress = repository.latest_progress()
+    assert progress.failed_articles == ("本文なし",)
+    assert progress.error_message is not None
+    assert "本文を取得できませんでした" in progress.error_message
 
 
 def test_generate_does_not_stack_while_active(app: tuple[FastAPI, JobRepository]) -> None:
@@ -208,3 +272,32 @@ def test_progress_survives_a_new_process(repository: JobRepository, tmp_path: Pa
     assert progress.completed_count == 1
     assert progress.completed_articles == ("記事1",)
     assert progress.status == "running"  # 残り1件が QUEUED
+
+
+def test_status_shows_successes_alongside_failures(repository: JobRepository) -> None:
+    """一部失敗のときに、成功した記事も画面に出ること。
+
+    1件でも失敗すると status は error になる。error の表示が
+    メッセージだけだと「3件のうち2件は出来ている」ことが
+    画面から読み取れない。
+    """
+    from fastapi.testclient import TestClient
+
+    repository.enqueue_batch([("ok", "できた記事"), ("ng", "だめだった記事")], video_format="short")
+    first = repository.claim_next("w")
+    second = repository.claim_next("w")
+    assert first and second
+    repository.mark_succeeded(first.id, video_key="videos/ok.mp4")
+    repository.mark_failed(second.id, "本文を取得できませんでした")
+
+    application = FastAPI()
+    application.include_router(routes.router)
+    application.dependency_overrides[get_jobs] = lambda: repository
+
+    with TestClient(application) as client:
+        body = client.get("/status").text
+
+    assert "できた記事" in body
+    assert "だめだった記事" in body
+    assert "本文を取得できませんでした" in body
+    assert "一部が失敗しました" in body

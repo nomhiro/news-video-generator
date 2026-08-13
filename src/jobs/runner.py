@@ -108,8 +108,11 @@ class PipelineJobRunner:
         if article is None:
             raise ArticleUnavailable(f"記事が見つかりません: {job.article_id}")
         if not article.content:
+            # 失敗の理由はそのまま UI に出る。何をすれば直るかを書く。
             raise ArticleUnavailable(
-                f"記事の本文がありません（スクレイピングに失敗した可能性）: {article.title[:40]}"
+                "本文を取得できませんでした（サイト側が取得を拒否した、"
+                "または記事ページではない可能性があります）。"
+                "ニュースを再取得してから、もう一度お試しください"
             )
 
         topic = f"{article.title}\n\n{article.content[:MAX_CONTENT_CHARS]}"

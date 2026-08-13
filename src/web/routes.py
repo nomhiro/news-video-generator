@@ -252,27 +252,29 @@ async def generate_videos(
             },
         )
 
-    articles_with_content = [a for a in articles if a.content]
-
-    if not articles_with_content:
-        return templates.TemplateResponse(
-            request,
-            "partials/generation_status.html",
-            {
-                "status": "error",
-                "message": "スクレイピングに失敗しました。別の記事を選択してください",
-            },
-        )
+    # 本文が取れなかった記事も投入する。
+    #
+    # 以前はここで捨てていた（`if a.content` で絞っていた）。選択したのに
+    # ジョブが作られず、どれが落ちたのかも分からないため、「3件選んだのに
+    # 2件しか出来ていない」という状態を利用者が説明できなかった。
+    # 全件を投入すれば、本文の無い記事は `ArticleUnavailable` で
+    # **理由付きの失敗として** `/status` に並ぶ。画像生成に到達する前に
+    # 落ちるのでクォータも使わず、再取得後に再実行もできる。
+    without_content = [a.title for a in articles if not a.content]
 
     batch_id = jobs.enqueue_batch(
-        [(a.id, a.title) for a in articles_with_content],
+        [(a.id, a.title) for a in articles],
         video_format=video_format,
     )
     log_step(
-        f"生成ジョブを投入しました: {len(articles_with_content)}件 "
-        f"({video_format}, batch={batch_id[:8]})",
+        f"生成ジョブを投入しました: {len(articles)}件 ({video_format}, batch={batch_id[:8]})",
         "📥",
     )
+    if without_content:
+        log_error(
+            f"本文が取得できていない記事が {len(without_content)}件あります"
+            f"（失敗として記録されます）: {', '.join(t[:20] for t in without_content)}"
+        )
 
     return _status_response(request, jobs.latest_progress())
 
