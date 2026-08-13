@@ -32,18 +32,13 @@ dependencies = [
     # newspaper3k(最終リリース2018年)からの置換。活発に保守され、
     # nltk/jieba3k/tinysegmenter 等の重い依存も引きずらない。
     "trafilatura>=2.0",
-    "lxml>=5.0", # trafilatura の HTML パースに使う
-    # --- 音声合成 (Google Cloud TTS) ---
-    # Phase 3 で Azure AI Speech に移行し、以下4つはまとめて削除する
-    "google-cloud-texttospeech>=2.16",
-    "pydub>=0.25",
-    "mutagen>=1.47",
-    "audioop-lts>=0.2", # Python 3.13 で stdlib から audioop が削除されたため
+    "lxml>=5.0", # Python 3.13 で stdlib から audioop が削除されたため
     # --- YouTube アップロード ---
     "google-api-python-client>=2.100",
     "google-auth-oauthlib>=1.0",
     "google-auth-httplib2>=0.1",
     "pydantic-settings>=2.15.0",
+    "azure-cognitiveservices-speech>=1.51.1",
 ]
 
 [dependency-groups]
@@ -136,10 +131,10 @@ disallow_untyped_decorators = false
 [[tool.mypy.overrides]]
 # 型スタブを提供していないサードパーティ
 module = [
+    # Speech SDK は py.typed を持たない（ネイティブライブラリの薄いラッパ）
+    "azure.*",
     "trafilatura.*",
     "googlenewsdecoder.*",
-    "pydub.*",
-    "mutagen.*",
     "feedparser.*",
     "googleapiclient.*",
     "google_auth_oauthlib.*",

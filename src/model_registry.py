@@ -45,6 +45,7 @@ class Vendor(StrEnum):
     """モデルの提供元。廃止情報の参照先が変わるため区別する。"""
 
     AZURE_OPENAI = "azure-openai"
+    AZURE_SPEECH = "azure-speech"
     GOOGLE_CLOUD = "google-cloud"
 
 
@@ -139,16 +140,21 @@ ACTIVE_MODELS: tuple[ModelEntry, ...] = (
         ),
     ),
     ModelEntry(
-        purpose="音声合成 (Chirp 3 HD)",
-        vendor=Vendor.GOOGLE_CLOUD,
-        model_id="ja-JP-Chirp3-HD-Zephyr",
+        purpose="音声合成 (Azure AI Speech / 標準 Neural)",
+        vendor=Vendor.AZURE_SPEECH,
+        model_id="ja-JP-NanamiNeural",
         deployment_name=None,
         used_by="src/generators/voice_generator.py",
         shutdown_on=None,
         notes=(
-            "en-US-Chirp3-HD-Zephyr も併用。SSML の <mark> をサポートしないため"
-            "セグメント境界のタイミングは個別生成＋実測で求めている。"
-            "Phase 3 で Azure AI Speech（SSML <bookmark> 対応）へ移行予定。"
+            "en-US-AvaNeural も併用。ja-JP-Chirp3-HD-Zephyr（Google Cloud TTS）"
+            "からの置換先。SSML <bookmark> と bookmark_reached でセグメント境界の"
+            "正確なオフセットが1回の合成で得られる。"
+            "Dragon HD 系（*:MAI-Voice-2-Flash 等）は音質が上だが <prosody> 非対応で、"
+            "形式別の話速（1.1〜1.25）を指定できないため採用していない。"
+            "リソースは rg-newsvideo-speech / japaneast（infra/core/speech.bicep）。"
+            "標準 Neural ボイスの廃止告知は次を参照:"
+            " https://learn.microsoft.com/azure/ai-services/speech-service/language-support"
         ),
     ),
 )

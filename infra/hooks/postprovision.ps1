@@ -38,12 +38,40 @@ if (-not $key) {
 # azd 環境にも入れておく（.azure/<env>/.env は gitignore 済み）
 azd env set AZURE_OPENAI_IMAGE_API_KEY $key | Out-Null
 
-Write-Host '.env に次の3行を追加してください:' -ForegroundColor Yellow
+# --- 音声合成 (Azure AI Speech) ---
+$speechAccount = azd env get-value AZURE_SPEECH_ACCOUNT_NAME
+$speechRg = azd env get-value AZURE_SPEECH_RESOURCE_GROUP
+$speechRegion = azd env get-value AZURE_SPEECH_REGION
+
+$speechKey = az cognitiveservices account keys list `
+    --name $speechAccount `
+    --resource-group $speechRg `
+    --query key1 `
+    --output tsv
+
+if (-not $speechKey) {
+    Write-Host 'Speech のキー取得に失敗しました。' -ForegroundColor Red
+    exit 1
+}
+
+azd env set AZURE_SPEECH_API_KEY $speechKey | Out-Null
+
+Write-Host ''
+Write-Host '=== 音声合成リソース ===' -ForegroundColor Green
+Write-Host ("  リソースグループ : {0}" -f $speechRg)
+Write-Host ("  アカウント       : {0}" -f $speechAccount)
+Write-Host ("  リージョン       : {0}" -f $speechRegion)
+Write-Host ''
+
+Write-Host '.env に次の行を追加してください:' -ForegroundColor Yellow
 Write-Host ''
 Write-Host ("AZURE_OPENAI_IMAGE_ENDPOINT={0}" -f $endpoint)
 Write-Host ("AZURE_OPENAI_IMAGE_API_KEY={0}" -f $key)
 Write-Host ("AZURE_OPENAI_IMAGE_DEPLOYMENT={0}" -f $deployment)
+Write-Host ("AZURE_SPEECH_API_KEY={0}" -f $speechKey)
+Write-Host ("AZURE_SPEECH_REGION={0}" -f $speechRegion)
 Write-Host ''
 Write-Host '確認:' -ForegroundColor Yellow
-Write-Host '  uv run python -m scripts.verify_image_generation'
+Write-Host '  uv run pytest -q'
+Write-Host '  uv run python main.py "テストトピック" -l ja -v'
 Write-Host ''

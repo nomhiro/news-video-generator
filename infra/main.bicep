@@ -40,9 +40,21 @@ param imageDeploymentName string = 'gpt-image-2'
 @maxValue(50)
 param imageDeploymentCapacity int = 4
 
+@description('''音声合成（Azure AI Speech）のリージョン。
+日本語ナレーションが主なので japaneast が既定。
+画像生成と違いクォータの制約が無いため、レイテンシで選べる。''')
+param speechLocation string = 'japaneast'
+
+@description('''音声合成リソースを置くリソースグループ名。
+画像生成とはリージョンも用途も違うため分けている。
+画像側の RG 名（rg-<環境名>）は環境名が "img" 由来で、
+音声を同居させると名前が実態と合わなくなる。''')
+param speechResourceGroupName string = 'rg-newsvideo-speech'
+
 @description('''アプリのホスティング（Container Apps）も払い出すか。
-既定は false。Dockerfile を実機で検証できていない状態で払い出すと、
-動かないリソースに課金が発生するため。''')
+既定は false。イメージ自体は検証済みだが、クラウドで動かすには
+TTS の資格情報の受け渡しと生成物の保存先が未解決
+（infra/core/app-hosting.bicep の冒頭を参照）。''')
 param deployApp bool = false
 
 @description('リソースへのデータ面アクセスを与える principal（自分の objectId）。省略時は RBAC を割り当てない')
@@ -93,6 +105,26 @@ module aiFoundry 'core/ai-foundry.bicep' = {
   }
 }
 
+// 音声合成は用途もリージョンも画像生成と別なので、リソースグループを分ける。
+resource speechRg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
+  name: speechResourceGroupName
+  location: speechLocation
+  tags: union(tags, { purpose: 'speech-synthesis' })
+}
+
+module speech 'core/speech.bicep' = {
+  name: 'speech'
+  scope: speechRg
+  params: {
+    location: speechLocation
+    tags: union(tags, { purpose: 'speech-synthesis' })
+    // Speech アカウント名は 2〜64文字。
+    // 'spch-' (5) + envSlug (最大40) + '-' (1) + resourceToken (13) = 最大59。
+    accountName: 'spch-${take(envSlug, 40)}-${resourceToken}'
+    principalId: principalId
+  }
+}
+
 module appHosting 'core/app-hosting.bicep' = if (deployApp) {
   name: 'app-hosting'
   scope: rg
@@ -117,4 +149,9 @@ output AZURE_OPENAI_IMAGE_PROJECT_NAME string = aiFoundry.outputs.projectName
 output AZURE_OPENAI_IMAGE_MODEL string = aiFoundry.outputs.imageModelName
 output AZURE_OPENAI_IMAGE_MODEL_VERSION string = aiFoundry.outputs.imageModelVersion
 output AZURE_OPENAI_IMAGE_CAPACITY int = imageDeploymentCapacity
+
+output AZURE_SPEECH_RESOURCE_GROUP string = speechRg.name
+output AZURE_SPEECH_ACCOUNT_NAME string = speech.outputs.accountName
+output AZURE_SPEECH_REGION string = speech.outputs.region
+
 output APP_HOSTING_DEPLOYED bool = deployApp

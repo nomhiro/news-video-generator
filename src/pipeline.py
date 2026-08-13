@@ -48,9 +48,10 @@ class Pipeline:
             config.azure_openai_deployment,
         )
         self.voice_generator = VoiceGenerator(
+            api_key=config.azure_speech_api_key.get_secret_value(),
+            region=config.azure_speech_region,
             voice_name_ja=config.voice_name_ja,
             voice_name_en=config.voice_name_en,
-            credentials_path=config.google_credentials_path,
         )
         # 画像生成は台本生成と別リソースのことがある（別リージョンの
         # 専用 Foundry プロジェクト）。config が使い分けを解決する。

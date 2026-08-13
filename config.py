@@ -91,16 +91,24 @@ class Config(BaseSettings):
     # gpt-image-2 の既定クォータは 5 images/min 程度なので小さく保つ。
     image_max_concurrency: int = Field(default=3, ge=1, le=20)
 
-    # --- Google Cloud（音声合成） ---
-    google_application_credentials: str | None = Field(
-        default=None,
-        description="サービスアカウント JSON のパス。未指定なら ADC を使う",
+    # --- Azure AI Speech（音声合成） ---
+    #
+    # Google Cloud TTS から移行した。Chirp 3 HD が SSML の <mark> を
+    # サポートせず、セグメント境界のタイミングを取得できなかったのが理由。
+    # 詳細は src/generators/voice_generator.py の docstring を参照。
+    #
+    # 副産物として Google Cloud のサービスアカウント JSON が不要になり、
+    # コンテナ実行時にシークレットをマウントする必要も消えた。
+    azure_speech_api_key: SecretStr = Field(description="Azure AI Speech の API キー")
+    azure_speech_region: str = Field(
+        default="japaneast",
+        description="Azure AI Speech のリージョン（例: japaneast）",
     )
-    google_cloud_project: str = Field(description="Google Cloud プロジェクト ID")
-    google_cloud_location: str = Field(default="us-central1")
 
-    google_tts_voice_ja: str = Field(default="ja-JP-Chirp3-HD-Zephyr")
-    google_tts_voice_en: str = Field(default="en-US-Chirp3-HD-Zephyr")
+    # 標準の Neural ボイスを使う。Dragon HD 系（*:MAI-Voice-*）は
+    # <prosody> 非対応で、形式別の話速を指定できない。
+    azure_speech_voice_ja: str = Field(default="ja-JP-NanamiNeural")
+    azure_speech_voice_en: str = Field(default="en-US-AvaNeural")
 
     # --- 出力 ---
     output_dir: Path = Field(default=Path("./output"))
@@ -230,17 +238,12 @@ class Config(BaseSettings):
     @property
     def voice_name_ja(self) -> str:
         """日本語ナレーションのボイス名。"""
-        return self.google_tts_voice_ja
+        return self.azure_speech_voice_ja
 
     @property
     def voice_name_en(self) -> str:
         """英語ナレーションのボイス名。"""
-        return self.google_tts_voice_en
-
-    @property
-    def google_credentials_path(self) -> str | None:
-        """サービスアカウント JSON のパス（未設定なら None）。"""
-        return self.google_application_credentials
+        return self.azure_speech_voice_en
 
     @classmethod
     def from_env(cls) -> "Config":

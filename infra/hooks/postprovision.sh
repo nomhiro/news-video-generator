@@ -31,12 +31,40 @@ fi
 
 azd env set AZURE_OPENAI_IMAGE_API_KEY "${key}" >/dev/null
 
-echo ".env に次の3行を追加してください:"
+# --- 音声合成 (Azure AI Speech) ---
+speech_account=$(azd env get-value AZURE_SPEECH_ACCOUNT_NAME)
+speech_rg=$(azd env get-value AZURE_SPEECH_RESOURCE_GROUP)
+speech_region=$(azd env get-value AZURE_SPEECH_REGION)
+
+speech_key=$(az cognitiveservices account keys list \
+    --name "${speech_account}" \
+    --resource-group "${speech_rg}" \
+    --query key1 \
+    --output tsv)
+
+if [ -z "${speech_key}" ]; then
+    echo "Speech のキー取得に失敗しました。" >&2
+    exit 1
+fi
+
+azd env set AZURE_SPEECH_API_KEY "${speech_key}" >/dev/null
+
+echo ""
+echo "=== 音声合成リソース ==="
+echo "  リソースグループ : ${speech_rg}"
+echo "  アカウント       : ${speech_account}"
+echo "  リージョン       : ${speech_region}"
+echo ""
+
+echo ".env に次の行を追加してください:"
 echo ""
 echo "AZURE_OPENAI_IMAGE_ENDPOINT=${endpoint}"
 echo "AZURE_OPENAI_IMAGE_API_KEY=${key}"
 echo "AZURE_OPENAI_IMAGE_DEPLOYMENT=${deployment}"
+echo "AZURE_SPEECH_API_KEY=${speech_key}"
+echo "AZURE_SPEECH_REGION=${speech_region}"
 echo ""
 echo "確認:"
-echo "  uv run python -m scripts.verify_image_generation"
+echo "  uv run pytest -q"
+echo "  uv run python main.py \"テストトピック\" -l ja -v"
 echo ""

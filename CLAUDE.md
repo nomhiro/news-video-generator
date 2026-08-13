@@ -33,7 +33,9 @@ npm run build:css                                 # テンプレートのクラ�
 `AZURE_OPENAI_IMAGE_ENDPOINT` / `AZURE_OPENAI_IMAGE_API_KEY` で指定する。
 未設定なら台本生成と同じものを流用するので、単一リソース構成でも動く。
 
-**Google Cloud Text-to-Speech** — 音声合成。サービスアカウント JSON か ADC。
+**Azure AI Speech** — 音声合成。キーとリージョンのみ（`AZURE_SPEECH_API_KEY` /
+`AZURE_SPEECH_REGION`）。台本・画像の Azure OpenAI とは別リソース
+（`rg-newsvideo-speech` / japaneast）。
 
 記事本文の抽出は **trafilatura**。取得は httpx で行い（User-Agent とタイムアウトを
 制御するため）、抽出結果が100文字未満なら記事ページでないと判断して破棄する
@@ -100,8 +102,8 @@ azd down               # 破棄
 
 `infra/main.bicep` がサブスクリプションスコープでリソースグループから作る。
 `deployApp` パラメータは既定 false で、Container Apps は払い出さない。
-Dockerfile は検証済みだが、クラウドで動かすには TTS の資格情報の受け渡しと
-生成物の保存先が未解決（`infra/core/app-hosting.bicep` の冒頭を参照）。
+Dockerfile は検証済み。クラウドで動かすには生成物の保存先が未解決
+（`infra/core/app-hosting.bicep` の冒頭を参照）。
 
 **API キーは Bicep の output にしていない。** ARM の output はデプロイ履歴に
 平文で残り、リソースグループの閲覧権限があれば読めてしまう。
@@ -110,6 +112,35 @@ Dockerfile は検証済みだが、クラウドで動かすには TTS の資格�
 Foundry プロジェクトとモデルデプロイには `dependsOn` を入れて直列化してある。
 どちらも親アカウントを変更する操作なので、並列に走らせると
 `Another operation is in progress on the resource` で片方が失敗する（一度踏んだ）。
+
+### セグメントのタイミングは bookmark で取る（推定しない）
+
+`voice_generator.py` はセグメントごとに `<bookmark mark="seg_{i}"/>` を
+**先頭**に置いた SSML を1回だけ合成し、`bookmark_reached` イベントで
+各セグメントの開始オフセットを受け取る。これが `video_composer` の
+画像切り替え時刻になる。
+
+Google Cloud TTS の Chirp 3 HD から移行した理由がここにある。Chirp 3 HD は
+SSML の `<mark>` に対応せず、実装が3系統（個別合成して結合 / 文字数按分で推定 /
+`<mark>` を試みて必ず按分にフォールバック）に分かれていた。実際に効いていたのは
+按分の推定で、ナレーションと画像の切り替えがずれていた。
+1系統に統合した副産物として `pydub` / `mutagen` / `audioop-lts` /
+`google-cloud-texttospeech` の4依存が消えた。
+
+戻すときに壊しやすい点。
+
+- **bookmark はセグメントの先頭**に置く。後ろに置くと得られるのが終了時刻に
+  なり、画像切り替えが1セグメントぶんずれる。
+- 返り値の要素数は**セグメント数 + 1**。末尾は音声全体の終了時刻で、
+  最後のセグメントの表示時間を決めるのに必要（`_calculate_durations` の前提）。
+- オフセットは**単調増加を強制**する。bookmark が欠けたら直前の値を使う。
+  崩れると duration が負になり、ffmpeg が無言で壊れた動画を作る。
+- テキストは XML エスケープする。記事タイトルに `&` や `<` が実際に混じる。
+- ボイスは**標準 Neural**（`ja-JP-NanamiNeural` / `en-US-AvaNeural`）。
+  Dragon HD 系（`*:MAI-Voice-*`）は音質が上だが `<prosody>` 非対応で、
+  形式別の話速（1.1〜1.25）を指定できず機能が退行する。
+
+オフセットは 100ナノ秒刻み（tick）で来るので `10_000_000` で割る。
 
 ### 台本の構造は Structured Outputs のスキーマで強制されている
 
@@ -222,9 +253,6 @@ Git Bash から実行するときは `MSYS_NO_PATHCONV=1` を付ける。付け�
 明示している。フォント探索は `VideoComposer.JAPANESE_FONT_CANDIDATES` で
 Windows / Linux / macOS のパスを並べており、`VIDEO_FONT_PATH` が最優先。
 
-**サービスアカウント JSON はイメージに入れない。** `.dockerignore` が除外して
-いるので、実行時にマウントして `GOOGLE_APPLICATION_CREDENTIALS` で指す。
-入れ忘れると `FileNotFoundError` で起動に失敗する（設計どおり）。
 
 ## 規約
 

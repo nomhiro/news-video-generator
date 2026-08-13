@@ -4,6 +4,9 @@
 #   - ffmpeg / ffprobe : video_composer が subprocess で直接呼ぶ
 #   - 日本語フォント    : drawtext のテキストオーバーレイに使う。
 #                        入れないと動画合成が「フォントが見つかりません」で失敗する
+#   - libssl / libasound2 : Azure Speech SDK のネイティブ依存。
+#                        wheel の中身は C++ ライブラリのラッパで、これが無いと
+#                        import 時点で OSError になる（Windows の wheel は自己完結）
 
 # ---- ビルドステージ: 依存を解決して仮想環境を作る ----
 FROM python:3.13-slim AS builder
@@ -31,9 +34,16 @@ FROM python:3.13-slim AS runtime
 # テキストオーバーレイが描画できず動画が作れない。
 # 実際に入るパスは /usr/share/fonts/opentype/noto/NotoSansCJK-*.ttc で、
 # video_composer.JAPANESE_FONT_CANDIDATES がそれを探す。
+#
+# libssl3 / libasound2 は Azure Speech SDK（azure-cognitiveservices-speech）が
+# 動的リンクするもの。python:3.13-slim には入っていない。
+# ca-certificates が無いと TLS の検証に失敗する。
 RUN apt-get update && apt-get install --no-install-recommends -y \
         ffmpeg \
         fonts-noto-cjk \
+        libssl3 \
+        libasound2 \
+        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # root で動かさない。

@@ -20,7 +20,7 @@ REQUIRED_VALUES: dict[str, object] = {
     "azure_openai_api_key": "dummy-key",
     "azure_openai_deployment": "gpt-5.1",
     "azure_openai_image_deployment": "gpt-image-2-1",
-    "google_cloud_project": "dummy-project",
+    "azure_speech_api_key": "dummy-speech-key",
 }
 
 
@@ -196,19 +196,26 @@ def test_ai_search_queries_accept_a_list() -> None:
 
 
 def test_voice_name_properties_mirror_the_env_fields() -> None:
-    config = _config(google_tts_voice_ja="ja-JP-X", google_tts_voice_en="en-US-Y")
+    config = _config(azure_speech_voice_ja="ja-JP-X", azure_speech_voice_en="en-US-Y")
     assert config.voice_name_ja == "ja-JP-X"
     assert config.voice_name_en == "en-US-Y"
 
 
-def test_google_credentials_path_defaults_to_none() -> None:
-    """未設定なら None（ADC を使う）。"""
-    assert _config().google_credentials_path is None
+def test_speech_region_has_a_default() -> None:
+    """リージョンは既定値を持つこと。
+
+    日本語ナレーションが主用途なので japaneast を既定にしている。
+    キーと違い、これを毎回書かせる意味がない。
+    """
+    assert _config().azure_speech_region == "japaneast"
 
 
-def test_google_credentials_path_mirrors_the_env_field() -> None:
-    config = _config(google_application_credentials="/path/to/sa.json")
-    assert config.google_credentials_path == "/path/to/sa.json"
+def test_speech_key_is_a_secret() -> None:
+    """Speech のキーも平文で漏れないこと。"""
+    config = _config(azure_speech_api_key="speech-secret-value")
+    for rendered in (repr(config), str(config), str(config.model_dump())):
+        assert "speech-secret-value" not in rendered
+    assert config.azure_speech_api_key.get_secret_value() == "speech-secret-value"
 
 
 # --------------------------------------------------------------------------
