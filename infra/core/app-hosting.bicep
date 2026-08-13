@@ -7,7 +7,10 @@
 // それでも既定を false にしているのは、払い出すと課金が始まるうえ、
 // クラウドで動かすには次の未解決事項が残っているため。
 //
-//   - 進捗状態がプロセスメモリにあるため minReplicas/maxReplicas は 1 固定
+//   - DB が SQLite で、ファイルはコンテナのファイルシステム上にある。
+//     進捗はジョブ表（行）になったが、ファイルが共有されないので
+//     minReplicas/maxReplicas は 1 固定のまま。DATABASE_URL を
+//     PostgreSQL に向ければ外せる
 //   - YouTube / TikTok の OAuth トークンがローカルファイル前提
 //
 // 解決済み:
@@ -15,6 +18,7 @@
 //     マウントするシークレットファイルが無くなった
 //   - 生成物の保存先。Blob Storage（core/storage.bicep）に publish する。
 //     このマネージド ID に Storage Blob Data Contributor を与えている
+//   - 進捗の永続化。ジョブ表に持つので、再起動しても消えない
 //
 // 有効化する手順:
 //   azd env set DEPLOY_APP true
@@ -184,9 +188,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         }
       ]
       scale: {
-        // 動画生成は進捗をプロセスメモリに持つため、
-        // 複数レプリカにすると進捗が共有されない。
-        // ジョブテーブルへ移すまでは 1 に固定する。
+        // 進捗はジョブ表に持つようになったが、その DB が
+        // コンテナ内の SQLite ファイルなのでレプリカ間で共有されない。
+        // DATABASE_URL を共有 DB（PostgreSQL）に向けるまでは 1 に固定する。
         minReplicas: 1
         maxReplicas: 1
       }

@@ -7,6 +7,7 @@ CLI と Web UI の2つの入口がある。
 
 ```bash
 uv sync                          # 依存をロックファイルから同期
+uv run alembic upgrade head       # DB スキーマを当てる（Web 起動時に自動でも走る）
 uv run python main.py "トピック" -l ja -f short     # 動画を1本生成
 uv run python web_app.py                          # Web UI (http://127.0.0.1:8000)
 
@@ -183,13 +184,49 @@ Node は CSS のビルドにだけ必要で、アプリの実行には不要。
 
 リファクタリング途中のため、以下は意図的に残している。
 
-- **進捗状態 `GenerationState` がプロセスメモリにしかない。**
-  再起動で消え、レプリカを増やすと共有されない。Phase 4 でジョブテーブルに移す。
 - **`data/news/*.json` を書き換え可能なデータストアとして使っている。**
   同一プロセス内はロックで守っているが、複数プロセスからは守れない。
   Phase 4 で SQLite に移す。
 - **YouTube / TikTok の OAuth トークンがローカルファイル。**
   コンテナでは再認証が必要になる。保存先の抽象化が要る。
+
+### 生成の進捗はジョブ表に持つ（プロセスメモリではない）
+
+`/generate` は**生成しない**。`jobs` テーブルに行を作って即座に返り、
+実行は `JobWorker` のスレッドが担う。`/status` は行を読むだけ。
+
+以前は `GenerationState`（プロセスメモリ上のシングルトン）に持っていた。
+再起動で消え、レプリカ間で共有されず、失敗した1件を再実行する手段も
+無かった。実測で確認済み: 生成中にサーバーを kill しても行は RUNNING で
+残り、再起動後の `/status` に同じ進捗が出る。
+
+- **同じジョブを2人が実行しないための仕組みはリース**。掴むときに
+  `lease_expires_at` を入れ、実行中は heartbeat で延ばす。ワーカーが
+  落ちれば期限が切れ、他のワーカーが `requeue_expired()` で QUEUED に
+  戻す。試行回数が上限（既定3回）を超えたら FAILED で打ち切る
+  （毎回落ちる記事で画像生成のクォータを食い潰さないため）。
+- **SQLite には `FOR UPDATE SKIP LOCKED` が無い。** 掴む操作は
+  「status が QUEUED のまま」を条件にした UPDATE の影響行数で競合を
+  検出している。PostgreSQL のときだけ `SKIP LOCKED` を使う。
+- **本文はジョブ行に持たせない。** `article_id` だけを持ち、実行時に
+  ニュースストアから読み直す。以前は記事オブジェクトを background task の
+  引数でメモリ渡ししていたので、落ちると本文ごと消えていた。
+- **SQLite は `journal_mode=WAL` が必須。** ワーカーが書いている最中に
+  `/status` が読むので、WAL でないと `database is locked` になる。
+- **時刻は読み出し時に UTC を付け直す。** SQLite は
+  `DateTime(timezone=True)` でもタイムゾーンを保存しないため、
+  naive で返ってくる。付け直さないとリースの比較が
+  `can't compare offset-naive and offset-aware` で落ちる
+  （`src/storage/jobs.py` の `_as_utc`）。
+- **スキーマは Alembic**。起動時に `upgrade head` を自動で当てている。
+  `alembic.ini` は**ロケールの encoding で読まれる**ので日本語コメントを
+  書くと cp932 で `UnicodeDecodeError` になる（一度踏んだ）。
+  接続先は ini に書かず `migrations/env.py` がアプリ設定から取る。
+
+**レプリカを2つ以上にするには DB を差し替える必要がある。** SQLite の
+ファイルは1台のファイルシステム上にしかないので、行にしただけでは
+共有されない。`DATABASE_URL` を Azure Database for PostgreSQL に向ければ
+コードはそのまま動く（SQLAlchemy を挟んでいる理由がこれ）。
 
 ### 生成物は「作る場所」と「置く場所」を分ける
 

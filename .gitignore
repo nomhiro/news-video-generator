@@ -82,6 +82,12 @@ htmlcov/
 data/news/*
 !data/news/.gitkeep
 
+# ジョブ表の SQLite。実行時の状態そのもので、環境ごとに中身が違う。
+# -wal / -shm は WAL モードの副産物（journal_mode=WAL にしている）。
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
 # MCP server artifacts
 .playwright-mcp/
 .serena/

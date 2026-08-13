@@ -41,6 +41,8 @@ dependencies = [
     "azure-cognitiveservices-speech>=1.51.1",
     "azure-storage-blob>=12.24",
     "azure-identity>=1.19",
+    "sqlalchemy>=2.0",
+    "alembic>=1.14",
 ]
 
 [dependency-groups]

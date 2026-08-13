@@ -2,42 +2,55 @@
 
 守っている欠陥
 --------------
-`generate_videos_task` は当初 `async def` だった。Starlette の
-BackgroundTask は非同期関数をイベントループ上で直接 await するため
-（starlette/background.py）、内部で呼ばれる完全同期の `pipeline.run()`
-（ネットワークI/O、time.sleep、ffmpeg の subprocess）がイベントループを
-数分間占有し、**生成中は Web サーバー全体が応答しなくなっていた**。
-進捗を取るための `/status` すら返らないので、UI は固まったままになる。
+生成（`pipeline.run()`）は完全同期で、ネットワークI/O・ffmpeg の
+subprocess を含み数分かかる。これがイベントループ上で走ると、
+生成中は Web サーバー全体が応答しなくなる。`/status` すら返らないので
+UI は固まったままになる。**これは実際に起きていた欠陥**（当時は
+`generate_videos_task` が `async def` で、Starlette の BackgroundTask が
+非同期関数をイベントループ上で直接 await するため）。
 
-修正は「関数を同期にする」こと。そうすると Starlette が threadpool に
-回してくれる。うっかり `async def` に戻すと欠陥が復活するため、
-ここで実際に走らせて確かめる。
+現在の構造では、生成はジョブ表を経由してワーカースレッドが実行する。
+`/generate` は行を作るだけ、`/status` は行を読むだけ。したがって
+守るべき性質は次の2つになった。
+
+1. `/generate` がリクエスト処理の中で生成を始めない（投入だけ）
+2. ワーカーが実際にジョブを実行している最中でも `/status` が即座に返る
+
+2 は TestClient では検証できない（TestClient はリクエスト処理の中で
+完結してしまい、「別スレッドで生成が進行中」の状況を作れない）。
+uvicorn を実際に起動して本物の HTTP で確かめる。
 """
 
-import inspect
 import socket
 import threading
 import time
+from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 import uvicorn
+from fastapi import FastAPI
 
+from src.jobs.worker import JobWorker
+from src.models.job import GenerationJob, JobStatus
+from src.storage.db import create_db_engine, create_session_factory
+from src.storage.jobs import JobRepository
+from src.storage.schema import upgrade_to_head
 from src.web import routes
-from src.web.dependencies import GenerationState
+from src.web.dependencies import get_aggregator, get_jobs
 
 
-def test_background_task_is_synchronous() -> None:
-    """タスク関数が同期であること。
+@pytest.fixture
+def repository(tmp_path: Path) -> JobRepository:
+    """一時ファイルの SQLite にジョブ表を作る。
 
-    `async def` に戻すと Starlette がイベントループ上で実行し、
-    生成中サーバー全体が止まる。
+    :memory: を使わない理由: ワーカースレッドと HTTP ハンドラが別々の
+    接続で同じ DB を見る必要があり、in-memory は接続ごとに別の DB になる。
     """
-    assert not inspect.iscoroutinefunction(routes.generate_videos_task), (
-        "generate_videos_task は同期関数でなければならない。"
-        "async def にすると Starlette がイベントループ上で実行し、"
-        "生成中にサーバー全体が応答しなくなる。"
-    )
+    url = f"sqlite:///{(tmp_path / 'jobs.db').as_posix()}"
+    upgrade_to_head(url)
+    return JobRepository(create_session_factory(create_db_engine(url)))
 
 
 def _free_port() -> int:
@@ -47,73 +60,108 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def test_real_server_answers_while_generation_blocks() -> None:
-    """実際のサーバーで、生成中に /status が応答すること。
+class FakeAggregator:
+    """スクレイピングも保存もしない差し替え。"""
 
-    **TestClient では検証できない。** TestClient はバックグラウンドタスクを
-    リクエストの処理内で完了させてしまうため、「生成が進行中に別の
-    リクエストを受ける」状況をそもそも再現できない。
-    そこで uvicorn を別スレッドで実際に起動し、本物の HTTP で確かめる。
+    def __init__(self, articles: list[object]):
+        self._articles = articles
 
-    generate_videos_task を `async def` に戻すと、/status がブロックされて
-    このテストはタイムアウトで落ちる。
-    """
-    from fastapi import FastAPI
+    async def scrape_selected_content(self) -> list[object]:
+        return self._articles
 
-    from src.models.news import NewsArticle, NewsCategory
-    from src.web.dependencies import get_aggregator, get_generation_state, get_pipeline
+    def get_selected_count(self) -> int:
+        return len(self._articles)
 
-    article = NewsArticle(
-        id="test-1",
-        title="テスト記事",
-        url="https://example.com/a",
-        source="テスト",
-        category=NewsCategory.AI,
-        content="本文" * 50,
-        is_selected=True,
+
+class FakeArticle:
+    """`scrape_selected_content` の戻り値として最小限の形。"""
+
+    def __init__(self, article_id: str, title: str):
+        self.id = article_id
+        self.title = title
+        self.content = "本文" * 60
+
+
+@pytest.fixture
+def app(repository: JobRepository) -> Iterator[tuple[FastAPI, JobRepository]]:
+    application = FastAPI()
+    application.include_router(routes.router)
+    application.dependency_overrides[get_jobs] = lambda: repository
+    application.dependency_overrides[get_aggregator] = lambda: FakeAggregator(
+        [FakeArticle("a-1", "テスト記事1"), FakeArticle("a-2", "テスト記事2")]
     )
+    yield application, repository
+
+
+def test_generate_only_enqueues(app: tuple[FastAPI, JobRepository]) -> None:
+    """`/generate` は行を作るだけで、生成を始めないこと。
+
+    リクエスト処理の中で生成を始めると、それが同期なら
+    イベントループを、非同期ならワーカーの意味を壊す。
+    """
+    from fastapi.testclient import TestClient
+
+    application, repository = app
+    with TestClient(application) as client:
+        response = client.post("/generate", data={"video_format": "short"})
+
+    assert response.status_code == 200
+    jobs = repository.list_batch(repository.latest_batch_id() or "")
+    assert [j.status for j in jobs] == [JobStatus.QUEUED, JobStatus.QUEUED]
+    # まだ誰も掴んでいない
+    assert all(j.worker_id is None and j.started_at is None for j in jobs)
+
+
+def test_generate_does_not_stack_while_active(app: tuple[FastAPI, JobRepository]) -> None:
+    """実行待ちがあるうちは積み増さないこと。
+
+    同じ記事のジョブが二重に入ると、画像生成のクォータを無駄に使う。
+    """
+    from fastapi.testclient import TestClient
+
+    application, repository = app
+    with TestClient(application) as client:
+        client.post("/generate", data={"video_format": "short"})
+        client.post("/generate", data={"video_format": "short"})
+
+    assert sum(repository.count_by_status().values()) == 2
+
+
+def test_real_server_answers_while_the_worker_generates(
+    app: tuple[FastAPI, JobRepository],
+) -> None:
+    """ワーカーが生成している最中に /status が即座に返ること。
+
+    **TestClient では検証できない。** リクエスト処理の中で完結するため、
+    「別スレッドで生成が進行中」という状況をそもそも作れない。
+    uvicorn を別スレッドで実際に起動して本物の HTTP で確かめる。
+
+    生成をイベントループ上で走らせる実装に戻すと、ここが
+    タイムアウトで落ちる。
+    """
+    application, repository = app
 
     generation_started = threading.Event()
     release_generation = threading.Event()
 
-    class FakeAggregator:
-        """スクレイピングも保存もしない差し替え。"""
+    def blocking_runner(job: GenerationJob) -> str | None:
+        """解放されるまで戻らない。pipeline.run() の代わり。"""
+        generation_started.set()
+        release_generation.wait(timeout=20)
+        return "videos/fake.mp4"
 
-        async def scrape_selected_content(self) -> list[NewsArticle]:
-            return [article]
-
-        def mark_as_generated(self, article_id: str) -> bool:
-            return True
-
-        def get_selected_count(self) -> int:
-            return 1
-
-    class BlockingPipeline:
-        """pipeline.run() のように、解放されるまで戻らない差し替え。"""
-
-        def run(self, *args: object, **kwargs: object) -> dict[str, object]:
-            generation_started.set()
-            release_generation.wait(timeout=20)
-            return {"status": "success"}
-
-    state = GenerationState()
-
-    app = FastAPI()
-    app.include_router(routes.router)
-    # 依存は FastAPI の仕組みで差し替える。
-    # 以前はモジュールのグローバル変数を monkeypatch で書き換えるしかなかった。
-    app.dependency_overrides[get_aggregator] = lambda: FakeAggregator()
-    app.dependency_overrides[get_pipeline] = lambda: BlockingPipeline()
-    app.dependency_overrides[get_generation_state] = lambda: state
+    worker = JobWorker(repository, blocking_runner, poll_interval=0.05)
 
     port = _free_port()
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    server = uvicorn.Server(
+        uvicorn.Config(application, host="127.0.0.1", port=port, log_level="warning")
+    )
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+    worker.start()
 
     base = f"http://127.0.0.1:{port}"
     try:
-        # 起動待ち
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and not server.started:
             time.sleep(0.05)
@@ -121,7 +169,7 @@ def test_real_server_answers_while_generation_blocks() -> None:
 
         with httpx.Client(base_url=base, timeout=10.0) as client:
             assert client.post("/generate", data={"video_format": "short"}).status_code == 200
-            assert generation_started.wait(timeout=10), "生成が開始されなかった"
+            assert generation_started.wait(timeout=10), "ワーカーが生成を開始しなかった"
 
             # 生成が進行中。ここで /status が素早く返らなければ
             # イベントループが占有されている。
@@ -131,152 +179,32 @@ def test_real_server_answers_while_generation_blocks() -> None:
 
             assert response.status_code == 200
             assert elapsed < 3.0, f"/status の応答に {elapsed:.1f}秒かかった（ブロックされている）"
-            assert state.snapshot().is_running is True, "生成が進行中でない"
+            assert repository.latest_progress().is_running is True
     finally:
         release_generation.set()
+        worker.stop(timeout=15)
         server.should_exit = True
         thread.join(timeout=15)
 
 
-# --------------------------------------------------------------------------
-# GenerationState のスレッド安全性
-#
-# 生成は threadpool のスレッドで状態を更新し、/status はイベントループ側から
-# 読む。両者が同時に触るためロックで守っている。
-# --------------------------------------------------------------------------
+def test_progress_survives_a_new_process(repository: JobRepository, tmp_path: Path) -> None:
+    """別のプロセス（別のリポジトリ実体）から同じ進捗が見えること。
 
-
-def test_snapshot_is_internally_consistent_under_concurrent_updates() -> None:
-    """並行更新中に取った写しが矛盾しないこと。
-
-    completed_count と completed_articles を別々に読むと
-    「カウントは増えたがリストにはまだ入っていない」状態を
-    観測しうる。写しはロック内で一度に取るので一致する。
+    進捗をプロセスメモリに持っていた頃は、再起動で消え、
+    レプリカを増やしても共有されなかった。行にしたので、
+    同じ DB を指す別の実体から同じ値が読める。
     """
-    state = GenerationState()
-    total = 200
-    state.start(total)
-    stop = threading.Event()
-    inconsistencies: list[str] = []
+    repository.enqueue_batch([("a-1", "記事1"), ("a-2", "記事2")], video_format="short")
+    claimed = repository.claim_next("worker-1")
+    assert claimed is not None
+    repository.mark_succeeded(claimed.id, video_key="videos/a.mp4")
 
-    def writer() -> None:
-        for i in range(total):
-            state.update(f"記事{i}")
-            state.complete_one(f"記事{i}", success=i % 5 != 0)
-        stop.set()
+    # 再起動を模して、同じ DB を指す新しい実体を作る
+    url = f"sqlite:///{(tmp_path / 'jobs.db').as_posix()}"
+    reopened = JobRepository(create_session_factory(create_db_engine(url)))
 
-    def reader() -> None:
-        while not stop.is_set():
-            snap = state.snapshot()
-            counted = len(snap.completed_articles) + len(snap.failed_articles)
-            if counted != snap.completed_count:
-                inconsistencies.append(
-                    f"completed_count={snap.completed_count} だが リストの合計は {counted}"
-                )
-
-    threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=15)
-
-    assert not inconsistencies, inconsistencies[:5]
-    final = state.snapshot()
-    assert final.completed_count == total
-    assert len(final.completed_articles) + len(final.failed_articles) == total
-
-
-def test_counts_are_not_lost_under_concurrent_writers() -> None:
-    """複数スレッドからの更新でカウントが失われないこと。"""
-    state = GenerationState()
-    state.start(0)
-    per_thread = 100
-    thread_count = 4
-
-    def writer(offset: int) -> None:
-        for i in range(per_thread):
-            state.complete_one(f"記事{offset}-{i}")
-
-    threads = [threading.Thread(target=writer, args=(n,)) for n in range(thread_count)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=15)
-
-    snap = state.snapshot()
-    assert snap.completed_count == per_thread * thread_count
-    assert len(snap.completed_articles) == per_thread * thread_count
-
-
-# --------------------------------------------------------------------------
-# 状態遷移
-# --------------------------------------------------------------------------
-
-
-def test_initial_status_is_idle() -> None:
-    assert GenerationState().snapshot().status == "idle"
-
-
-def test_status_is_running_after_start() -> None:
-    state = GenerationState()
-    state.start(3)
-    snap = state.snapshot()
-    assert snap.status == "running"
-    assert snap.is_running is True
-    assert snap.total_count == 3
-
-
-def test_status_is_success_after_finishing_work() -> None:
-    state = GenerationState()
-    state.start(1)
-    state.complete_one("記事")
-    state.finish()
-    assert state.snapshot().status == "success"
-
-
-def test_status_is_error_when_finished_with_a_message() -> None:
-    state = GenerationState()
-    state.start(1)
-    state.finish(error="失敗しました")
-    snap = state.snapshot()
-    assert snap.status == "error"
-    assert snap.error_message == "失敗しました"
-
-
-def test_start_clears_previous_results() -> None:
-    """再実行時に前回の結果が残らないこと。"""
-    state = GenerationState()
-    state.start(1)
-    state.complete_one("前回の記事", success=False)
-    state.finish(error="前回のエラー")
-
-    state.start(2)
-    snap = state.snapshot()
-    assert snap.completed_count == 0
-    assert snap.completed_articles == ()
-    assert snap.failed_articles == ()
-    assert snap.error_message is None
-    assert snap.total_count == 2
-
-
-def test_finish_clears_the_current_article() -> None:
-    state = GenerationState()
-    state.start(1)
-    state.update("処理中の記事")
-    assert state.snapshot().current_article == "処理中の記事"
-    state.finish()
-    assert state.snapshot().current_article is None
-
-
-def test_snapshot_lists_are_immutable() -> None:
-    """写しのリストを呼び出し側が書き換えられないこと。
-
-    可変のまま返すと、テンプレート側の操作が内部状態に漏れる。
-    """
-    state = GenerationState()
-    state.start(1)
-    state.complete_one("記事")
-    snap = state.snapshot()
-    assert isinstance(snap.completed_articles, tuple)
-    with pytest.raises(AttributeError):
-        snap.completed_articles.append("追加")  # type: ignore[attr-defined]
+    progress = reopened.latest_progress()
+    assert progress.total_count == 2
+    assert progress.completed_count == 1
+    assert progress.completed_articles == ("記事1",)
+    assert progress.status == "running"  # 残り1件が QUEUED

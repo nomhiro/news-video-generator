@@ -8,20 +8,19 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from config import Config
-from src.models.news import NewsArticle, NewsCategory
+from src.models.job import BatchProgress
+from src.models.news import NewsCategory
 from src.news.aggregator import NewsAggregator
-from src.pipeline import Pipeline
 from src.storage.artifacts import ArtifactStore, ArtifactStoreError
+from src.storage.jobs import JobRepository
 from src.uploaders.tiktok_uploader import TikTokUploader, parse_privacy_level
 from src.uploaders.youtube_uploader import YouTubeUploader
 from src.utils.logger import log_error, log_step, log_success
 from src.web.dependencies import (
-    GenerationState,
     get_aggregator,
     get_artifact_store,
     get_config,
-    get_generation_state,
-    get_pipeline,
+    get_jobs,
     get_tiktok_uploader,
     get_youtube_uploader,
 )
@@ -210,42 +209,37 @@ async def remove_from_selection(
 @router.post("/generate", response_class=HTMLResponse)
 async def generate_videos(
     request: Request,
-    background_tasks: BackgroundTasks,
     video_format: str = Form("short"),
     aggregator: NewsAggregator = Depends(get_aggregator),
-    pipeline: Pipeline = Depends(get_pipeline),
-    state: GenerationState = Depends(get_generation_state),
+    jobs: JobRepository = Depends(get_jobs),
 ):
-    """選択記事から動画を生成する。
+    """選択記事の生成ジョブを投入する。
+
+    **このルートは生成しない。** ジョブ表に行を作って即座に返り、
+    実行はワーカースレッドが担う。
+
+    以前はここから `BackgroundTask` で生成を回していた。進捗が
+    プロセスメモリにしか無かったため、再起動で消え、レプリカを
+    増やせなかった。投入と実行を分けると、`/status` は DB を読むだけに
+    なり、どのプロセスからでも同じ進捗が見える。
 
     Args:
         request: FastAPIリクエスト
-        background_tasks: バックグラウンドタスク
-        video_format: 動画形式 ("short" or "long")
+        video_format: 動画形式 ("short" / "tiktok" / "long")
         aggregator: ニュース取得インスタンス
-        pipeline: 動画生成パイプライン
-        state: 生成状態
+        jobs: ジョブ表
 
     Returns:
         HTMLResponse: 生成ステータスパーシャルHTML
     """
-    # Check if already running.
-    # 生成は別スレッドで進行するため、フィールドを個別に読むと
-    # 中途半端な組み合わせを観測しうる。写しを一度に取る。
-    running = state.snapshot()
-    if running.is_running:
-        return templates.TemplateResponse(
-            request,
-            "partials/generation_status.html",
-            {
-                "status": "running",
-                "total_count": running.total_count,
-                "completed_count": running.completed_count,
-                "current_article": running.current_article,
-            },
-        )
+    # 実行中に押されたら積み増さない。同じ記事のジョブが二重に入ると
+    # 画像生成のクォータを無駄に使う。
+    if jobs.has_active_jobs():
+        return _status_response(request, jobs.latest_progress())
 
-    # Scrape content first
+    # 本文を先に取る。ジョブは article_id しか持たないので、
+    # 実行時にニュースストアから読み直せる状態にしておく必要がある
+    # （scrape_selected_content がスクレイピング結果を書き戻す）。
     articles = await aggregator.scrape_selected_content()
 
     if not articles:
@@ -258,7 +252,6 @@ async def generate_videos(
             },
         )
 
-    # Filter articles with content
     articles_with_content = [a for a in articles if a.content]
 
     if not articles_with_content:
@@ -271,129 +264,62 @@ async def generate_videos(
             },
         )
 
-    # Initialize generation state
-    state.start(len(articles_with_content))
-
-    # Start background generation
-    background_tasks.add_task(
-        generate_videos_task, articles_with_content, pipeline, aggregator, state, video_format
+    batch_id = jobs.enqueue_batch(
+        [(a.id, a.title) for a in articles_with_content],
+        video_format=video_format,
+    )
+    log_step(
+        f"生成ジョブを投入しました: {len(articles_with_content)}件 "
+        f"({video_format}, batch={batch_id[:8]})",
+        "📥",
     )
 
-    return templates.TemplateResponse(
-        request,
-        "partials/generation_status.html",
-        {
-            "status": "running",
-            "total_count": len(articles_with_content),
-            "completed_count": 0,
-            "current_article": articles_with_content[0].title if articles_with_content else None,
-        },
-    )
-
-
-def generate_videos_task(
-    articles: list[NewsArticle],
-    pipeline: Pipeline,
-    aggregator: NewsAggregator,
-    state: GenerationState,
-    video_format: str = "short",
-) -> None:
-    """バックグラウンドで動画を生成するタスク。
-
-    **この関数は同期関数でなければならない。**
-
-    Starlette の BackgroundTask は次のように実装されている
-    （starlette/background.py）。
-
-        if self.is_async:
-            await self.func(...)          # イベントループ上で実行
-        else:
-            await run_in_threadpool(...)  # 別スレッドで実行
-
-    `pipeline.run()` は完全に同期で、ネットワークI/O・`time.sleep()`・
-    ffmpeg の `subprocess.run()` を含み、数分かかる。これを `async def` から
-    呼ぶとイベントループが占有され、生成中は Web サーバー全体が応答しなくなる
-    （進捗ポーリング用の `/status` すら返らない）。
-
-    同期関数にしておくことで Starlette が threadpool へ回してくれる。
-    `async def` に戻してはいけない。
-
-    Args:
-        articles: 生成対象の記事リスト
-        pipeline: 動画生成パイプライン
-        aggregator: ニュース取得インスタンス
-        state: 生成状態
-        video_format: 動画形式 ("short" or "long")
-    """
-    format_label = "ロング" if video_format == "long" else "ショート"
-    log_step(f"バックグラウンド生成開始: {len(articles)}件 ({format_label})", "🎬")
-
-    for i, article in enumerate(articles, 1):
-        try:
-            # Update state with current article
-            state.update(article.title)
-
-            log_step(f"[{i}/{len(articles)}] {article.title[:30]}...", "📹")
-
-            # Create topic from article
-            topic = f"{article.title}\n\n{article.content[:2000]}"
-
-            # Run pipeline with article title as output name.
-            # 戻り値（生成物のパス）は現在どこにも記録していない。
-            # Phase 4 で動画テーブルを入れる際に article_id と紐付けて保存する。
-            pipeline.run(
-                topic, languages=["ja"], output_name=article.title, video_format=video_format
-            )
-
-            # Mark as generated
-            aggregator.mark_as_generated(article.id)
-
-            # Update state
-            state.complete_one(article.title, success=True)
-
-            log_success(f"[{i}/{len(articles)}] 完了: {article.title[:30]}")
-
-        except Exception as e:
-            state.complete_one(article.title, success=False)
-            log_error(f"[{i}/{len(articles)}] 失敗: {article.title[:30]} - {e}")
-
-    # Finish generation
-    state.finish()
-    log_success(f"バックグラウンド生成完了: {len(articles)}件")
+    return _status_response(request, jobs.latest_progress())
 
 
 @router.get("/status", response_class=HTMLResponse)
 async def get_status(
     request: Request,
-    aggregator: NewsAggregator = Depends(get_aggregator),
-    state: GenerationState = Depends(get_generation_state),
+    jobs: JobRepository = Depends(get_jobs),
 ):
     """生成ステータスを取得する（ポーリング用）。
 
+    ジョブ表を読むだけなので、生成中でも即座に返る。プロセスを
+    再起動しても進捗が消えない。
+
     Args:
         request: FastAPIリクエスト
-        aggregator: ニュース取得インスタンス
-        state: 生成状態
+        jobs: ジョブ表
 
     Returns:
         HTMLResponse: ステータスパーシャルHTML
     """
-    # 生成は別スレッドで進行するので、一貫した写しを一度に取る。
-    # フィールドを個別に読むと「completed_count は増えたが
-    # completed_articles にはまだ入っていない」状態を表示しうる。
-    snapshot = state.snapshot()
+    return _status_response(request, jobs.latest_progress())
 
+
+def _status_response(request: Request, progress: BatchProgress) -> HTMLResponse:
+    """進捗をステータスのパーシャル HTML にする。
+
+    投入直後とポーリングで同じ表示になるよう、変換を1箇所に置く。
+
+    Args:
+        request: FastAPIリクエスト
+        progress: 直近バッチの進捗
+
+    Returns:
+        HTMLResponse: ステータスパーシャルHTML
+    """
     return templates.TemplateResponse(
         request,
         "partials/generation_status.html",
         {
-            "status": snapshot.status,
-            "total_count": snapshot.total_count,
-            "completed_count": snapshot.completed_count,
-            "current_article": snapshot.current_article,
-            "completed_articles": snapshot.completed_articles,
-            "failed_articles": snapshot.failed_articles,
-            "error_message": snapshot.error_message,
+            "status": progress.status,
+            "total_count": progress.total_count,
+            "completed_count": progress.completed_count,
+            "current_article": progress.current_article,
+            "completed_articles": progress.completed_articles,
+            "failed_articles": progress.failed_articles,
+            "error_message": progress.error_message,
         },
     )
 

@@ -137,6 +137,17 @@ class Config(BaseSettings):
         description="生成物を入れる Blob コンテナ名",
     )
 
+    # --- データベース（ジョブ表） ---
+    #
+    # 進捗をプロセスメモリではなく行として持つための DB。
+    # SQLite のファイルは1台のファイルシステム上にしかないので、
+    # レプリカを2つ以上にするなら共有できる DB（PostgreSQL）に
+    # 差し替える。SQLAlchemy を挟んでいるのはそのため。
+    database_url: str = Field(
+        default="sqlite:///./data/newsvideo.db",
+        description="SQLAlchemy の接続 URL",
+    )
+
     # --- ニュース取得 ---
     news_data_dir: Path = Field(default=Path("./data/news"))
     news_fetch_limit: int = Field(default=10, ge=1)
