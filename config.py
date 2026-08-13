@@ -15,8 +15,9 @@ pydantic-settings で環境変数を読み、型と必須項目を検証する�
 """
 
 from pathlib import Path
+from typing import Literal, Self
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # AI関連ニュースの既定の検索クエリ。
@@ -111,7 +112,30 @@ class Config(BaseSettings):
     azure_speech_voice_en: str = Field(default="en-US-AvaNeural")
 
     # --- 出力 ---
+    #
+    # output_dir は「生成の作業場所」。ffmpeg は subprocess で動く外部
+    # プロセスなので、生成そのものは必ずローカルのファイルシステムで行う。
     output_dir: Path = Field(default=Path("./output"))
+
+    # 生成物の保存先。local はローカルのファイルシステム、
+    # blob は Azure Blob Storage。
+    #
+    # コンテナで動かすときに local だと、再起動で生成物が消え、
+    # レプリカ間でも共有されない（YouTube に上げる前に成果物を失う）。
+    artifact_store: Literal["local", "blob"] = Field(default="local")
+
+    # Blob の認証はアカウントキーではなく Entra ID（DefaultAzureCredential）。
+    # ローカルは az login、Container Apps はマネージド ID を使う。
+    # ストレージアカウント側で共有キー認証を無効にしてあるので、
+    # キーを使う経路はそもそも存在しない。
+    azure_storage_account_url: str | None = Field(
+        default=None,
+        description="https://<account>.blob.core.windows.net。ARTIFACT_STORE=blob のとき必須",
+    )
+    azure_storage_container: str = Field(
+        default="artifacts",
+        description="生成物を入れる Blob コンテナ名",
+    )
 
     # --- ニュース取得 ---
     news_data_dir: Path = Field(default=Path("./data/news"))
@@ -180,7 +204,24 @@ class Config(BaseSettings):
             )
         return value
 
-    @field_validator("azure_openai_endpoint", "azure_openai_image_endpoint")
+    @model_validator(mode="after")
+    def _check_blob_store_is_configured(self) -> Self:
+        """保存先が blob なのにアカウント URL が無い構成を弾く。
+
+        起動時に落とす。生成が終わった段階で初めて失敗すると、
+        画像6枚と音声・動画を作りきったあとに保存先が無いと分かることになり、
+        時間とクォータを最も無駄にする。
+        """
+        if self.artifact_store == "blob" and not self.azure_storage_account_url:
+            raise ValueError(
+                "ARTIFACT_STORE=blob には AZURE_STORAGE_ACCOUNT_URL が必要です"
+                "（例: https://stnewsvideo.blob.core.windows.net）"
+            )
+        return self
+
+    @field_validator(
+        "azure_openai_endpoint", "azure_openai_image_endpoint", "azure_storage_account_url"
+    )
     @classmethod
     def _check_endpoint_looks_like_a_url(cls, value: str | None) -> str | None:
         """エンドポイントが URL の形をしていること。

@@ -101,7 +101,7 @@
               hx-target="#upload-result"
               hx-swap="innerHTML"
               hx-indicator="#upload-indicator">
-            <input type="hidden" name="video_path" id="modal-video-path">
+            <input type="hidden" name="video_key" id="modal-video-key">
 
             <div class="mb-4">
                 <label class="block text-sm font-medium text-gray-700 mb-1">タイトル</label>
@@ -159,7 +159,7 @@
               hx-target="#tiktok-upload-result"
               hx-swap="innerHTML"
               hx-indicator="#tiktok-upload-indicator">
-            <input type="hidden" name="video_path" id="tiktok-modal-video-path">
+            <input type="hidden" name="video_key" id="tiktok-modal-video-key">
 
             <div class="mb-4">
                 <label class="block text-sm font-medium text-gray-700 mb-1">タイトル / キャプション</label>
@@ -203,8 +203,8 @@
 </div>
 
 <script>
-function openUploadModal(videoPath, title, description) {
-    document.getElementById('modal-video-path').value = videoPath;
+function openUploadModal(videoKey, title, description) {
+    document.getElementById('modal-video-key').value = videoKey;
     document.getElementById('modal-title').value = title || '';
     document.getElementById('modal-description').value = description || '';
     document.getElementById('upload-result').innerHTML = '';
@@ -216,8 +216,8 @@ function closeUploadModal() {
 }
 
 // TikTok modal functions
-function openTiktokUploadModal(videoPath, title) {
-    document.getElementById('tiktok-modal-video-path').value = videoPath;
+function openTiktokUploadModal(videoKey, title) {
+    document.getElementById('tiktok-modal-video-key').value = videoKey;
     document.getElementById('tiktok-modal-title').value = title || '';
     document.getElementById('tiktok-upload-result').innerHTML = '';
     document.getElementById('tiktok-upload-modal').classList.remove('hidden');
@@ -239,10 +239,10 @@ document.addEventListener('keydown', function(e) {
 document.addEventListener('click', function(e) {
     const btn = e.target.closest('.upload-btn');
     if (btn) {
-        const path = btn.dataset.path;
+        const key = btn.dataset.key;
         const title = btn.dataset.title;
         const description = btn.dataset.description;
-        openUploadModal(path, title, description);
+        openUploadModal(key, title, description);
     }
 });
 
@@ -250,9 +250,9 @@ document.addEventListener('click', function(e) {
 document.addEventListener('click', function(e) {
     const btn = e.target.closest('.tiktok-upload-btn');
     if (btn) {
-        const path = btn.dataset.path;
+        const key = btn.dataset.key;
         const title = btn.dataset.title;
-        openTiktokUploadModal(path, title);
+        openTiktokUploadModal(key, title);
     }
 });
 </script>

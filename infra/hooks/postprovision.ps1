@@ -63,6 +63,19 @@ Write-Host ("  アカウント       : {0}" -f $speechAccount)
 Write-Host ("  リージョン       : {0}" -f $speechRegion)
 Write-Host ''
 
+# --- 生成物の保存先 (Blob Storage) ---
+# キーは取得しない。共有キー認証を無効にしてあり、アプリは Entra ID
+# （az login / マネージド ID）で接続する。
+$storageAccount = azd env get-value AZURE_STORAGE_ACCOUNT_NAME
+$storageUrl = azd env get-value AZURE_STORAGE_ACCOUNT_URL
+$storageContainer = azd env get-value AZURE_STORAGE_CONTAINER
+
+Write-Host '=== 生成物の保存先 ===' -ForegroundColor Green
+Write-Host ("  アカウント : {0}" -f $storageAccount)
+Write-Host ("  コンテナ   : {0}" -f $storageContainer)
+Write-Host '  認証       : Entra ID（キーなし。共有キー認証は無効）'
+Write-Host ''
+
 Write-Host '.env に次の行を追加してください:' -ForegroundColor Yellow
 Write-Host ''
 Write-Host ("AZURE_OPENAI_IMAGE_ENDPOINT={0}" -f $endpoint)
@@ -70,6 +83,9 @@ Write-Host ("AZURE_OPENAI_IMAGE_API_KEY={0}" -f $key)
 Write-Host ("AZURE_OPENAI_IMAGE_DEPLOYMENT={0}" -f $deployment)
 Write-Host ("AZURE_SPEECH_API_KEY={0}" -f $speechKey)
 Write-Host ("AZURE_SPEECH_REGION={0}" -f $speechRegion)
+Write-Host ("AZURE_STORAGE_ACCOUNT_URL={0}" -f $storageUrl)
+Write-Host ("AZURE_STORAGE_CONTAINER={0}" -f $storageContainer)
+Write-Host '# ARTIFACT_STORE=blob にすると生成物を Blob に保存する（既定は local）'
 Write-Host ''
 Write-Host '確認:' -ForegroundColor Yellow
 Write-Host '  uv run pytest -q'

@@ -14,6 +14,7 @@ from src.generators.video_composer import VideoComposer
 from src.generators.voice_generator import VoiceGenerator
 from src.models.formats import get_spec
 from src.models.script import Script
+from src.storage.artifacts import ArtifactStore, build_artifact_store
 from src.utils.logger import log_error, log_step, log_success
 
 
@@ -34,13 +35,23 @@ class Pipeline:
         video_composer: 動画合成器
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, artifact_store: ArtifactStore | None = None):
         """Pipelineを初期化する。
 
         Args:
             config: アプリケーション設定
+            artifact_store: 生成物の保存先。省略時は設定から組み立てる
+                （テストではフェイクを渡す）
         """
         self.config = config
+        # 生成は必ず output_dir（ローカル）で行う。ffmpeg は外部プロセスで
+        # パスしか受け取れないため。保存先だけが差し替え可能。
+        self.artifact_store = artifact_store or build_artifact_store(
+            config.artifact_store,
+            local_root=config.output_dir,
+            account_url=config.azure_storage_account_url,
+            container_name=config.azure_storage_container,
+        )
         api_key = config.azure_openai_api_key.get_secret_value()
         self.script_generator = ScriptGenerator(
             config.azure_openai_endpoint,
@@ -88,6 +99,50 @@ class Pipeline:
         if not sanitized:
             sanitized = "video"
         return sanitized
+
+    def _artifact_key(self, path: Path) -> str:
+        """ローカルパスを保存先のキーに変換する。
+
+        キーは `output_dir` からの相対パスを posix 形式にしたもの
+        （`videos/20260814_005245_ja.mp4`）。Windows の `\\` をそのまま
+        使うと Blob 名として別物になるため posix に寄せる。
+
+        Args:
+            path: 生成したファイルのパス
+
+        Returns:
+            str: 保存先のキー
+        """
+        return path.resolve().relative_to(self.config.output_dir.resolve()).as_posix()
+
+    def _publish_artifacts(self, paths: list[Path]) -> list[str]:
+        """生成物を保存先へ送る。
+
+        1件の失敗で生成全体を失敗させない。動画は既にローカルに存在して
+        おり、アップロードだけが失敗した状態は「あとで再送すればよい」。
+        ここで例外を投げると、成功した動画も含めて生成が失敗扱いになる。
+
+        Args:
+            paths: 生成したファイル
+
+        Returns:
+            list[str]: 保存に成功したキー
+        """
+        published: list[str] = []
+        failed: list[str] = []
+        for path in paths:
+            key = self._artifact_key(path)
+            try:
+                self.artifact_store.publish(path, key)
+                published.append(key)
+            # 保存の失敗で生成物を失わせない（ローカルには残る）
+            except Exception as e:
+                log_error(f"生成物の保存に失敗しました（{key}）: {e}")
+                failed.append(key)
+
+        if failed:
+            log_error(f"{len(failed)}件の生成物を保存できませんでした（ローカルには残っています）")
+        return published
 
     def run(
         self,
@@ -197,6 +252,19 @@ class Pipeline:
                 )
                 video_paths[lang] = video_path
 
+            # 5. 生成物を保存先へ送る
+            #
+            # ローカル保存なら生成した場所がそのまま保存先なので何も起きない。
+            # Blob 保存なら実際のアップロードが走る。
+            artifact_keys = self._publish_artifacts(
+                [
+                    *script_paths.values(),
+                    *image_paths,
+                    *audio_paths.values(),
+                    *video_paths.values(),
+                ]
+            )
+
             log_success("パイプライン完了!")
 
             return {
@@ -206,6 +274,18 @@ class Pipeline:
                 "images": [str(p) for p in image_paths],
                 "audio": {lang: str(path) for lang, path in audio_paths.items()},
                 "videos": {lang: str(path) for lang, path in video_paths.items()},
+                # 保存先の中でのキー。ローカルパスと違い、Blob でもそのまま通じる
+                "artifact_keys": {
+                    "scripts": {
+                        lang: self._artifact_key(path) for lang, path in script_paths.items()
+                    },
+                    "images": [self._artifact_key(p) for p in image_paths],
+                    "audio": {lang: self._artifact_key(path) for lang, path in audio_paths.items()},
+                    "videos": {
+                        lang: self._artifact_key(path) for lang, path in video_paths.items()
+                    },
+                },
+                "published": artifact_keys,
             }
 
         except Exception as e:

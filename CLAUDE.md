@@ -188,6 +188,39 @@ Node は CSS のビルドにだけ必要で、アプリの実行には不要。
 - **`data/news/*.json` を書き換え可能なデータストアとして使っている。**
   同一プロセス内はロックで守っているが、複数プロセスからは守れない。
   Phase 4 で SQLite に移す。
+- **YouTube / TikTok の OAuth トークンがローカルファイル。**
+  コンテナでは再認証が必要になる。保存先の抽象化が要る。
+
+### 生成物は「作る場所」と「置く場所」を分ける
+
+生成は必ず `output_dir`（ローカル）で行う。ffmpeg は subprocess で動く
+外部プロセスで、パスしか受け取れないため変えられない。
+
+保存先は `src/storage/artifacts.py` の `ArtifactStore` で差し替える。
+`ARTIFACT_STORE=local`（既定）ならローカルのまま、`blob` なら
+Azure Blob Storage に publish する。コンテナのファイルシステムは再起動で
+消え、レプリカ間でも共有されないので、クラウドで動かすなら blob が前提。
+
+- **キーは posix 形式の相対パス**（`videos/20260814_005245_ja.mp4`）。
+  Windows の `\` をそのまま Blob 名にするとローカルとキーが一致せず、
+  アップロードした動画を一覧から引けなくなる。`normalize_key` が正規化し、
+  `..` を含むキーは弾く（キーは HTML 経由でフォームから戻ってくる値）。
+- **読み出しは `fetch()` でローカルパスを借りる。** ローカル保存なら実体を
+  そのまま渡し、blob なら一時ファイルに落として `with` を抜けたら消す。
+  アップローダは `with` の内側で呼ぶ（外に出すとファイルが消えた後になる）。
+- **保存の失敗で生成を失敗させない。** 動画はローカルに残っているので、
+  publish の例外は記録するだけにする（`Pipeline._publish_artifacts`）。
+  ここで投げると成功した生成物ごと失敗扱いになる。
+
+認証は**アカウントキーを使わない**。ストレージアカウント側で
+`allowSharedKeyAccess: false` にしてあり、`DefaultAzureCredential` で
+接続する（ローカルは `az login`、Container Apps はマネージド ID）。
+ユーザー割り当て ID では `AZURE_CLIENT_ID` の指定が必須で、
+省略するとシステム割り当てを探して認証に失敗する。
+
+`tests/test_artifacts_blob_live.py` が実 Blob で往復を確認する
+（`uv run pytest -m live -k blob`）。Entra ID 認証・キーの階層化・
+バイト列の復元はフェイクでは検証できない。
 
 ### ニュースストアの更新はロックで囲む
 

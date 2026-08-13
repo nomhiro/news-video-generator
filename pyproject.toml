@@ -39,6 +39,8 @@ dependencies = [
     "google-auth-httplib2>=0.1",
     "pydantic-settings>=2.15.0",
     "azure-cognitiveservices-speech>=1.51.1",
+    "azure-storage-blob>=12.24",
+    "azure-identity>=1.19",
 ]
 
 [dependency-groups]

@@ -56,6 +56,19 @@ echo "  アカウント       : ${speech_account}"
 echo "  リージョン       : ${speech_region}"
 echo ""
 
+# --- 生成物の保存先 (Blob Storage) ---
+# キーは取得しない。共有キー認証を無効にしてあり、アプリは Entra ID
+# （az login / マネージド ID）で接続する。
+storage_account=$(azd env get-value AZURE_STORAGE_ACCOUNT_NAME)
+storage_url=$(azd env get-value AZURE_STORAGE_ACCOUNT_URL)
+storage_container=$(azd env get-value AZURE_STORAGE_CONTAINER)
+
+echo "=== 生成物の保存先 ==="
+echo "  アカウント : ${storage_account}"
+echo "  コンテナ   : ${storage_container}"
+echo "  認証       : Entra ID（キーなし。共有キー認証は無効）"
+echo ""
+
 echo ".env に次の行を追加してください:"
 echo ""
 echo "AZURE_OPENAI_IMAGE_ENDPOINT=${endpoint}"
@@ -63,6 +76,9 @@ echo "AZURE_OPENAI_IMAGE_API_KEY=${key}"
 echo "AZURE_OPENAI_IMAGE_DEPLOYMENT=${deployment}"
 echo "AZURE_SPEECH_API_KEY=${speech_key}"
 echo "AZURE_SPEECH_REGION=${speech_region}"
+echo "AZURE_STORAGE_ACCOUNT_URL=${storage_url}"
+echo "AZURE_STORAGE_CONTAINER=${storage_container}"
+echo "# ARTIFACT_STORE=blob にすると生成物を Blob に保存する（既定は local）"
 echo ""
 echo "確認:"
 echo "  uv run pytest -q"

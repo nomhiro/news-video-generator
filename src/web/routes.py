@@ -1,6 +1,7 @@
 """FastAPI routes for HTMX web interface."""
 
-from pathlib import Path
+import json
+from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
 from fastapi.responses import HTMLResponse
@@ -10,12 +11,14 @@ from config import Config
 from src.models.news import NewsArticle, NewsCategory
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
+from src.storage.artifacts import ArtifactStore, ArtifactStoreError
 from src.uploaders.tiktok_uploader import TikTokUploader, parse_privacy_level
 from src.uploaders.youtube_uploader import YouTubeUploader
 from src.utils.logger import log_error, log_step, log_success
 from src.web.dependencies import (
     GenerationState,
     get_aggregator,
+    get_artifact_store,
     get_config,
     get_generation_state,
     get_pipeline,
@@ -489,95 +492,127 @@ async def youtube_authenticate(
 
 
 @router.get("/videos", response_class=HTMLResponse)
-async def list_videos(request: Request, config: Config = Depends(get_config)):
+async def list_videos(
+    request: Request,
+    artifact_store: ArtifactStore = Depends(get_artifact_store),
+):
     """生成済み動画一覧を表示する。
+
+    保存先（ローカル or Blob Storage）に問い合わせる。以前は
+    `output_dir/videos` を glob していたが、それだとコンテナで動かしたときに
+    Blob 上の動画が一覧に出ない。
 
     Args:
         request: FastAPIリクエスト
+        artifact_store: 生成物の保存先
 
     Returns:
         HTMLResponse: 動画一覧パーシャルHTML
     """
-    import json
+    try:
+        found = artifact_store.list("videos/")
+    except ArtifactStoreError as e:
+        log_error(f"動画一覧を取得できません: {e}")
+        found = []
 
-    videos_dir = config.output_dir / "videos"
-    scripts_dir = config.output_dir / "scripts"
-    videos = []
+    # 新しい20件だけを見る。台本 JSON の取得は Blob だと1件ごとに
+    # ダウンロードが走るため、表示しない分は読まない。
+    recent = [a for a in found if a.key.endswith(".mp4")][:20]
 
-    if videos_dir.exists():
-        for video_file in sorted(videos_dir.glob("*.mp4"), reverse=True):
-            # Parse filename to extract info
-            # Format: YYYYMMDD_HHMMSS_title_lang.mp4
-            stem = video_file.stem
-            parts = stem.rsplit("_", 1)
-            lang = parts[-1] if len(parts) > 1 else "unknown"
-
-            # Try to load description and title from corresponding script JSON
-            description = ""
-            title = ""
-            script_file = scripts_dir / f"{stem}.json"
-            if script_file.exists():
-                try:
-                    with open(script_file, encoding="utf-8") as f:
-                        script_data = json.load(f)
-                        description = script_data.get("description", "")
-                        title = script_data.get("title", "")
-                except Exception:
-                    pass
-
-            videos.append(
-                {
-                    "filename": video_file.name,
-                    "path": str(video_file),
-                    "language": lang,
-                    "size_mb": round(video_file.stat().st_size / (1024 * 1024), 2),
-                    "created": video_file.stat().st_mtime,
-                    "description": description,
-                    "title": title,
-                }
-            )
+    videos = [
+        {
+            "filename": artifact.name,
+            "key": artifact.key,
+            "language": _language_from_key(artifact.key),
+            "size_mb": round(artifact.size_bytes / (1024 * 1024), 2),
+            "created": artifact.modified_at.timestamp(),
+            **_script_metadata(artifact_store, artifact.key),
+        }
+        for artifact in recent
+    ]
 
     return templates.TemplateResponse(
         request,
         "partials/video_list.html",
         {
-            "videos": videos[:20],  # Limit to 20 most recent
+            "videos": videos,
         },
     )
+
+
+def _language_from_key(key: str) -> str:
+    """動画のキーから言語コードを取り出す。
+
+    キーの形は `videos/YYYYMMDD_HHMMSS_タイトル_<lang>.mp4`。
+
+    Args:
+        key: 動画のキー
+
+    Returns:
+        str: 言語コード（判別できなければ "unknown"）
+    """
+    stem = PurePosixPath(key).stem
+    parts = stem.rsplit("_", 1)
+    return parts[-1] if len(parts) > 1 else "unknown"
+
+
+def _script_metadata(artifact_store: ArtifactStore, video_key: str) -> dict[str, str]:
+    """動画に対応する台本 JSON からタイトルと説明を読む。
+
+    台本が無い動画（手動で置いた等）でも一覧は出したいので、
+    取得できなければ空文字を返す。
+
+    Args:
+        artifact_store: 生成物の保存先
+        video_key: 動画のキー
+
+    Returns:
+        dict[str, str]: title と description
+    """
+    script_key = f"scripts/{PurePosixPath(video_key).stem}.json"
+    try:
+        with artifact_store.fetch(script_key) as path:
+            data = json.loads(path.read_text(encoding="utf-8"))
+    except (ArtifactStoreError, OSError, json.JSONDecodeError):
+        return {"title": "", "description": ""}
+    return {
+        "title": str(data.get("title", "")),
+        "description": str(data.get("description", "")),
+    }
 
 
 @router.post("/youtube/upload", response_class=HTMLResponse)
 async def youtube_upload(
     request: Request,
     background_tasks: BackgroundTasks,
-    video_path: str = Form(...),
+    video_key: str = Form(...),
     title: str = Form(...),
     description: str = Form(""),
     uploader: YouTubeUploader = Depends(get_youtube_uploader),
     config: Config = Depends(get_config),
+    artifact_store: ArtifactStore = Depends(get_artifact_store),
 ):
     """動画をYouTubeにアップロードする。
 
     Args:
         request: FastAPIリクエスト
         background_tasks: バックグラウンドタスク
-        video_path: 動画ファイルパス
+        video_key: 生成物のキー（`videos/....mp4`）
         title: 動画タイトル
         description: 動画説明
         uploader: YouTubeアップローダー
+        artifact_store: 生成物の保存先
 
     Returns:
         HTMLResponse: アップロード結果パーシャルHTML
     """
-    # Verify file exists
-    video_file = Path(video_path)
-    if not video_file.exists():
+    if not artifact_store.exists(video_key):
         return templates.TemplateResponse(
             request,
             "partials/upload_result.html",
             {
                 "success": False,
-                "error_message": f"動画ファイルが見つかりません: {video_path}",
+                "error_message": f"動画が見つかりません: {video_key}",
             },
         )
 
@@ -595,14 +630,16 @@ async def youtube_upload(
 
     log_step(f"YouTubeアップロード開始: {title}", "📤")
 
-    # Perform upload (this may take a while)
-    result = uploader.upload(
-        video_path=str(video_file),
-        title=title,
-        description=description,
-        tags=["Shorts", "ニュース", "AI生成"],
-        privacy_status=config.youtube_default_privacy,
-    )
+    # アップローダはローカルパスを要求するため、保存先から借りる。
+    # Blob 保存なら一時ファイルに落ち、この with を抜けたら消える。
+    with artifact_store.fetch(video_key) as video_file:
+        result = uploader.upload(
+            video_path=str(video_file),
+            title=title,
+            description=description,
+            tags=["Shorts", "ニュース", "AI生成"],
+            privacy_status=config.youtube_default_privacy,
+        )
 
     if result.success:
         log_success(f"YouTubeアップロード完了: {result.video_url}")
@@ -715,19 +752,21 @@ async def tiktok_authenticate(
 async def tiktok_upload(
     request: Request,
     background_tasks: BackgroundTasks,
-    video_path: str = Form(...),
+    video_key: str = Form(...),
     title: str = Form(...),
     uploader: TikTokUploader = Depends(get_tiktok_uploader),
     config: Config = Depends(get_config),
+    artifact_store: ArtifactStore = Depends(get_artifact_store),
 ):
     """動画をTikTokにアップロードする。
 
     Args:
         request: FastAPIリクエスト
         background_tasks: バックグラウンドタスク
-        video_path: 動画ファイルパス
+        video_key: 生成物のキー（`videos/....mp4`）
         title: 動画タイトル（キャプション）
         uploader: TikTokアップローダー
+        artifact_store: 生成物の保存先
 
     Returns:
         HTMLResponse: アップロード結果パーシャルHTML
@@ -743,15 +782,13 @@ async def tiktok_upload(
             },
         )
 
-    # Verify file exists
-    video_file = Path(video_path)
-    if not video_file.exists():
+    if not artifact_store.exists(video_key):
         return templates.TemplateResponse(
             request,
             "partials/tiktok_upload_result.html",
             {
                 "success": False,
-                "error_message": f"動画ファイルが見つかりません: {video_path}",
+                "error_message": f"動画が見つかりません: {video_key}",
             },
         )
 
@@ -769,14 +806,15 @@ async def tiktok_upload(
 
     log_step(f"TikTokアップロード開始: {title}", "📤")
 
-    # Perform upload
-    result = uploader.upload(
-        video_path=str(video_file),
-        title=title,
-        # 設定から来た文字列をここで検証する。不正な値が TikTok API まで
-        # 到達すると、原因の分かりにくいエラーで失敗する。
-        privacy_level=parse_privacy_level(config.tiktok_default_privacy),
-    )
+    # 保存先からローカルパスを借りる（Blob なら一時ファイル）
+    with artifact_store.fetch(video_key) as video_file:
+        result = uploader.upload(
+            video_path=str(video_file),
+            title=title,
+            # 設定から来た文字列をここで検証する。不正な値が TikTok API まで
+            # 到達すると、原因の分かりにくいエラーで失敗する。
+            privacy_level=parse_privacy_level(config.tiktok_default_privacy),
+        )
 
     if result.success:
         log_success("TikTokアップロード完了")

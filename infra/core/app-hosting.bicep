@@ -7,13 +7,14 @@
 // それでも既定を false にしているのは、払い出すと課金が始まるうえ、
 // クラウドで動かすには次の未解決事項が残っているため。
 //
-//   - Google Cloud TTS のサービスアカウント JSON をシークレットとして
-//     渡す仕組みが必要（イメージには焼き込まない）。Phase 3 で音声を
-//     Azure AI Speech に移せば、この資格情報そのものが不要になる
-//   - 生成物（動画・画像・音声）がコンテナのファイルシステムに残る。
-//     再起動で消えるので Blob Storage への移行が必要
 //   - 進捗状態がプロセスメモリにあるため minReplicas/maxReplicas は 1 固定
-//   - YouTube / TikTok の OAuth トークンもローカルファイル前提
+//   - YouTube / TikTok の OAuth トークンがローカルファイル前提
+//
+// 解決済み:
+//   - 音声合成の資格情報。Azure AI Speech へ移したのでキーだけで足り、
+//     マウントするシークレットファイルが無くなった
+//   - 生成物の保存先。Blob Storage（core/storage.bicep）に publish する。
+//     このマネージド ID に Storage Blob Data Contributor を与えている
 //
 // 有効化する手順:
 //   azd env set DEPLOY_APP true
@@ -36,6 +37,12 @@ param resourceToken string
 
 @description('コンテナレジストリ名。長さと文字種の制約は main.bicep 側で担保している')
 param registryName string
+
+@description('生成物を置く Blob のアカウント URL。アプリの ARTIFACT_STORE=blob で使う')
+param artifactAccountUrl string = ''
+
+@description('生成物を置く Blob コンテナ名')
+param artifactContainerName string = 'artifacts'
 
 @description('Container App に渡す CPU コア数')
 param cpu string = '1.0'
@@ -147,6 +154,33 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json(cpu)
             memory: memory
           }
+          // 生成物の保存先。キーではなくマネージド ID で認証するため、
+          // シークレットは含まれない（AZURE_CLIENT_ID は公開情報）。
+          env: [
+            {
+              name: 'ARTIFACT_STORE'
+              value: empty(artifactAccountUrl) ? 'local' : 'blob'
+            }
+            {
+              name: 'AZURE_STORAGE_ACCOUNT_URL'
+              value: artifactAccountUrl
+            }
+            {
+              name: 'AZURE_STORAGE_CONTAINER'
+              value: artifactContainerName
+            }
+            {
+              // DefaultAzureCredential にどのマネージド ID を使うかを教える。
+              // ユーザー割り当て ID では省略できず、省略するとシステム割り当てを
+              // 探して認証に失敗する。
+              name: 'AZURE_CLIENT_ID'
+              value: identity.properties.clientId
+            }
+            {
+              name: 'WEB_HOST'
+              value: '0.0.0.0'
+            }
+          ]
         }
       ]
       scale: {
@@ -168,3 +202,6 @@ output registryName string = registry.name
 output containerAppName string = containerApp.name
 output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
 output identityClientId string = identity.properties.clientId
+
+// 生成物の Blob コンテナに RBAC を割り当てるために main.bicep が使う。
+output identityPrincipalId string = identity.properties.principalId

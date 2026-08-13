@@ -51,9 +51,12 @@ param speechLocation string = 'japaneast'
 音声を同居させると名前が実態と合わなくなる。''')
 param speechResourceGroupName string = 'rg-newsvideo-speech'
 
+@description('生成物（台本・画像・音声・動画）を入れる Blob コンテナ名')
+param artifactContainerName string = 'artifacts'
+
 @description('''アプリのホスティング（Container Apps）も払い出すか。
-既定は false。イメージ自体は検証済みだが、クラウドで動かすには
-TTS の資格情報の受け渡しと生成物の保存先が未解決
+既定は false。イメージ自体は検証済みだが、進捗状態と OAuth トークンが
+まだプロセス／ローカルファイル前提
 （infra/core/app-hosting.bicep の冒頭を参照）。''')
 param deployApp bool = false
 
@@ -80,6 +83,16 @@ var envSlug = toLower(replace(replace(environmentName, '_', '-'), ' ', '-'))
 // AIServices アカウント名は 2〜64文字。
 // 'aif-' (4) + envSlug (最大40) + '-' (1) + resourceToken (13) = 最大58。
 var aiAccountName = 'aif-${take(envSlug, 40)}-${resourceToken}'
+
+// ストレージアカウント名は 3〜24文字の英小文字と数字のみ（ハイフン不可）。
+// 'st' (2) + ハイフンを除いた envSlug (最大9) + resourceToken (13) = 最大24。
+var storageAccountName = 'st${take(replace(envSlug, '-', ''), 9)}${resourceToken}'
+
+// アカウント URL をここで組み立てる理由:
+//   storage モジュールの output を app-hosting に渡すと、
+//   storage が app-hosting の principalId を必要とするため循環参照になる。
+//   名前は決定的なので、URL は参照せずに組み立てられる。
+var storageAccountUrl = 'https://${storageAccountName}.blob.${environment().suffixes.storage}'
 
 // ACR 名は 5〜50文字の英数字のみ。
 // 'cr' (2) + ハイフンを除いた envSlug (最大20) + resourceToken (13) = 15〜35。
@@ -125,6 +138,23 @@ module speech 'core/speech.bicep' = {
   }
 }
 
+// 生成物の保存先。画像生成と同じリソースグループに置く
+// （生成物は動画1本ごとに数十MB。用途が近く、分ける理由がない）。
+module storage 'core/storage.bicep' = {
+  name: 'storage'
+  scope: rg
+  params: {
+    location: location
+    tags: tags
+    accountName: storageAccountName
+    containerName: artifactContainerName
+    principalId: principalId
+    // Container App のマネージド ID にもアクセスを与える。
+    // deployApp が false のときは空文字なので割り当てない。
+    appPrincipalId: deployApp ? appHosting!.outputs.identityPrincipalId : ''
+  }
+}
+
 module appHosting 'core/app-hosting.bicep' = if (deployApp) {
   name: 'app-hosting'
   scope: rg
@@ -134,6 +164,8 @@ module appHosting 'core/app-hosting.bicep' = if (deployApp) {
     envSlug: envSlug
     resourceToken: resourceToken
     registryName: registryName
+    artifactAccountUrl: storageAccountUrl
+    artifactContainerName: artifactContainerName
   }
 }
 
@@ -149,6 +181,10 @@ output AZURE_OPENAI_IMAGE_PROJECT_NAME string = aiFoundry.outputs.projectName
 output AZURE_OPENAI_IMAGE_MODEL string = aiFoundry.outputs.imageModelName
 output AZURE_OPENAI_IMAGE_MODEL_VERSION string = aiFoundry.outputs.imageModelVersion
 output AZURE_OPENAI_IMAGE_CAPACITY int = imageDeploymentCapacity
+
+output AZURE_STORAGE_ACCOUNT_NAME string = storage.outputs.accountName
+output AZURE_STORAGE_ACCOUNT_URL string = storage.outputs.accountUrl
+output AZURE_STORAGE_CONTAINER string = storage.outputs.containerName
 
 output AZURE_SPEECH_RESOURCE_GROUP string = speechRg.name
 output AZURE_SPEECH_ACCOUNT_NAME string = speech.outputs.accountName

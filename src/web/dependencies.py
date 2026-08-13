@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, Request
 from config import Config
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
+from src.storage.artifacts import ArtifactStore, build_artifact_store
 from src.uploaders.tiktok_uploader import TikTokUploader
 from src.uploaders.youtube_uploader import YouTubeUploader
 
@@ -177,6 +178,7 @@ class AppContext:
         config: アプリケーション設定
         aggregator: ニュース取得・管理
         pipeline: 動画生成パイプライン
+        artifact_store: 生成物の保存先（ローカル or Blob Storage）
         generation_state: 生成の進捗
         youtube_uploader: YouTube アップローダ
         tiktok_uploader: TikTok アップローダ
@@ -185,6 +187,7 @@ class AppContext:
     config: Config
     aggregator: NewsAggregator
     pipeline: Pipeline
+    artifact_store: ArtifactStore
     generation_state: GenerationState
     youtube_uploader: YouTubeUploader
     tiktok_uploader: TikTokUploader
@@ -202,10 +205,21 @@ class AppContext:
         config.ensure_news_dirs()
         config.ensure_output_dirs()
 
+        # 保存先はパイプラインと Web で同じインスタンスを共有する。
+        # Blob の場合、クライアントは接続とトークンを内部でキャッシュするため
+        # 使い回した方が速い。
+        artifact_store = build_artifact_store(
+            config.artifact_store,
+            local_root=config.output_dir,
+            account_url=config.azure_storage_account_url,
+            container_name=config.azure_storage_container,
+        )
+
         return cls(
             config=config,
             aggregator=NewsAggregator(config.news_data_dir),
-            pipeline=Pipeline(config),
+            pipeline=Pipeline(config, artifact_store=artifact_store),
+            artifact_store=artifact_store,
             generation_state=GenerationState(),
             youtube_uploader=YouTubeUploader(
                 client_secrets_file=config.youtube_client_secrets_file,
@@ -260,6 +274,11 @@ def get_aggregator(context: AppContext = Depends(get_context)) -> NewsAggregator
 def get_pipeline(context: AppContext = Depends(get_context)) -> Pipeline:
     """Pipelineを取得する。"""
     return context.pipeline
+
+
+def get_artifact_store(context: AppContext = Depends(get_context)) -> ArtifactStore:
+    """生成物の保存先を取得する。"""
+    return context.artifact_store
 
 
 def get_generation_state(context: AppContext = Depends(get_context)) -> GenerationState:
