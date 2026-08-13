@@ -62,10 +62,29 @@ class Config(BaseSettings):
     azure_openai_api_key: SecretStr = Field(description="Azure OpenAI の API キー")
     azure_openai_deployment: str = Field(description="台本生成モデルのデプロイ名（例: gpt-5.1）")
     # 既定値を置かない。デプロイ名はモデル名と一致しないことが多く
-    # （モデル gpt-image-2 のデプロイ名が "gpt-image-2-1" だった）、
+    # （以前は モデル gpt-image-2 のデプロイ名が "gpt-image-2-1" だった）、
     # 推測した既定値は unknown_model という分かりにくい 400 を招く。
     azure_openai_image_deployment: str = Field(
-        description="画像生成モデルのデプロイ名（例: gpt-image-2-1）"
+        description="画像生成モデルのデプロイ名（例: gpt-image-2）"
+    )
+
+    # --- Azure OpenAI（画像生成のリソースが台本生成と別の場合） ---
+    #
+    # 画像生成は専用の Foundry プロジェクト（infra/ の azd で払い出す）に
+    # 置いており、台本生成とは別リージョン・別リソースになる。
+    # 理由: gpt-image-2 のクォータはサブスクリプション単位・リージョン単位で
+    # 上限 4 で、台本生成のある eastus2 は既存デプロイで使い切っていた。
+    #
+    # 未設定なら台本生成と同じエンドポイント・キーを使う。
+    # 単一リソースに両方のデプロイを置く構成も引き続き有効なので、
+    # その場合に設定を増やさなくて済むようにしている。
+    azure_openai_image_endpoint: str | None = Field(
+        default=None,
+        description="画像生成リソースのエンドポイント。未指定なら台本生成と同じものを使う",
+    )
+    azure_openai_image_api_key: SecretStr | None = Field(
+        default=None,
+        description="画像生成リソースの API キー。未指定なら台本生成と同じものを使う",
     )
 
     # 画像生成の同時リクエスト数。
@@ -153,22 +172,60 @@ class Config(BaseSettings):
             )
         return value
 
-    @field_validator("azure_openai_endpoint")
+    @field_validator("azure_openai_endpoint", "azure_openai_image_endpoint")
     @classmethod
-    def _check_endpoint_looks_like_a_url(cls, value: str) -> str:
+    def _check_endpoint_looks_like_a_url(cls, value: str | None) -> str | None:
         """エンドポイントが URL の形をしていること。
 
         リソース名だけを入れる間違いが起きやすく、その場合の
         エラーメッセージが分かりにくい。
         """
+        if value is None or value == "":
+            # 画像生成用は任意。空文字は未指定として扱う
+            return None
         if not value.startswith(("http://", "https://")):
-            raise ValueError(f"AZURE_OPENAI_ENDPOINT は http(s):// で始まる URL: {value!r}")
+            raise ValueError(f"エンドポイントは http(s):// で始まる URL: {value!r}")
         return value.rstrip("/")
 
     # --- 呼び出し側の名前に合わせるプロパティ ---
     # フィールド名は環境変数名に合わせている（google_tts_voice_ja）。
     # 既存コードは意味に沿った名前（voice_name_ja）で参照しているので、
     # ここで受ける。
+
+    @property
+    def image_endpoint(self) -> str:
+        """画像生成に使うエンドポイント。
+
+        専用リソースが設定されていればそれを、なければ台本生成と
+        同じものを返す。
+
+        Returns:
+            str: エンドポイント URL
+        """
+        return self.azure_openai_image_endpoint or self.azure_openai_endpoint
+
+    @property
+    def image_api_key(self) -> SecretStr:
+        """画像生成に使う API キー。
+
+        専用リソースが設定されていればそれを、なければ台本生成と
+        同じものを返す。
+
+        Returns:
+            SecretStr: API キー
+        """
+        return self.azure_openai_image_api_key or self.azure_openai_api_key
+
+    @property
+    def uses_dedicated_image_resource(self) -> bool:
+        """画像生成が台本生成と別リソースかどうか。
+
+        ログに出して、どちらの構成で動いているか分かるようにする。
+
+        Returns:
+            bool: 別リソースなら True
+        """
+        return self.azure_openai_image_endpoint is not None
 
     @property
     def voice_name_ja(self) -> str:

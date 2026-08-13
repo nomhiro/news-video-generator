@@ -52,9 +52,11 @@ class Pipeline:
             voice_name_en=config.voice_name_en,
             credentials_path=config.google_credentials_path,
         )
+        # 画像生成は台本生成と別リソースのことがある（別リージョンの
+        # 専用 Foundry プロジェクト）。config が使い分けを解決する。
         self.image_generator = ImageGenerator(
-            endpoint=config.azure_openai_endpoint,
-            api_key=api_key,
+            endpoint=config.image_endpoint,
+            api_key=config.image_api_key.get_secret_value(),
             deployment=config.azure_openai_image_deployment,
             max_concurrency=config.image_max_concurrency,
         )

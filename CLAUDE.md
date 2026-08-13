@@ -25,8 +25,13 @@ npm run build:css                                 # テンプレートのクラ�
 
 **ffmpeg / ffprobe** が PATH に必要（`video_composer.py` が subprocess で直接呼ぶ）。
 
-**Azure OpenAI** — 台本生成と画像生成の両方が同一のエンドポイントと API キーを共有する。
-デプロイは2つ必要（`AZURE_OPENAI_DEPLOYMENT` と `AZURE_OPENAI_IMAGE_DEPLOYMENT`）。
+**Azure OpenAI** — 台本生成（`AZURE_OPENAI_DEPLOYMENT`）と画像生成
+（`AZURE_OPENAI_IMAGE_DEPLOYMENT`）の2つのデプロイを使う。
+
+画像生成は `infra/` の azd テンプレートで払い出す**専用の Foundry プロジェクト**
+（`rg-newsvideo-img` / westus3）に置いており、台本生成とは別リソース。
+`AZURE_OPENAI_IMAGE_ENDPOINT` / `AZURE_OPENAI_IMAGE_API_KEY` で指定する。
+未設定なら台本生成と同じものを流用するので、単一リソース構成でも動く。
 
 **Google Cloud Text-to-Speech** — 音声合成。サービスアカウント JSON か ADC。
 
@@ -72,12 +77,38 @@ az cognitiveservices account deployment list -n <resource> -g <resource-group> -
 
 ### 画像生成のクォータが速度の律速
 
-`gpt-image-2` の既定クォータは 5 images/min 程度。ショート1本で6枚使うため、
-既定のままでは1本の生成に1分以上かかる。並行数は `IMAGE_MAX_CONCURRENCY` で制御し、
-429 は `tenacity` でバックオフ再試行する。
+`gpt-image-2` のクォータは**サブスクリプション単位・リージョン単位で上限 4**。
+リソースを増やしてもリージョンが同じなら増えない。引き上げには Azure ポータルからの
+申請が必要（自動化できない）。
+
+現在は westus3 に capacity 4。ショート1本で6枚使うため、1本の生成に1分以上かかる。
+並行数は `IMAGE_MAX_CONCURRENCY` で制御し、429 は `tenacity` でバックオフ再試行する。
+
+画像生成を別リージョンに置いている理由がこれ。台本生成のある eastus2 は
+既存デプロイ（別プロジェクトの `gpt-image-2-1`）が 4/4 を使い切っていた。
 
 異なるプロンプトの複数枚を `n` パラメータで1リクエストに畳むことはできない
 （`n` は同一プロンプトからの複数枚生成）。6枚は6リクエストが必要。
+
+### インフラは azd で管理する
+
+```bash
+azd provision          # 払い出し（AI リソースのみ）
+azd provision --preview # what-if。作成されるものを確認する
+azd down               # 破棄
+```
+
+`infra/main.bicep` がサブスクリプションスコープでリソースグループから作る。
+`deployApp` パラメータは既定 false で、Container Apps は払い出さない
+（Dockerfile が未検証のため。`infra/core/app-hosting.bicep` の冒頭を参照）。
+
+**API キーは Bicep の output にしていない。** ARM の output はデプロイ履歴に
+平文で残り、リソースグループの閲覧権限があれば読めてしまう。
+`infra/hooks/postprovision.*` が az CLI で取得して表示する。
+
+Foundry プロジェクトとモデルデプロイには `dependsOn` を入れて直列化してある。
+どちらも親アカウントを変更する操作なので、並列に走らせると
+`Another operation is in progress on the resource` で片方が失敗する（一度踏んだ）。
 
 ### 台本の構造は Structured Outputs のスキーマで強制されている
 

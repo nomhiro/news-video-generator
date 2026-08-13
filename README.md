@@ -43,23 +43,40 @@ sudo apt install ffmpeg        # Linux
 
 **Azure OpenAI（必須）**
 
-Azure AI Foundry で **2つのデプロイ**を作成する。
+用途ごとに2つのデプロイが必要。
 
-| 用途 | モデル | 備考 |
+| 用途 | モデル | 払い出し方法 |
 |---|---|---|
-| 台本生成 | `gpt-5.1` 以降 | Responses API と Structured Outputs に対応している世代が必要 |
-| 画像生成 | `gpt-image-2` | GA なのでアクセス申請は不要 |
+| 台本生成 | `gpt-5.1` 以降 | 手動（Responses API と Structured Outputs 対応世代が必要） |
+| 画像生成 | `gpt-image-2` | **`azd provision` で自動**（下記） |
 
-作成したデプロイ名を確認する。**デプロイ名はモデル名と一致しないことが多い**ので、
-必ず実際の名前を使うこと。
+画像生成側は [Azure Developer CLI](https://aka.ms/azd) で専用の Foundry
+プロジェクトを払い出す。
+
+```bash
+az login
+azd env new <環境名> --location westus3
+azd provision --preview   # 何が作られるか確認
+azd provision             # 払い出し
+```
+
+完了時に `.env` へ追記する3行が表示される。`infra/` の内容は
+[`CLAUDE.md`](CLAUDE.md) の「インフラは azd で管理する」を参照。
+
+破棄は `azd down`。
+
+台本生成側のデプロイ名は手動で確認する。**デプロイ名はモデル名と一致しないことが
+多い**ので、必ず実際の名前を使うこと。
 
 ```bash
 az cognitiveservices account deployment list -n <resource> -g <resource-group> -o table
 ```
 
 > **画像生成のクォータについて**
-> `gpt-image-2` の既定クォータは 5 images/min 程度で、これが生成速度の律速になる。
-> ショート1本で6枚、長尺で10枚以上使うため、実用するならクォータの引き上げ申請を推奨する。
+> `gpt-image-2` のクォータは**サブスクリプション単位・リージョン単位で上限 4**。
+> リソースを増やしてもリージョンが同じなら増えない。ショート1本で6枚、
+> 長尺で10枚以上使うため、1本の生成に1分以上かかる。
+> 引き上げには Azure ポータルからの申請が必要。
 
 **Google Cloud Text-to-Speech（必須）**
 

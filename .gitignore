@@ -91,3 +91,6 @@ data/news/*
 # Node (CSS のビルドにのみ使う)
 # 生成物 static/css/app.css は追跡する。アプリの実行に Node は不要。
 node_modules/
+
+# azd (環境ごとの設定と払い出し結果。キーを含むため追跡しない)
+.azure/

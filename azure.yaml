@@ -1,0 +1,31 @@
+# Azure Developer CLI の設定。
+# スキーマ: https://github.com/Azure/azure-dev/blob/main/schemas/v1.0/azure.yaml.json
+#
+# このアプリはローカル実行のツールなので、今は `azd provision` で
+# インフラ（AI Foundry と gpt-image-2 デプロイ）だけを管理する。
+#
+# 将来 Azure 上で動かすためのホスティング定義も infra/ に書いてあるが、
+# `deployApp` パラメータで既定無効にしている。Dockerfile を実機で
+# 検証できていない状態で Container Apps を払い出すと、動かないリソースに
+# 課金が発生するため。検証後に `azd env set DEPLOY_APP true` で有効化する。
+name: news-video-generator
+metadata:
+  template: news-video-generator@0.1.0
+
+infra:
+  provider: bicep
+  path: infra
+  module: main
+
+hooks:
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./infra/hooks/postprovision.ps1
+      continueOnError: false
+      interactive: false
+    posix:
+      shell: sh
+      run: ./infra/hooks/postprovision.sh
+      continueOnError: false
+      interactive: false

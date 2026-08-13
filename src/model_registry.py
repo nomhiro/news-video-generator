@@ -124,14 +124,18 @@ ACTIVE_MODELS: tuple[ModelEntry, ...] = (
         vendor=Vendor.AZURE_OPENAI,
         model_id="gpt-image-2",
         model_version="2026-04-21",
-        deployment_name="gpt-image-2-1",
+        deployment_name="gpt-image-2",
         used_by="src/generators/image_generator.py",
         shutdown_on=None,
         notes=(
             "GA。imagen-3.0-generate-002 (2025-11-10 停止) の後継として採用。"
             "任意解像度に対応する唯一の gpt-image 系で、両辺16の倍数・"
             "長辺3840以下・総ピクセル数 655,360〜8,294,400 の制約がある。"
-            "既定クォータは 5 images/min 程度で、これが生成速度の律速になる。"
+            "専用の Foundry プロジェクト（infra/ の azd テンプレートで払い出す、"
+            "rg-newsvideo-img / westus3）に置いており、台本生成とは別リソース。"
+            "クォータがサブスクリプション単位・リージョン単位で上限 4 のため、"
+            "台本生成のある eastus2 は既存デプロイで使い切っていた。"
+            "capacity 4（≒4 images/min）が生成速度の律速になる。"
         ),
     ),
     ModelEntry(
