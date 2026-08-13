@@ -1,6 +1,7 @@
 """Video composition using FFmpeg."""
 
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -44,14 +45,33 @@ class VideoComposer:
     TEXT_LINE_SPACING = -70  # 行間（ピクセル）- 負の値で行を詰める
     TEXT_MAX_CHARS_PER_LINE = 14  # 1行の最大文字数
 
-    # Windows用日本語フォントパス（親しみのある丸ゴシック系を優先）
-    JAPANESE_FONTS_WINDOWS: ClassVar[list[str]] = [
+    # テキストオーバーレイに使う日本語フォントの候補。
+    #
+    # Windows と Linux の両方を並べる理由: 開発は Windows、コンテナは Linux。
+    # 以前は Windows のパスしか持っておらず、Linux コンテナでは
+    # 必ず「日本語フォントが見つかりません」で動画合成が失敗していた。
+    #
+    # 環境変数 VIDEO_FONT_PATH を設定すれば、この一覧より優先される。
+    JAPANESE_FONT_CANDIDATES: ClassVar[list[str]] = [
+        # Windows
         "C:/Windows/Fonts/YuGothB.ttc",  # Yu Gothic Bold（太めで見やすい）
         "C:/Windows/Fonts/meiryob.ttc",  # Meiryo Bold
         "C:/Windows/Fonts/meiryo.ttc",  # Meiryo
         "C:/Windows/Fonts/YuGothM.ttc",  # Yu Gothic Medium
         "C:/Windows/Fonts/msgothic.ttc",  # MS Gothic
+        # Linux（Dockerfile が fonts-noto-cjk を入れる）
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+        # macOS
+        "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
     ]
+
+    # フォントを明示指定する環境変数。
+    # 候補に無いフォントを使いたい場合や、コンテナイメージの
+    # フォント配置が変わった場合の逃げ道。
+    FONT_PATH_ENV_VAR = "VIDEO_FONT_PATH"
 
     def _get_japanese_font_path(self) -> str:
         """使用可能な日本語フォントのパスを取得する。
@@ -62,16 +82,39 @@ class VideoComposer:
         Raises:
             VideoCompositionError: 使用可能な日本語フォントが見つからない場合
         """
-        for font_path in self.JAPANESE_FONTS_WINDOWS:
-            if Path(font_path).exists():
-                # Escape for FFmpeg on Windows: C:/path -> C\:/path
-                escaped_path = font_path.replace(":", "\\:")
-                return escaped_path
+        override = os.environ.get(self.FONT_PATH_ENV_VAR)
+        candidates = (
+            [override, *self.JAPANESE_FONT_CANDIDATES]
+            if override
+            else list(self.JAPANESE_FONT_CANDIDATES)
+        )
+
+        for font_path in candidates:
+            if font_path and Path(font_path).exists():
+                return self._escape_for_ffmpeg(font_path)
 
         raise VideoCompositionError(
-            "日本語フォントが見つかりません。以下のいずれかをインストールしてください:\n"
-            "- Meiryo\n- Yu Gothic\n- MS Gothic"
+            "日本語フォントが見つかりません。次のいずれかで解決してください:\n"
+            f"  - {self.FONT_PATH_ENV_VAR} にフォントファイルのパスを設定する\n"
+            "  - Windows: Meiryo / Yu Gothic / MS Gothic を入れる\n"
+            "  - Linux: fonts-noto-cjk を入れる（apt install fonts-noto-cjk）\n"
+            f"探索したパス:\n" + "\n".join(f"    {c}" for c in candidates if c)
         )
+
+    @staticmethod
+    def _escape_for_ffmpeg(font_path: str) -> str:
+        """fontfile の値として ffmpeg のフィルタ式に埋め込める形にする。
+
+        ffmpeg のフィルタ記法ではコロンが引数の区切りなので、
+        Windows のドライブレター（C:/...）をそのまま渡すと解釈が壊れる。
+
+        Args:
+            font_path: フォントファイルのパス
+
+        Returns:
+            str: エスケープ済みのパス
+        """
+        return font_path.replace("\\", "/").replace(":", "\\:")
 
     def _wrap_text(self, text: str, max_chars: int | None = None) -> str:
         """テキストを指定文字数で自動改行する。

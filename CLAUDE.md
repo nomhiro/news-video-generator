@@ -99,8 +99,9 @@ azd down               # 破棄
 ```
 
 `infra/main.bicep` がサブスクリプションスコープでリソースグループから作る。
-`deployApp` パラメータは既定 false で、Container Apps は払い出さない
-（Dockerfile が未検証のため。`infra/core/app-hosting.bicep` の冒頭を参照）。
+`deployApp` パラメータは既定 false で、Container Apps は払い出さない。
+Dockerfile は検証済みだが、クラウドで動かすには TTS の資格情報の受け渡しと
+生成物の保存先が未解決（`infra/core/app-hosting.bicep` の冒頭を参照）。
 
 **API キーは Bicep の output にしていない。** ARM の output はデプロイ履歴に
 平文で残り、リソースグループの閲覧権限があれば読めてしまう。
@@ -200,6 +201,30 @@ Starlette の `BackgroundTask` は非同期関数をイベントループ上で�
 検査と、uvicorn を実際に起動して生成中に `/status` が返ることの検査。
 後者は TestClient では書けない（TestClient はバックグラウンドタスクを
 リクエスト処理内で完了させてしまい、この状況を再現できない）。
+
+### コンテナで動かすときの前提
+
+```bash
+docker build -t newsvideo .
+docker run --rm -p 8000:8000 --env-file .env \
+  -e WEB_HOST=0.0.0.0 \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-sa.json \
+  -v "/path/to/service-account.json:/secrets/gcp-sa.json:ro" \
+  newsvideo
+```
+
+Git Bash から実行するときは `MSYS_NO_PATHCONV=1` を付ける。付けないと
+`-v` の右辺（`/secrets/...`）を Windows パスに変換されてマウントが壊れる。
+
+**日本語フォントの同梱が必須。** `fonts-noto-cjk` を入れないと `drawtext` が
+描画できず動画合成が失敗する。イメージは
+`/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc` を `VIDEO_FONT_PATH` で
+明示している。フォント探索は `VideoComposer.JAPANESE_FONT_CANDIDATES` で
+Windows / Linux / macOS のパスを並べており、`VIDEO_FONT_PATH` が最優先。
+
+**サービスアカウント JSON はイメージに入れない。** `.dockerignore` が除外して
+いるので、実行時にマウントして `GOOGLE_APPLICATION_CREDENTIALS` で指す。
+入れ忘れると `FileNotFoundError` で起動に失敗する（設計どおり）。
 
 ## 規約
 

@@ -2,19 +2,24 @@
 //
 // **既定では払い出さない**（main.bicep の deployApp = false）。
 //
-// 理由: このアプリは ffmpeg を subprocess で呼び、テキストオーバーレイに
-// 日本語フォントを使う。コンテナイメージにそれらを同梱する Dockerfile が
-// まだ実機で検証できていない（Docker デーモンが動かせなかった）。
-// 動かないイメージのために Container Apps 環境を払い出すと課金だけが
-// 発生するため、検証が済むまで無効にしている。
+// Dockerfile は実機で検証済み（ffmpeg 7.1.5、日本語フォントの描画、
+// 全ルートの応答、healthcheck が healthy になること）。
+// それでも既定を false にしているのは、払い出すと課金が始まるうえ、
+// クラウドで動かすには次の未解決事項が残っているため。
+//
+//   - Google Cloud TTS のサービスアカウント JSON をシークレットとして
+//     渡す仕組みが必要（イメージには焼き込まない）。Phase 3 で音声を
+//     Azure AI Speech に移せば、この資格情報そのものが不要になる
+//   - 生成物（動画・画像・音声）がコンテナのファイルシステムに残る。
+//     再起動で消えるので Blob Storage への移行が必要
+//   - 進捗状態がプロセスメモリにあるため minReplicas/maxReplicas は 1 固定
+//   - YouTube / TikTok の OAuth トークンもローカルファイル前提
 //
 // 有効化する手順:
-//   1. Dockerfile を書き、`docker build` と `docker run` で
-//      ffmpeg と日本語フォントが効くことを確認する
-//   2. azd env set DEPLOY_APP true
-//   3. azd up
+//   azd env set DEPLOY_APP true
+//   azd up
 //
-// この定義自体は `az deployment sub what-if` で ARM 側の検証を通してある
+// この定義は `az deployment sub what-if` で ARM 側の検証を通してある
 // （リソースは作成していない）。
 
 @description('リージョン')

@@ -1,0 +1,43 @@
+# イメージに入れないもの。
+# ビルドコンテキストを小さくし、秘密情報を持ち込まないため。
+
+# 秘密情報
+.env
+.env.*
+!.env.example
+client_secrets.json
+*_token.json
+*-service-account*.json
+neat-tube-*.json
+
+# 環境と生成物
+.venv/
+node_modules/
+output/
+data/news/*.json
+__pycache__/
+*.py[cod]
+
+# ツールのキャッシュ
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 開発用の資産（実行には不要）
+.git/
+.github/
+.azure/
+.claude/
+tests/
+infra/
+azure.yaml
+*.md
+!README.md
+
+# CSS のソース（app.css は生成済みのものをコピーする）
+static/css/input.css
+package.json
+package-lock.json
+tailwind.config.js
