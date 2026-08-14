@@ -76,10 +76,18 @@ class FakeAggregator:
 class FakeArticle:
     """`scrape_selected_content` の戻り値として最小限の形。"""
 
-    def __init__(self, article_id: str, title: str, content: str = "本文" * 60):
+    def __init__(
+        self,
+        article_id: str,
+        title: str,
+        content: str = "本文" * 60,
+        url: str = "https://example.com/a",
+    ):
         self.id = article_id
         self.title = title
         self.content = content
+        # 出典 URL は台本の説明文に載せるため PipelineJobRunner が読む
+        self.url = url
 
 
 @pytest.fixture

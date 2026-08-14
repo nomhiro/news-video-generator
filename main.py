@@ -11,6 +11,14 @@ Usage:
     python main.py "ニューストピック" -f long         # 5分解説動画
     python main.py "ニューストピック" -o ./my_videos
     python main.py "ニューストピック" -v
+
+絵文字は直書きしない
+--------------------
+以前は `print("🚀 ...")` のように直書きしていた。Windows の日本語
+コンソール（cp932）では TTY なのに絵文字をエンコードできず、
+**起動直後に `UnicodeEncodeError` で落ちた**（実際に踏んだ）。
+`src/utils/logger.prefix()` を通せば、書けない出力先では
+`INFO:` / `OK:` / `ERROR:` / `WARN:` に落ちる。
 """
 
 import argparse
@@ -21,7 +29,7 @@ from pydantic import ValidationError
 
 from config import Config
 from src.pipeline import Pipeline
-from src.utils.logger import setup_logger
+from src.utils.logger import prefix, setup_logger
 
 
 def main() -> int:
@@ -59,6 +67,14 @@ Examples:
         choices=["short", "tiktok", "long"],
         help="動画形式: short(35秒), tiktok(60-90秒), long(5分) (default: short)",
     )
+    # 出典 URL は台本の説明文に載せる（YouTube の再利用コンテンツ対策）。
+    # 任意なのは、CLI が自由テキストのトピックを受け取るため。
+    # Web/定期実行の経路では記事の URL が常に入る。
+    parser.add_argument(
+        "--source-url",
+        default="",
+        help="元記事のURL（説明文に出典として記載する）",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="詳細なログを出力")
 
     args = parser.parse_args()
@@ -72,12 +88,12 @@ Examples:
     try:
         config = Config.from_env()
     except ValidationError as e:
-        print("❌ 設定エラー:")
+        print(f"{prefix('error', '❌')} 設定エラー:")
         for error in e.errors():
             field = ".".join(str(loc) for loc in error["loc"]) or "(不明)"
             print(f"   {field.upper()}: {error['msg']}")
         print("")
-        print("💡 ヒント: .envファイルに必要な値を設定してください")
+        print(f"{prefix('step', '💡')} ヒント: .envファイルに必要な値を設定してください")
         print("   .env.exampleを参考にしてください")
         return 1
 
@@ -91,17 +107,22 @@ Examples:
             "tiktok": "TikTok(60-90秒)",
             "long": "ロング(5分)",
         }
-        print("🚀 動画生成を開始します")
+        print(f"{prefix('step', '🚀')} 動画生成を開始します")
         print(f"   トピック: {args.topic}")
         print(f"   言語: {', '.join(args.languages)}")
         print(f"   形式: {format_names.get(args.format, args.format)}")
         print(f"   出力先: {args.output}")
         print("")
 
-        result = pipeline.run(args.topic, args.languages, video_format=args.format)
+        result = pipeline.run(
+            args.topic,
+            args.languages,
+            video_format=args.format,
+            source_url=args.source_url,
+        )
 
         print("")
-        print("🎉 完了!")
+        print(f"{prefix('success', '🎉')} 完了!")
         for lang, path in result["videos"].items():
             lang_name = "日本語" if lang == "ja" else "英語"
             print(f"   {lang_name}: {path}")
@@ -110,12 +131,12 @@ Examples:
 
     except KeyboardInterrupt:
         print("")
-        print("⚠️ 中断されました")
+        print(f"{prefix('warning', '⚠️')} 中断されました")
         return 1
 
     except Exception as e:
         print("")
-        print(f"❌ エラー: {e}")
+        print(f"{prefix('error', '❌')} エラー: {e}")
         if args.verbose:
             import traceback
 

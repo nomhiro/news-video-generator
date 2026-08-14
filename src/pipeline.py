@@ -150,6 +150,7 @@ class Pipeline:
         languages: list[str] | None = None,
         output_name: str | None = None,
         video_format: str = "short",
+        source_url: str = "",
     ) -> dict[str, Any]:
         """パイプライン全体を実行する。
 
@@ -158,6 +159,8 @@ class Pipeline:
             languages: 生成する言語のリスト（デフォルト: ["ja", "en"]）
             output_name: 出力ファイル名（指定しない場合はタイムスタンプ）
             video_format: 動画形式 ("short" or "long")
+            source_url: 元記事の URL。台本の説明文に出典として載せる
+                （再利用コンテンツ対策）。CLI の自由テキスト実行では空
 
         Returns:
             Dict[str, Any]: 実行結果のサマリー
@@ -190,7 +193,9 @@ class Pipeline:
             script_paths: dict[str, Path] = {}
 
             for lang in languages:
-                script = self.script_generator.generate(news_topic, lang, video_format)
+                script = self.script_generator.generate(
+                    news_topic, lang, video_format, source_url=source_url
+                )
                 scripts[lang] = script
 
                 # Save script to file

@@ -36,6 +36,7 @@ class SupportsGeneration(Protocol):
         languages: list[str] | None = ...,
         output_name: str | None = ...,
         video_format: str = ...,
+        source_url: str = ...,
     ) -> dict[str, Any]:
         """1本生成する。"""
         ...
@@ -45,7 +46,7 @@ class ArticleLike(Protocol):
     """台本生成に必要な記事の項目だけ。
 
     `NewsArticle` そのものを要求しない理由: このモジュールが使うのは
-    3つの属性だけで、ニュースモデル全体に依存する必要がない
+    4つの属性だけで、ニュースモデル全体に依存する必要がない
     （テストで差し替えるときも軽くなる）。
     """
 
@@ -57,6 +58,9 @@ class ArticleLike(Protocol):
 
     @property
     def content(self) -> str | None: ...
+
+    @property
+    def url(self) -> str: ...
 
 
 class SupportsArticleLookup(Protocol):
@@ -115,12 +119,16 @@ class PipelineJobRunner:
                 "ニュースを再取得してから、もう一度お試しください"
             )
 
+        # URL はトピック（プロンプト入力）に含めない。モデルに URL を扱わせると
+        # 台本本文に書き込もうとするので、出典は引数で渡してコード側が
+        # 説明文に追記する（src/models/script.py の _with_source）。
         topic = f"{article.title}\n\n{article.content[:MAX_CONTENT_CHARS]}"
         result = self._pipeline.run(
             topic,
             languages=[job.language],
             output_name=article.title,
             video_format=job.video_format,
+            source_url=article.url,
         )
 
         # 生成に成功したのでニュース側にも印を付ける。
