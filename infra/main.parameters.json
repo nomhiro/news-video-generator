@@ -35,6 +35,15 @@
     "speechApiKey": {
       "value": "${AZURE_SPEECH_API_KEY=}"
     },
+    "scheduleEnabled": {
+      "value": "${SCHEDULE_ENABLED=true}"
+    },
+    "scheduleTime": {
+      "value": "${SCHEDULE_TIME=06:30}"
+    },
+    "scheduleFormats": {
+      "value": "${SCHEDULE_FORMATS=short,long}"
+    },
     "containerImage": {
       "value": "${SERVICE_WEB_IMAGE_NAME=mcr.microsoft.com/k8se/quickstart:latest}"
     },

@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from fastapi import Depends, FastAPI, Request
 
 from config import Config
+from src.jobs.planner import plan_daily_batch
 from src.jobs.runner import PipelineJobRunner
+from src.jobs.scheduler import DailyScheduler
 from src.jobs.worker import JobWorker
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
@@ -43,6 +45,7 @@ class AppContext:
         artifact_store: 生成物の保存先（ローカル or Blob Storage）
         jobs: ジョブ表（進捗の永続化）
         worker: ジョブを実行するワーカー
+        scheduler: 定期実行（無効なら None）
         youtube_uploader: YouTube アップローダ
         tiktok_uploader: TikTok アップローダ
     """
@@ -53,6 +56,7 @@ class AppContext:
     artifact_store: ArtifactStore
     jobs: JobRepository
     worker: JobWorker
+    scheduler: DailyScheduler | None
     youtube_uploader: YouTubeUploader
     tiktok_uploader: TikTokUploader
 
@@ -108,6 +112,7 @@ class AppContext:
             artifact_store=artifact_store,
             jobs=jobs,
             worker=JobWorker(jobs, PipelineJobRunner(pipeline, aggregator)),
+            scheduler=_build_scheduler(config, aggregator, jobs),
             youtube_uploader=YouTubeUploader(token_store=token_store),
             tiktok_uploader=TikTokUploader(
                 client_key=config.tiktok_client_key.get_secret_value(),
@@ -116,6 +121,42 @@ class AppContext:
                 redirect_uri=config.tiktok_redirect_uri,
             ),
         )
+
+
+def _build_scheduler(
+    config: Config, aggregator: NewsAggregator, jobs: JobRepository
+) -> DailyScheduler | None:
+    """定期実行を組み立てる（無効なら None）。
+
+    既定で無効にしている理由: ローカルで開発しているだけのときに、
+    毎朝ニュースを取得して動画を作り始めると課金が発生する。
+
+    Args:
+        config: アプリケーション設定
+        aggregator: ニュースストア
+        jobs: ジョブ表
+
+    Returns:
+        DailyScheduler | None: 有効なら組み立てたスケジューラ
+    """
+    if not config.schedule_enabled:
+        return None
+
+    async def task() -> object:
+        return await plan_daily_batch(
+            aggregator,
+            jobs,
+            formats=config.schedule_formats,
+            search_queries=config.ai_search_queries,
+            ai_limit_per_query=config.ai_news_limit_per_query,
+            articles_per_format=config.schedule_articles_per_format,
+        )
+
+    return DailyScheduler(
+        task,
+        run_at=config.schedule_run_at,
+        timezone=config.schedule_timezone,
+    )
 
 
 def get_context(request: Request) -> AppContext:
@@ -195,9 +236,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ワーカーはアプリの寿命に紐づく。リクエストごとの
     # BackgroundTask ではなく、ここで1つ起動して使い回す。
     context.worker.start()
+    if context.scheduler is not None:
+        context.scheduler.start()
     try:
         yield
     finally:
+        if context.scheduler is not None:
+            context.scheduler.stop()
         # 停止を待つ。待たずに落とすと、実行中のジョブが RUNNING のまま
         # 残る（リースが切れれば回収されるが、無駄に15分待つことになる）。
         context.worker.stop()

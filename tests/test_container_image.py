@@ -11,6 +11,8 @@ Dockerfile を読むだけの静的な検査。実際にビルドはしない
 `CommandError: Path doesn't exist: /app/migrations` で起動に失敗した。
 """
 
+import pathlib
+
 import pytest
 
 from tests.conftest import REPO_ROOT
@@ -115,3 +117,68 @@ def test_dockerfile_and_docker_ignore_agree_on_output() -> None:
     """生成物のディレクトリはイメージに入れないこと（数百MBになる）。"""
     ignored = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
     assert "output" in ignored
+
+
+# --------------------------------------------------------------------------
+# コンテナの CPU 割り当てを尊重すること
+#
+# ffmpeg の既定（-threads 0）はホストのコア数だけスレッドを立てる。
+# コンテナの割り当てを見ないので、2 vCPU の環境で 20 スレッドが動き、
+# スレッドごとのフレームバッファでメモリを食い潰して OOM killer に
+# 殺された（長尺 1920x1080 / 307秒 が 終了コード -9）。
+# --------------------------------------------------------------------------
+
+
+def test_thread_count_follows_the_cgroup_v2_quota(tmp_path: pathlib.Path) -> None:
+    """cgroup v2 の割り当てからスレッド数を決めること。"""
+    from src.generators.video_composer import _available_cpus
+
+    cpu_max = tmp_path / "cpu.max"
+    cpu_max.write_text("200000 100000", encoding="utf-8")  # = 2 CPU
+
+    assert _available_cpus(cpu_max=cpu_max) == 2
+
+
+def test_thread_count_follows_the_cgroup_v1_quota(tmp_path: pathlib.Path) -> None:
+    """cgroup v1 でも読めること。"""
+    from src.generators.video_composer import _available_cpus
+
+    quota = tmp_path / "quota"
+    period = tmp_path / "period"
+    quota.write_text("400000", encoding="utf-8")
+    period.write_text("100000", encoding="utf-8")
+
+    assert _available_cpus(cpu_max=tmp_path / "missing", quota_path=quota, period_path=period) == 4
+
+
+def test_unlimited_quota_falls_back_to_cpu_count(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """制限が無い（ローカル実行）なら os.cpu_count() を使うこと。"""
+    from src.generators import video_composer
+
+    cpu_max = tmp_path / "cpu.max"
+    cpu_max.write_text("max 100000", encoding="utf-8")
+    monkeypatch.setattr(video_composer.os, "cpu_count", lambda: 8)
+
+    assert video_composer._available_cpus(cpu_max=cpu_max) == 8
+
+
+def test_at_least_one_cpu(tmp_path: pathlib.Path) -> None:
+    """0 にならないこと（-threads 0 は「自動」を意味してしまう）。"""
+    from src.generators.video_composer import _available_cpus
+
+    cpu_max = tmp_path / "cpu.max"
+    cpu_max.write_text("50000 100000", encoding="utf-8")  # 0.5 CPU
+
+    assert _available_cpus(cpu_max=cpu_max) == 1
+
+
+def test_composer_passes_a_thread_limit() -> None:
+    """ffmpeg のコマンドに -threads を渡していること。
+
+    渡さないとホストのコア数で動き、コンテナのメモリ制限を超える。
+    """
+    source = (REPO_ROOT / "src" / "generators" / "video_composer.py").read_text(encoding="utf-8")
+    assert '"-threads",' in source
+    assert "_available_cpus()" in source

@@ -123,6 +123,28 @@ param stateShareName string = 'data'
 ジョブ表（SQLite）は SMB 上で動かないためローカルディスクに置く。''')
 param stateMountPath string = '/app/data'
 
+// --- 定期実行 ---
+
+@description('''毎日の自動生成を有効にするか。
+クラウドでは既定で有効。アプリ側の既定は無効
+（ローカル開発中に勝手に生成が走って課金するのを防ぐため）。''')
+param scheduleEnabled bool = true
+
+@description('実行時刻（scheduleTimezone のローカル時刻、HH:MM）')
+param scheduleTime string = '06:30'
+
+@description('実行時刻の基準タイムゾーン')
+param scheduleTimezone string = 'Asia/Tokyo'
+
+@description('''毎日作る形式（カンマ区切り）。
+収益化はショート（認知）と長尺（再生時間）の両輪なので既定は両方。''')
+param scheduleFormats string = 'short,long'
+
+@description('''形式ごとに何件の記事を対象にするか。
+画像生成のクォータ（capacity 4 ≒ 4 images/min）が律速なので、
+増やす前にクォータを上げる。''')
+param scheduleArticlesPerFormat int = 1
+
 @description('''動かすコンテナイメージ。
 既定はプレースホルダで、初回の払い出し時だけ使う。
 `azd deploy` が実イメージに差し替え、その名前を azd env の
@@ -394,6 +416,30 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               // DATABASE_URL を PostgreSQL に向ける。
               name: 'DATABASE_URL'
               value: 'sqlite:////app/state/newsvideo.db'
+            }
+            // --- 定期実行 ---
+            // 生成までを自動で行い、YouTube への公開はしない
+            // （人が確認して押す。収益化では「再利用されたコンテンツ」
+            //  ポリシーがリスクなので、目視の価値が大きい）。
+            {
+              name: 'SCHEDULE_ENABLED'
+              value: string(scheduleEnabled)
+            }
+            {
+              name: 'SCHEDULE_TIME'
+              value: scheduleTime
+            }
+            {
+              name: 'SCHEDULE_TIMEZONE'
+              value: scheduleTimezone
+            }
+            {
+              name: 'SCHEDULE_FORMATS'
+              value: scheduleFormats
+            }
+            {
+              name: 'SCHEDULE_ARTICLES_PER_FORMAT'
+              value: string(scheduleArticlesPerFormat)
             }
             {
               name: 'WEB_HOST'

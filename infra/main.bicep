@@ -101,6 +101,15 @@ param speechApiKey string = ''
 //     --web-redirect-uris "https://<fqdn>/.auth/login/aad/callback"
 //   az ad app credential reset --id <objectId> --years 2
 
+@description('毎日の自動生成を有効にするか')
+param scheduleEnabled bool = true
+
+@description('自動生成の実行時刻（日本時間、HH:MM）')
+param scheduleTime string = '06:30'
+
+@description('毎日作る形式（カンマ区切り）')
+param scheduleFormats string = 'short,long'
+
 @description('''動かすコンテナイメージ。既定はプレースホルダ。
 azd deploy 後は SERVICE_WEB_IMAGE_NAME から渡される。''')
 param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
@@ -230,6 +239,9 @@ module appHosting 'core/app-hosting.bicep' = if (deployApp) {
     resourceToken: resourceToken
     registryName: registryName
     containerImage: containerImage
+    scheduleEnabled: scheduleEnabled
+    scheduleTime: scheduleTime
+    scheduleFormats: scheduleFormats
     artifactAccountUrl: storageAccountUrl
     artifactContainerName: artifactContainerName
     tokenContainerName: tokenContainerName

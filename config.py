@@ -14,11 +14,26 @@ pydantic-settings で環境変数を読み、型と必須項目を検証する�
 既存の `.env` が動かなくなるため。
 """
 
+from datetime import time as dt_time
 from pathlib import Path
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# リスト型の設定は `NoDecode` を付ける。
+#
+# pydantic-settings は list 型のフィールドを「複雑な型」として扱い、
+# 環境変数の値を **field_validator より前に json.loads する**。
+# そのため `AI_SEARCH_QUERIES=生成AI,ChatGPT` のような素直な書き方は
+# `SettingsError: error parsing value for field ...` で落ちる。
+#
+# 厄介なのは、`.env` 経由（DotEnvSettingsSource）では通り、
+# **実際の環境変数のときだけ落ちる**こと。ローカルは .env で動くので
+# 気付かず、Container Apps に env として渡した時点で起動しなくなった
+# （一度踏んだ）。NoDecode を付けると JSON 解釈を飛ばし、
+# 下の mode="before" バリデータが分割を担当する。
+CommaSeparated = Annotated[list[str], NoDecode]
 
 # AI関連ニュースの既定の検索クエリ。
 # 環境変数 AI_SEARCH_QUERIES で上書きできる。
@@ -166,8 +181,27 @@ class Config(BaseSettings):
     # --- ニュース取得 ---
     news_data_dir: Path = Field(default=Path("./data/news"))
     news_fetch_limit: int = Field(default=10, ge=1)
-    ai_search_queries: list[str] = Field(default=list(DEFAULT_AI_SEARCH_QUERIES))
+    ai_search_queries: CommaSeparated = Field(default=list(DEFAULT_AI_SEARCH_QUERIES))
     ai_news_limit_per_query: int = Field(default=5, ge=1)
+
+    # --- 定期実行 ---
+    #
+    # 既定は無効。ローカルで開発しているだけのときに、勝手にニュースを
+    # 取得して動画を作り始めると課金が発生する。
+    # クラウド側は infra/ の Bicep が有効にする。
+    schedule_enabled: bool = Field(default=False)
+
+    # 実行時刻（SCHEDULE_TIMEZONE のローカル時刻、HH:MM）。
+    # 朝に回すと、出社前に前日夜〜当日朝のニュースで作れる。
+    schedule_time: str = Field(default="06:30")
+    schedule_timezone: str = Field(default="Asia/Tokyo")
+
+    # 作る形式。収益化はショート（認知）と長尺（再生時間）の両輪なので既定は両方。
+    schedule_formats: CommaSeparated = Field(default=["short", "long"])
+
+    # 形式ごとに何件の記事を対象にするか。
+    # 画像生成のクォータが律速なので、増やす前にクォータを上げる。
+    schedule_articles_per_format: int = Field(default=1, ge=1, le=10)
 
     # --- Web サーバー ---
     web_host: str = Field(default="127.0.0.1")
@@ -217,6 +251,65 @@ class Config(BaseSettings):
         if isinstance(value, str):
             queries = [q.strip() for q in value.split(",") if q.strip()]
             return queries or list(DEFAULT_AI_SEARCH_QUERIES)
+        return value
+
+    @field_validator("schedule_formats", mode="before")
+    @classmethod
+    def _parse_schedule_formats(cls, value: object) -> object:
+        """カンマ区切りの文字列をリストに変換する。
+
+        `SCHEDULE_FORMATS=short,long` と書けるようにする
+        （pydantic は list を JSON として解釈しようとする）。
+        """
+        if isinstance(value, str):
+            formats = [f.strip() for f in value.split(",") if f.strip()]
+            return formats or ["short"]
+        return value
+
+    @field_validator("schedule_formats")
+    @classmethod
+    def _check_schedule_formats(cls, value: list[str]) -> list[str]:
+        """未知の形式を起動時に弾く。
+
+        定期実行の中で初めて弾かれると、気付くのが翌朝になる。
+        """
+        from src.models.formats import VideoFormat
+
+        allowed = {f.value for f in VideoFormat}
+        unknown = [f for f in value if f not in allowed]
+        if unknown:
+            raise ValueError(
+                f"SCHEDULE_FORMATS に未知の形式があります: {unknown}（{sorted(allowed)}）"
+            )
+        return value
+
+    @field_validator("schedule_time")
+    @classmethod
+    def _check_schedule_time(cls, value: str) -> str:
+        """HH:MM として解釈できること。
+
+        解釈できない値だと、スケジューラの起動時に落ちる。
+        設定を読む時点で弾いた方が原因が分かりやすい。
+        """
+        from datetime import time as _time
+
+        try:
+            hour, minute = (int(part) for part in value.split(":", 1))
+            _time(hour=hour, minute=minute)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"SCHEDULE_TIME は HH:MM の形式で指定してください: {value!r}") from e
+        return value
+
+    @field_validator("schedule_timezone")
+    @classmethod
+    def _check_schedule_timezone(cls, value: str) -> str:
+        """実在するタイムゾーン名であること。"""
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            raise ValueError(f"SCHEDULE_TIMEZONE が不正です: {value!r}") from e
         return value
 
     @field_validator("youtube_default_privacy")
@@ -323,6 +416,18 @@ class Config(BaseSettings):
             bool: 別リソースなら True
         """
         return self.azure_openai_image_endpoint is not None
+
+    @property
+    def schedule_run_at(self) -> "dt_time":
+        """定期実行の時刻を `datetime.time` で返す。
+
+        Returns:
+            dt_time: 実行時刻（検証済みなので必ず解釈できる）
+        """
+        from datetime import time as _time
+
+        hour, minute = (int(part) for part in self.schedule_time.split(":", 1))
+        return _time(hour=hour, minute=minute)
 
     @property
     def token_paths(self) -> dict[str, Path]:

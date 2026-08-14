@@ -17,6 +17,66 @@ class VideoCompositionError(Exception):
     pass
 
 
+# cgroup のパス。テストから差し替えられるように定数にしておく。
+CGROUP_V2_CPU_MAX = Path("/sys/fs/cgroup/cpu.max")
+CGROUP_V1_QUOTA = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+CGROUP_V1_PERIOD = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+
+
+def _available_cpus(
+    cpu_max: Path = CGROUP_V2_CPU_MAX,
+    quota_path: Path = CGROUP_V1_QUOTA,
+    period_path: Path = CGROUP_V1_PERIOD,
+) -> int:
+    """このプロセスが実際に使える CPU 数を返す。
+
+    なぜ `os.cpu_count()` を使わないか
+    ---------------------------------
+    コンテナの中でも `os.cpu_count()` は**ホストのコア数**を返す
+    （実測: Container Apps の 2 vCPU 割り当てに対して 20 を返した）。
+    ffmpeg / x264 は既定でこの数だけスレッドを立て、スレッドごとに
+    フレームバッファを持つため、割り当てメモリを超えて OOM killer に
+    殺される。実際に長尺（1920x1080 / 307秒）が
+    `終了コード -9` で落ちた。34秒のショートは通っていたので、
+    長い動画でだけ露見する。
+
+    cgroup v2 の `cpu.max`（"quota period" または "max period"）と
+    v1 の `cpu.cfs_quota_us` / `cpu.cfs_period_us` を見て、
+    割り当てられた CPU 数を求める。
+
+    Args:
+        cpu_max: cgroup v2 の cpu.max
+        quota_path: cgroup v1 の cpu.cfs_quota_us
+        period_path: cgroup v1 の cpu.cfs_period_us
+
+    Returns:
+        int: 使える CPU 数（最低1）
+    """
+    # cgroup v2
+    if cpu_max.is_file():
+        try:
+            quota_text, period_text = cpu_max.read_text().split()
+            if quota_text != "max":
+                quota, period = int(quota_text), int(period_text)
+                if quota > 0 and period > 0:
+                    return max(1, quota // period)
+        except (OSError, ValueError):
+            pass
+
+    # cgroup v1
+    if quota_path.is_file() and period_path.is_file():
+        try:
+            quota = int(quota_path.read_text().strip())
+            period = int(period_path.read_text().strip())
+            if quota > 0 and period > 0:
+                return max(1, quota // period)
+        except (OSError, ValueError):
+            pass
+
+    # 制限が無い（ローカル実行など）
+    return max(1, os.cpu_count() or 1)
+
+
 def _tail(text: str | None, limit: int = 2000) -> str:
     """標準エラーの末尾だけを返す。
 
@@ -561,11 +621,21 @@ class VideoComposer:
             "yuv420p",
             "-r",
             str(self.FRAME_RATE),
+            # スレッド数を割り当て CPU 数に合わせる。
+            #
+            # 既定（0 = 自動）だと ffmpeg はホストのコア数だけスレッドを
+            # 立てる。コンテナの割り当てを見ないので、2 vCPU の環境で
+            # 20 スレッドが動き、スレッドごとのフレームバッファで
+            # メモリを食い潰して OOM killer に殺される
+            # （実測: 長尺 1920x1080 / 307秒 が 終了コード -9 で落ちた）。
+            "-threads",
+            str(_available_cpus()),
             str(output_path),
         ]
 
         try:
             log_step(f"FFmpegフィルター: {video_filter[:200]}...", "🔧")
+            log_step(f"FFmpegスレッド数: {_available_cpus()}", "🧵")
             # check=True なので失敗時は例外になる。戻り値は使わない。
             subprocess.run(
                 cmd,

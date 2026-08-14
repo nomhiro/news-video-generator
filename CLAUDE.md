@@ -185,6 +185,19 @@ Node は CSS のビルドにだけ必要で、アプリの実行には不要。
 
 リファクタリング途中のため、以下は意図的に残している。
 
+- **長尺（1920x1080 / 5分超）の合成がクラウドで OOM する。**
+  ffmpeg が `終了コード -9`（SIGKILL）で落ちる。2 vCPU / 4Gi の
+  Container Apps で、`-threads` を割り当て CPU 数に絞っても再現した
+  （ショート34秒は通り、長尺341秒で落ちる）。
+  疑っているのは**マクサーのキュー**。concat デマクサーの静止画から
+  作られる映像フレームが音声より先に流れ、`max_muxing_queue_size`
+  ぶんのフレームがメモリに溜まる（1080p の生フレームは約3MB なので
+  数百枚で GB 級になる）。実際 stderr に
+  `100 buffers queued in out_#0:0, something may be wrong` が出ていた。
+  筋の良い直し方は**2段構え**にすること: (1) 画像から無音の映像を作る、
+  (2) `-c copy` で音声を混ぜる。再エンコードが無いのでキューが膨らまない。
+  それまで定期実行は `SCHEDULE_FORMATS=short` にしてある。
+
 - **`data/news/*.json` を書き換え可能なデータストアとして使っている。**
   同一プロセス内はロックで守っているが、複数プロセスからは守れない。
   Phase 4 で SQLite に移す。
@@ -362,13 +375,33 @@ azd down           # 破棄（課金を止める）
   `could not determine container registry endpoint` で止まる。
 - **1 vCPU では ffmpeg が異常終了した。** 1080x1920 / preset=medium の
   エンコードが 0.4x speed しか出ず、終了コード付きで落ちた。2 vCPU / 4Gi に
-  上げて完走している。consumption プロファイルは CPU:メモリ = 1:2 の
-  組み合わせしか受け付けない。
+  上げてショートは完走している（長尺はまだ OOM する。上の負債を参照）。
+  consumption プロファイルは CPU:メモリ = 1:2 の組み合わせしか受け付けない。
+- **`os.cpu_count()` はコンテナでもホストのコア数を返す。** 2 vCPU の
+  割り当てに対して 20 が返り、ffmpeg が既定でその数だけスレッドを立てる。
+  `video_composer._available_cpus()` が cgroup の `cpu.max` を読んで
+  `-threads` に渡している。
+- **アプリのログが1行も出ていなかった。** uvicorn が起動時に
+  `logging.config.dictConfig()` を呼び、既存のロガーを無効化していた
+  （`logger.disabled = True`）。`_get_logger()` で毎回戻している。
+  CLI では起きないので、Web だけで消えていた。
+- **ログの絵文字は端末のときだけ。** クラウドのログでは
+  `INFO:` / `OK:` / `ERROR:` / `WARN:` になる（`Log_s startswith "ERROR:"`
+  で絞れる）。`LOG_EMOJI` で上書きできる。
+- **リスト型の設定は `NoDecode` を付ける。** pydantic-settings は list を
+  JSON として解釈しようとし、`.env` 経由では通るのに**実際の環境変数だと
+  落ちる**（`SettingsError`）。Container Apps に `SCHEDULE_FORMATS=short,long`
+  を env で渡した瞬間に起動しなくなった。
 - **キーは `@secure()` パラメータ → Container App の secrets → env の
   `secretRef`** で渡す。env に直接書くと `az containerapp show` に平文で出る。
   `@secure()` は ARM のデプロイ履歴にも残らない。
 - 台本生成の Azure OpenAI は azd の管理外（別プロジェクトの既存リソース）
   なので、`azd env set AZURE_OPENAI_ENDPOINT/...` で値を渡す必要がある。
+
+**定期実行はアプリ内のスレッドで動く**（`src/jobs/scheduler.py`）。
+Container Apps Jobs を使わない理由は、ジョブ表がコンテナのローカル
+ディスク上の SQLite で、別コンテナからは書けないため。
+レプリカを増やすときはこの前提が崩れる。
 
 **minReplicas = 1 なので、動かしている間は常に課金される。**
 使わないときは `azd down` で破棄する（ストレージの生成物も消えるので、

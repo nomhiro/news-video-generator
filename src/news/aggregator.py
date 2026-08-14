@@ -370,17 +370,31 @@ class NewsAggregator:
         Returns:
             List[NewsArticle]: スクレイピング済みの記事リスト
         """
-        selected = self.get_selected_articles()
+        return await self.scrape_articles(self.get_selected_articles())
 
-        if not selected:
+    async def scrape_articles(self, articles: list[NewsArticle]) -> list[NewsArticle]:
+        """指定した記事の本文をスクレイピングし、結果を保存する。
+
+        選択状態と切り離してある理由: 定期実行は利用者の選択を触らずに
+        記事を選ぶ。`is_selected` を書き換えると、画面で選んでいた記事が
+        勝手に増減してしまう。
+
+        Args:
+            articles: 対象の記事
+
+        Returns:
+            list[NewsArticle]: スクレイピング済みの記事（本文が取れなかった
+            ものも含む。呼び出し側が判断する）
+        """
+        if not articles:
             return []
 
-        log_step(f"選択記事{len(selected)}件をスクレイピング中...", "🔍")
+        log_step(f"記事{len(articles)}件をスクレイピング中...", "🔍")
 
-        # Scrape content
-        scraped = await self.scraper.scrape_batch(selected)
+        scraped = await self.scraper.scrape_batch(articles)
 
-        # Update JSON with scraped content
+        # 取れた本文を書き戻す。ジョブは article_id しか持たないので、
+        # ここで保存しておかないと実行時に本文を読めない。
         for article in scraped:
             if article.content:
                 self._replace_article(article)

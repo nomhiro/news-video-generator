@@ -284,3 +284,54 @@ def test_env_example_documents_no_unknown_keys() -> None:
     """
     stale = _documented_env_keys() - _settings_env_keys()
     assert not stale, f".env.example に Config が読まないキーが残っています: {sorted(stale)}"
+
+
+# --------------------------------------------------------------------------
+# リスト型の設定を「環境変数」で渡せること
+#
+# pydantic-settings は list 型を複雑な型として扱い、field_validator より
+# 前に json.loads する。`.env` 経由では通るのに**実際の環境変数のときだけ**
+# SettingsError で落ちるという差があり、Container Apps に env として
+# 渡した時点でアプリが起動しなくなった。NoDecode で塞いでいる。
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("env_name", "raw", "field", "expected"),
+    [
+        ("AI_SEARCH_QUERIES", "生成AI,ChatGPT", "ai_search_queries", ["生成AI", "ChatGPT"]),
+        ("SCHEDULE_FORMATS", "short,long", "schedule_formats", ["short", "long"]),
+    ],
+)
+def test_list_settings_accept_a_comma_separated_env_var(
+    monkeypatch: pytest.MonkeyPatch, env_name: str, raw: str, field: str, expected: list[str]
+) -> None:
+    monkeypatch.setenv(env_name, raw)
+    config = Config(_env_file=None, **REQUIRED_VALUES)  # type: ignore[arg-type,call-arg]
+    assert getattr(config, field) == expected
+
+
+def test_unknown_schedule_format_is_rejected() -> None:
+    """未知の形式は起動時に弾くこと。
+
+    定期実行の中で初めて弾かれると、気付くのが翌朝になる。
+    """
+    with pytest.raises(ValidationError, match="SCHEDULE_FORMATS"):
+        _config(schedule_formats="short,vertical")
+
+
+@pytest.mark.parametrize("value", ["6:30pm", "25:00", "06-30", ""])
+def test_invalid_schedule_time_is_rejected(value: str) -> None:
+    with pytest.raises(ValidationError, match="SCHEDULE_TIME"):
+        _config(schedule_time=value)
+
+
+def test_schedule_run_at_parses_the_time() -> None:
+    from datetime import time
+
+    assert _config(schedule_time="06:30").schedule_run_at == time(6, 30)
+
+
+def test_invalid_timezone_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="SCHEDULE_TIMEZONE"):
+        _config(schedule_timezone="Mars/Olympus_Mons")
