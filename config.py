@@ -196,8 +196,8 @@ class Config(BaseSettings):
     schedule_time: str = Field(default="06:30")
     schedule_timezone: str = Field(default="Asia/Tokyo")
 
-    # 作る形式。収益化はショート（認知）と長尺（再生時間）の両輪なので既定は両方。
-    schedule_formats: CommaSeparated = Field(default=["short", "long"])
+    # 作る形式。既定はショートのみ（長尺は当面作らない。CLAUDE.md 参照）。
+    schedule_formats: CommaSeparated = Field(default=["short"])
 
     # 形式ごとに何件の記事を対象にするか。
     # 画像生成のクォータが律速なので、増やす前にクォータを上げる。

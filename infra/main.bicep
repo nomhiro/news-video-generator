@@ -107,8 +107,9 @@ param scheduleEnabled bool = true
 @description('自動生成の実行時刻（日本時間、HH:MM）')
 param scheduleTime string = '06:30'
 
-@description('毎日作る形式（カンマ区切り）')
-param scheduleFormats string = 'short,long'
+@description('''毎日作る形式（カンマ区切り）。
+既定はショートのみ。長尺は当面作らない（判断の経緯は CLAUDE.md 参照）。''')
+param scheduleFormats string = 'short'
 
 @description('''動かすコンテナイメージ。既定はプレースホルダ。
 azd deploy 後は SERVICE_WEB_IMAGE_NAME から渡される。''')

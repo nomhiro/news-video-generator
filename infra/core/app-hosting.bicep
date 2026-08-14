@@ -137,8 +137,8 @@ param scheduleTime string = '06:30'
 param scheduleTimezone string = 'Asia/Tokyo'
 
 @description('''毎日作る形式（カンマ区切り）。
-収益化はショート（認知）と長尺（再生時間）の両輪なので既定は両方。''')
-param scheduleFormats string = 'short,long'
+既定はショートのみ。長尺は当面作らない（CLAUDE.md「長尺は当面作らない」を参照）。''')
+param scheduleFormats string = 'short'
 
 @description('''形式ごとに何件の記事を対象にするか。
 画像生成のクォータ（capacity 4 ≒ 4 images/min）が律速なので、

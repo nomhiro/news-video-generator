@@ -42,7 +42,7 @@
       "value": "${SCHEDULE_TIME=06:30}"
     },
     "scheduleFormats": {
-      "value": "${SCHEDULE_FORMATS=short,long}"
+      "value": "${SCHEDULE_FORMATS=short}"
     },
     "containerImage": {
       "value": "${SERVICE_WEB_IMAGE_NAME=mcr.microsoft.com/k8se/quickstart:latest}"
