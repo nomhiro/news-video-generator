@@ -1,0 +1,115 @@
+"""システムプロンプトの組み立ての検証（API は呼ばない）。
+
+なぜこのテストがあるか
+----------------------
+プロンプトは short/tiktok/long × ja/en で6種類ある。差し込みトークンを
+追加したとき、**一部のテンプレートだけ置換し忘れる**のが一番起きやすい壊れ方で、
+その場合はモデルに `<<STRUCTURE_SPEC>>` という文字列がそのまま渡る
+（エラーにならず、静かに指示が消える）。ここで6種類すべてを見る。
+
+同じ理由で、`<output_format>` の JSON 例に必須フィールドが載っていることも
+確認する。例が欠けているとモデルは例に寄せた出力をしようとし、
+スキーマ違反で再試行を消費する。
+"""
+
+import itertools
+
+import pytest
+
+from src.generators.script_generator import ScriptGenerator, segment_allocation
+from src.models.formats import SPECS, VideoFormat, get_spec
+
+FORMATS = ["short", "tiktok", "long"]
+LANGUAGES = ["ja", "en"]
+ALL_COMBINATIONS = list(itertools.product(FORMATS, LANGUAGES))
+
+
+def _prompt(language: str, video_format: str) -> str:
+    """API クライアントを作らずにプロンプトだけを組み立てる。
+
+    `_build_system_prompt` は classmethod なので、`__init__`
+    （OpenAI クライアントの生成）を通さずに呼べる。
+    """
+    return ScriptGenerator._build_system_prompt(language=language, video_format=video_format)
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_no_placeholder_token_remains(video_format: str, language: str) -> None:
+    """置換漏れが無いこと。残っているとモデルに指示が届かない。"""
+    prompt = _prompt(language, video_format)
+    assert ScriptGenerator.NARRATION_SPEC_TOKEN not in prompt
+    assert ScriptGenerator.STRUCTURE_SPEC_TOKEN not in prompt
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_structure_instruction_is_injected(video_format: str, language: str) -> None:
+    """構成順序の指示が実際に入っていること。"""
+    prompt = _prompt(language, video_format)
+    assert "<narrative_structure>" in prompt
+    # 解説の2フィールドを本文に反映させる指示が届いていること
+    assert "technical_insight" in prompt
+    assert "practical_impact" in prompt
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_output_example_includes_insight_fields(video_format: str, language: str) -> None:
+    """JSON 例に必須フィールドが載っていること。
+
+    例に無いとモデルは例に寄せた出力をして、スキーマ違反で再試行になる。
+    """
+    prompt = _prompt(language, video_format)
+    example = prompt.split("<output_format>")[1].split("</output_format>")[0]
+    assert '"technical_insight"' in example
+    assert '"practical_impact"' in example
+    # source_url はモデルに出させない（URL を知らないので捏造する）
+    assert '"source_url"' not in example
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_segment_numbers_match_the_format_spec(video_format: str, language: str) -> None:
+    """構成の指示が形式のセグメント数と整合していること。
+
+    プロンプトに番号をハードコードすると仕様とずれる（実際にずれていた）。
+    最後のパートの末尾番号が segment_count に一致することで確認する。
+    """
+    prompt = _prompt(language, video_format)
+    count = get_spec(video_format).segment_count
+    label = "セグメント" if language == "ja" else "Segment "
+    assert f"{label}{count}:" in prompt
+
+
+@pytest.mark.parametrize("video_format", list(VideoFormat))
+def test_allocation_sums_to_segment_count(video_format: VideoFormat) -> None:
+    """配分の合計がセグメント数に一致すること。
+
+    ずれると構成の指示が存在しないセグメントを指す、または
+    最後のセグメントに指示が無い状態になる。
+    """
+    count = SPECS[video_format].segment_count
+    allocation = segment_allocation(count)
+    assert sum(allocation.values()) == count
+    assert all(v >= 1 for v in allocation.values())
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (6, {"hook": 1, "facts": 1, "mechanism": 2, "impact": 1, "conclusion": 1}),
+        (10, {"hook": 1, "facts": 2, "mechanism": 3, "impact": 3, "conclusion": 1}),
+    ],
+)
+def test_allocation_favors_the_analysis_parts(count: int, expected: dict[str, int]) -> None:
+    """端数は解説側（仕組み・インパクト）に寄せること。
+
+    独自解説を厚くするのが配分の目的なので、余りを事実に回すと逆になる。
+    """
+    assert segment_allocation(count) == expected
+
+
+def test_allocation_rejects_too_few_segments() -> None:
+    """パート数を下回るセグメント数は黙って進めないこと。
+
+    0や負の割り当てはセグメント番号の範囲を壊す。
+    """
+    with pytest.raises(ValueError, match="構成パート数を下回っています"):
+        segment_allocation(4)

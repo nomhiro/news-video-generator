@@ -444,10 +444,17 @@ def test_worker_stop_is_idempotent(repository: JobRepository) -> None:
 
 
 class FakeArticle:
-    def __init__(self, article_id: str, title: str, content: str):
+    def __init__(
+        self,
+        article_id: str,
+        title: str,
+        content: str,
+        url: str = "https://example.com/a-1",
+    ):
         self.id = article_id
         self.title = title
         self.content = content
+        self.url = url
 
 
 class FakeArticleStore:
@@ -476,6 +483,7 @@ class RecordingPipeline:
         languages: list[str] | None = None,
         output_name: str | None = None,
         video_format: str = "short",
+        source_url: str = "",
     ) -> dict[str, object]:
         self.calls.append(
             {
@@ -483,6 +491,7 @@ class RecordingPipeline:
                 "languages": languages,
                 "output_name": output_name,
                 "video_format": video_format,
+                "source_url": source_url,
             }
         )
         return self._result
@@ -525,6 +534,23 @@ def test_runner_reads_the_article_from_the_store() -> None:
     assert pipeline.calls[0]["video_format"] == "short"
     assert "記事1" in str(pipeline.calls[0]["topic"])
     assert store.generated == ["a-1"]
+
+
+def test_runner_passes_the_source_url_out_of_band() -> None:
+    """出典 URL は引数で渡し、トピック（プロンプト入力）には入れないこと。
+
+    説明文への出典記載は再利用コンテンツ対策で必須だが、モデルに URL を
+    渡すと本文に書き込もうとする。追記はコード側で行う。
+    """
+    store = FakeArticleStore(
+        {"a-1": FakeArticle("a-1", "記事1", "本文", url="https://example.com/orig")}
+    )
+    pipeline = RecordingPipeline()
+
+    PipelineJobRunner(pipeline, store)(_job())
+
+    assert pipeline.calls[0]["source_url"] == "https://example.com/orig"
+    assert "https://example.com/orig" not in str(pipeline.calls[0]["topic"])
 
 
 def test_runner_truncates_long_content() -> None:

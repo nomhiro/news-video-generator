@@ -149,16 +149,53 @@ SSML の `<mark>` に対応せず、実装が3系統（個別合成して結合 
 `src/models/script.py` の `ScriptDraft` が LLM への出力契約そのもの。
 フィールドを増やすと生成される JSON スキーマが変わる。
 
-`ScriptDraft` は意図的に `full_narration` と `language` を持たない。
+`ScriptDraft` は意図的に `full_narration` / `language` / `source_url` を持たない。
 
 - `full_narration` は `segment_narrations` の連結でコード側が導出する。
   両方をモデルに出させると「連結が full_narration と一致すること」という
   冗長な制約が生まれ、モデルは一致を優先して**空のセグメントでパディング**した。
   導出にすればこの矛盾は起こりえない。
 - `language` は呼び出し元が権威を持つ。
+- `source_url` も呼び出し元が権威を持つ。**モデルは URL を知らない**
+  （プロンプト入力は記事のタイトルと本文だけで、URL は意図的に渡していない）。
+  出させれば確実に捏造する。`NewsArticle.url` を
+  `PipelineJobRunner` → `Pipeline.run` → `ScriptGenerator.generate` と引数で通し、
+  `to_script` が説明文に「出典: 〜」を追記する（`_with_source`）。
+  CLI は自由テキストのトピックを取るので `--source-url` は任意で、
+  空なら追記しない。
 
 `segment_narrations` / `image_prompts` / `text_overlays` の要素数が一致することは
 音声のタイミング同期と動画合成の前提なので、バリデータで強制している。
+
+#### 独自解説は必須フィールドで強制する
+
+`technical_insight`（技術的な仕組み）と `practical_impact`（実務インパクト）は
+**必須**。ニュースをなぞるだけの出力は埋もれるうえ、YouTube の
+「再利用されたコンテンツ」ポリシーに抵触するリスクがある。Structured Outputs では
+必須フィールドをモデルが省略できないので、プロンプトでお願いするより保証が強い。
+
+- 最低文字数（`MIN_INSIGHT_CHARS = 40`）は**言語非依存**。`ScriptDraft` が
+  `language` を持たないため、バリデータの中で言語別の閾値を選べない。
+- `Field(min_length=...)` だけでは足りない（全角空白を40個並べれば通る）。
+  `_validate_insights` が strip 後の長さで見ている。
+- 構成順序（フック → 事実 → 仕組み → インパクト → 結論）は
+  `<<STRUCTURE_SPEC>>` として6種類すべてのプロンプトに差し込む。
+  セグメント番号は `segment_allocation()` が `segment_count` から計算する
+  （short/tiktok は6、long は10。プロンプトに番号を書くと仕様とずれる）。
+  端数は解説側に寄せる（6なら仕組みが2、10なら仕組みとインパクトが3ずつ）。
+- **分量の予算は変えていない。** 解説は事実のなぞりを置き換えるものであって、
+  総文字数を増やすものではない。増やすと `check_length_budget` に弾かれる。
+- **構成指示の中で分量の上下限を繰り返す必要がある**（`_structure_spec` の末尾）。
+  パートを5つに割った直後の実測では、ショート3本すべてが予算（180〜240文字）を
+  超えた（307/310/378文字、1本は63秒で上限60秒超え）。パートを増やすと
+  モデルは各パートに書き足す。逆に**上限だけを書くと今度は下振れし**、
+  145文字まで縮んでセグメントが文の断片（`"仕組みは、バイトコード全体でなく、"`）
+  になった。セグメント境界は画像の切り替え位置なので断片は成立しない。
+  上下限の両方と「各セグメントは単独で文として言い切る」をセットで書く。
+
+**スキーマは「入っていること」しか担保できない。** 内容が薄ければ結局要約と
+変わらないので、`tests/test_script_insight_live.py`（`-m live`、台本だけ生成するので
+画像クォータを消費しない）で実物を出して読む工程が必要。
 
 ### テンプレートに Tailwind クラスを足したら CSS を再生成する
 
@@ -376,6 +413,19 @@ azd down           # 破棄（課金を止める）
 - **ログの絵文字は端末のときだけ。** クラウドのログでは
   `INFO:` / `OK:` / `ERROR:` / `WARN:` になる（`Log_s startswith "ERROR:"`
   で絞れる）。`LOG_EMOJI` で上書きできる。
+
+  **「端末である」だけでは足りない。** Windows の日本語コンソールは TTY だが
+  cp932 で、絵文字を書き込むと化けるのではなく `UnicodeEncodeError` で
+  **落ちる**（CLI が起動直後に
+  `'cp932' codec can't encode character '\U0001f680'` で死んだ）。
+  `_can_encode()` が出力先の `encoding` で実際に試し、書けなければ
+  `LOG_EMOJI=true` よりも優先して ASCII に落とす
+  （絵文字が出ないより実行が落ちる方が実害が大きい）。
+
+  **絵文字を print で直書きしない。** `main.py` は
+  `src/utils/logger.prefix()` を通す。新しい絵文字を使うときは
+  `_EMOJI_PROBE` にも足す（`tests/test_logger.py` が `src/` と `main.py` を
+  走査して漏れを検出する。走査範囲を絞ると見逃す）。
 - **リスト型の設定は `NoDecode` を付ける。** pydantic-settings は list を
   JSON として解釈しようとし、`.env` 経由では通るのに**実際の環境変数だと
   落ちる**（`SettingsError`）。Container Apps に `SCHEDULE_FORMATS=short,long`

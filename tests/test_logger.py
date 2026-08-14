@@ -11,6 +11,19 @@ CLI は uvicorn を通らないので正常に見え、気付きにくい。
 `test_logging_survives_uvicorns_dict_config` がそこを見張っている。
 併せて、端末以外では絵文字を使わないこと（クラウドのログで化ける、
 `ERROR:` で絞れる）も検査する。
+
+**cp932 の端末では絵文字で落ちる**
+----------------------------------
+Windows の日本語コンソールは TTY だが cp932 で、絵文字を print すると
+化けるのではなく `UnicodeEncodeError` になる。CLI が絵文字を直書きして
+いたため、起動直後に
+`'cp932' codec can't encode character '\\U0001f680'` で死んだ。
+
+見張っているのは3点。書き込めない出力先では絵文字を使わないこと
+（`LOG_EMOJI=true` より優先すること）、CLI が `prefix()` を通さず
+絵文字を print していないこと、そして判定用のプローブが
+実際に使っている絵文字を網羅していること
+（走査範囲を絞ると見逃す。最初に書いたときは18種類漏れていた）。
 """
 
 import importlib
@@ -125,6 +138,97 @@ def test_logging_survives_uvicorns_dict_config(monkeypatch: pytest.MonkeyPatch) 
     output = stream.getvalue()
     assert "設定前" in output
     assert "設定後" in output, "dictConfig 後に出力が消えている"
+
+
+class _Cp932Stdout(io.StringIO):
+    """cp932 の端末を模した stdout。
+
+    Windows の日本語コンソールは TTY なのに絵文字をエンコードできない。
+    `isatty()` が True かつ `encoding` が cp932 という組み合わせが再現点。
+    """
+
+    encoding = "cp932"
+
+    def isatty(self) -> bool:
+        return True
+
+
+def test_no_emoji_when_stdout_cannot_encode_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """書き込めない出力先では絵文字を使わないこと。
+
+    cp932 の端末に絵文字を print すると、化けるのではなく
+    `UnicodeEncodeError` で**落ちる**。実際に CLI が起動直後に
+    `'cp932' codec can't encode character '\\U0001f680'` で死んだ。
+    """
+    monkeypatch.setattr("sys.stdout", _Cp932Stdout())
+    monkeypatch.delenv("LOG_EMOJI", raising=False)
+    module = importlib.reload(logger_module)
+
+    assert module.prefix("error", "❌") == "ERROR:"
+
+
+def test_encodability_overrides_log_emoji_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LOG_EMOJI=true でも書き込めなければ絵文字を使わないこと。
+
+    「絵文字が出ない」より「実行が落ちる」方が実害が大きい。
+    """
+    monkeypatch.setattr("sys.stdout", _Cp932Stdout())
+    monkeypatch.setenv("LOG_EMOJI", "true")
+    module = importlib.reload(logger_module)
+
+    assert module.prefix("success", "✅") == "OK:"
+
+
+def test_every_emoji_in_use_is_covered_by_the_probe() -> None:
+    """実際に使う絵文字が判定用の文字列に入っていること。
+
+    プローブに無い絵文字を後から足すと、その文字だけ
+    エンコードできない環境で落ちる余地が残る。走査範囲を
+    `logger.py` と `main.py` に絞ると見逃す（実際に10種類漏れていた）ので、
+    `src/` 配下すべてを見る。
+    """
+    import re
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    sources = [repo_root / "main.py", *(repo_root / "src").rglob("*.py")]
+
+    # log_step()/prefix() の第2引数、および log_step の既定値から拾う
+    patterns = [
+        r"log_step\(\s*(?:[^,]|\([^)]*\))+,\s*[\"']([^\"']+)[\"']",
+        r"prefix\([^,]+,\s*[\"']([^\"']+)[\"']",
+        r"emoji: str = [\"']([^\"']+)[\"']",
+    ]
+    used: set[str] = set()
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        for pattern in patterns:
+            used.update(re.findall(pattern, text))
+    # ASCII だけの引数（emoji="" など）は対象外
+    used = {e for e in used if _has_emoji(e)}
+
+    assert used, "絵文字リテラルを1つも拾えていない（正規表現が古い）"
+    missing = {e for e in used if e not in logger_module._EMOJI_PROBE}
+    assert not missing, f"_EMOJI_PROBE に無い絵文字: {missing}"
+
+
+def test_cli_does_not_print_bare_emoji() -> None:
+    """CLI が絵文字を直書きしないこと。
+
+    直書きすると cp932 の端末で `UnicodeEncodeError` で落ちる。
+    `prefix()` を通せば ASCII のラベルに落ちる。
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
+    # docstring は説明のために絵文字を含むので、コード部分だけを見る
+    body = source.split('"""', 2)[2]
+    offenders = [
+        line.strip()
+        for line in body.splitlines()
+        if "print(" in line and _has_emoji(line) and "prefix(" not in line
+    ]
+    assert not offenders, f"prefix() を通さず絵文字を print している: {offenders}"
 
 
 def _has_emoji(text: str) -> bool:

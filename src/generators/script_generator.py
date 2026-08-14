@@ -26,6 +26,56 @@ class ScriptGenerationError(Exception):
     pass
 
 
+# 構成のパート名。プロンプトに出す順序そのもの。
+_STRUCTURE_PARTS = ("hook", "facts", "mechanism", "impact", "conclusion")
+
+
+def segment_allocation(segment_count: int) -> dict[str, int]:
+    """セグメント数を構成パートに配分する。
+
+    フックと結論に1つずつ割り、残りを 事実:仕組み:インパクト = 1:1:1 で分ける。
+    端数は**解説側**（仕組み・インパクト）に寄せる。独自解説を厚くするのが
+    この配分の目的なので、余りを事実に回すと逆の効果になる。
+
+    6セグメントなら 1/1/2/1/1、10セグメントなら 1/2/3/3/1 になる。
+
+    Args:
+        segment_count: 形式のセグメント数
+
+    Returns:
+        dict[str, int]: パート名 → セグメント数。合計は segment_count に一致する
+
+    Raises:
+        ValueError: パート数より少ないセグメント数を渡された場合
+    """
+    # 5パートあるので5未満は配分しようがない。形式の定義上ありえない
+    # （最小は SHORT の6）が、0や負の割り当てはセグメント番号の範囲を壊すため
+    # 黙って進めずに落とす。
+    if segment_count < len(_STRUCTURE_PARTS):
+        raise ValueError(
+            f"セグメント数が構成パート数を下回っています: {segment_count} < {len(_STRUCTURE_PARTS)}"
+        )
+    if segment_count == len(_STRUCTURE_PARTS):
+        return dict.fromkeys(_STRUCTURE_PARTS, 1)
+
+    body = segment_count - 2  # フックと結論のぶんを除く
+    base, remainder = divmod(body, 3)
+    allocation = {
+        "hook": 1,
+        "facts": base,
+        "mechanism": base,
+        "impact": base,
+        "conclusion": 1,
+    }
+    # 端数は仕組み → インパクトの順に寄せる（余りは最大2）
+    for name in ("mechanism", "impact"):
+        if remainder <= 0:
+            break
+        allocation[name] += 1
+        remainder -= 1
+    return allocation
+
+
 class ScriptGenerator:
     """Azure OpenAI Responses API (Structured Outputs) で台本を生成するクラス。
 
@@ -46,6 +96,11 @@ class ScriptGenerator:
     # プロンプト内で分量の指示を差し込む位置。
     # formats.py の仕様から生成するため、プロンプト側には値を書かない。
     NARRATION_SPEC_TOKEN = "<<NARRATION_SPEC>>"
+
+    # プロンプト内で構成順序の指示を差し込む位置。
+    # セグメント番号は segment_count から計算するので、プロンプト側には書かない
+    # （short/tiktok は6、long は10で異なる）。
+    STRUCTURE_SPEC_TOKEN = "<<STRUCTURE_SPEC>>"
 
     SYSTEM_PROMPT_JA = """<role>
 あなたはYouTube ShortsやTikTok向けのニュース解説動画の台本ライターです。
@@ -74,6 +129,10 @@ class ScriptGenerator:
 - hashtags: 5〜8個（"shorts"は必須）
 </content_rules>
 
+<narrative_structure>
+<<STRUCTURE_SPEC>>
+</narrative_structure>
+
 <output_format>
 以下のJSON形式のみを出力してください。JSON以外のテキストは含めないでください。
 
@@ -84,6 +143,8 @@ class ScriptGenerator:
     "hook": "最初の3秒で視聴者を引き付けるフック",
     "main_points": ["ポイント1", "ポイント2", "ポイント3"],
     "conclusion": "締めの一言",
+    "technical_insight": "技術的にどういう仕組みで実現しているのかの解説（40文字以上）",
+    "practical_impact": "実務・現場で何がどう変わるのかの考察（40文字以上）",
     "segment_narrations": [
         "セグメント1のナレーション（空でないこと）",
         "セグメント2のナレーション（空でないこと）",
@@ -149,6 +210,10 @@ class ScriptGenerator:
 - hashtags: 5〜10個
 </content_rules>
 
+<narrative_structure>
+<<STRUCTURE_SPEC>>
+</narrative_structure>
+
 <output_format>
 以下のJSON形式のみを出力してください。JSON以外のテキストは含めないでください。
 
@@ -159,6 +224,8 @@ class ScriptGenerator:
     "hook": "最初の10秒で視聴者を引き付けるフック",
     "main_points": ["ポイント1", "ポイント2", "ポイント3", "ポイント4", "ポイント5", "ポイント6"],
     "conclusion": "締めの言葉（まとめと今後の展望）",
+    "technical_insight": "技術的にどういう仕組みで実現しているのかの解説（40文字以上）",
+    "practical_impact": "実務・現場で何がどう変わるのかの考察（40文字以上）",
     "segment_narrations": [
         "セグメント1のナレーション（空でないこと）",
         "セグメント2のナレーション（空でないこと）",
@@ -234,6 +301,10 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - hashtags: 5-8 tags (must include "shorts")
 </content_rules>
 
+<narrative_structure>
+<<STRUCTURE_SPEC>>
+</narrative_structure>
+
 <output_format>
 Output ONLY the following JSON format. Do not include any text other than JSON.
 
@@ -244,6 +315,8 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
     "hook": "Opening hook to grab attention in 3 seconds",
     "main_points": ["Point 1", "Point 2", "Point 3"],
     "conclusion": "Short closing statement",
+    "technical_insight": "How it actually works under the hood (at least 40 characters)",
+    "practical_impact": "What changes in real-world practice (at least 40 characters)",
     "segment_narrations": [
         "Segment 1 narration (not empty)",
         "Segment 2 narration (not empty)",
@@ -309,6 +382,10 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - hashtags: 5-10 tags
 </content_rules>
 
+<narrative_structure>
+<<STRUCTURE_SPEC>>
+</narrative_structure>
+
 <output_format>
 Output ONLY the following JSON format. Do not include any text other than JSON.
 
@@ -319,6 +396,8 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
     "hook": "Opening hook to grab attention in 10 seconds",
     "main_points": ["Point 1", "Point 2", "Point 3", "Point 4", "Point 5", "Point 6"],
     "conclusion": "Closing statement (summary, future outlook)",
+    "technical_insight": "How it actually works under the hood (at least 40 characters)",
+    "practical_impact": "What changes in real-world practice (at least 40 characters)",
     "segment_narrations": [
         "Segment 1 narration (not empty)",
         "Segment 2 narration (not empty)",
@@ -395,6 +474,10 @@ TikTokの収益化には60秒以上の動画が必要です。
 - hashtags: 5〜8個（"TikTok"と"ニュース"は必須）
 </content_rules>
 
+<narrative_structure>
+<<STRUCTURE_SPEC>>
+</narrative_structure>
+
 <output_format>
 以下のJSON形式のみを出力してください。JSON以外のテキストは含めないでください。
 
@@ -405,6 +488,8 @@ TikTokの収益化には60秒以上の動画が必要です。
     "hook": "最初の5秒で視聴者を引き付けるフック",
     "main_points": ["ポイント1", "ポイント2", "ポイント3", "ポイント4"],
     "conclusion": "締めの一言（アクションを促す）",
+    "technical_insight": "技術的にどういう仕組みで実現しているのかの解説（40文字以上）",
+    "practical_impact": "実務・現場で何がどう変わるのかの考察（40文字以上）",
     "segment_narrations": [
         "セグメント1のナレーション（80-110文字、空でないこと）",
         "セグメント2のナレーション（80-110文字、空でないこと）",
@@ -470,6 +555,10 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - hashtags: 5-8 tags (must include "TikTok" and "news")
 </content_rules>
 
+<narrative_structure>
+<<STRUCTURE_SPEC>>
+</narrative_structure>
+
 <output_format>
 Output ONLY the following JSON format. Do not include any text other than JSON.
 
@@ -480,6 +569,8 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
     "hook": "Opening hook to grab attention in 5 seconds",
     "main_points": ["Point 1", "Point 2", "Point 3", "Point 4"],
     "conclusion": "Short closing statement with call to action",
+    "technical_insight": "How it actually works under the hood (at least 40 characters)",
+    "practical_impact": "What changes in real-world practice (at least 40 characters)",
     "segment_narrations": [
         "Segment 1 narration (40-60 words, not empty)",
         "Segment 2 narration (40-60 words, not empty)",
@@ -537,7 +628,11 @@ Before output, verify:
         self.model = deployment
 
     def generate(
-        self, news_topic: str, language: str = "ja", video_format: str = "short"
+        self,
+        news_topic: str,
+        language: str = "ja",
+        video_format: str = "short",
+        source_url: str = "",
     ) -> Script:
         """ニューストピックから台本を生成する。
 
@@ -545,6 +640,8 @@ Before output, verify:
             news_topic: ニューストピック
             language: 言語コード ("ja" or "en")
             video_format: 動画形式 ("short" or "long")
+            source_url: 元記事の URL。説明文への出典追記に使う。
+                モデルには渡さない（URL を知らないので捏造する）
 
         Returns:
             Script: 生成された台本
@@ -596,7 +693,7 @@ Before output, verify:
 
             # full_narration はセグメントの連結で導出される。
             # estimated_duration はモデルの自己申告ではなく文字数から推定する。
-            script = draft.to_script(language)
+            script = draft.to_script(language, source_url=source_url)
             log_success(
                 f"{language}台本を生成しました "
                 f"({len(script.segment_narrations)}セグメント, "
@@ -670,8 +767,12 @@ Before output, verify:
             messages.append(f"{location}: {err['msg']}")
         return " / ".join(messages)
 
-    def _build_system_prompt(self, language: str, video_format: str = "short") -> str:
+    @classmethod
+    def _build_system_prompt(cls, language: str, video_format: str = "short") -> str:
         """言語別・形式別のシステムプロンプトを構築する。
+
+        インスタンスの状態を使わないので classmethod にしてある
+        （OpenAI クライアントを作らずにテストからプロンプトを検査できる）。
 
         Args:
             language: 言語コード
@@ -681,21 +782,23 @@ Before output, verify:
             str: システムプロンプト
         """
         if video_format == "long":
-            template = (
-                self.SYSTEM_PROMPT_LONG_JA if language == "ja" else self.SYSTEM_PROMPT_LONG_EN
-            )
+            template = cls.SYSTEM_PROMPT_LONG_JA if language == "ja" else cls.SYSTEM_PROMPT_LONG_EN
         elif video_format == "tiktok":
             template = (
-                self.SYSTEM_PROMPT_TIKTOK_JA if language == "ja" else self.SYSTEM_PROMPT_TIKTOK_EN
+                cls.SYSTEM_PROMPT_TIKTOK_JA if language == "ja" else cls.SYSTEM_PROMPT_TIKTOK_EN
             )
         else:  # "short"
-            template = self.SYSTEM_PROMPT_JA if language == "ja" else self.SYSTEM_PROMPT_EN
+            template = cls.SYSTEM_PROMPT_JA if language == "ja" else cls.SYSTEM_PROMPT_EN
 
-        # 分量の指示はプロンプトに埋め込まず、formats.py から生成する。
+        # 分量と構成の指示はプロンプトに埋め込まず、formats.py から生成する。
         # ハードコードしていると仕様と指示がずれる（実際にずれていた）。
+        spec = get_spec(video_format)
         return template.replace(
-            self.NARRATION_SPEC_TOKEN,
-            self._narration_spec(language, get_spec(video_format)),
+            cls.NARRATION_SPEC_TOKEN,
+            cls._narration_spec(language, spec),
+        ).replace(
+            cls.STRUCTURE_SPEC_TOKEN,
+            cls._structure_spec(language, spec),
         )
 
     @staticmethod
@@ -728,4 +831,97 @@ Before output, verify:
             f"({total_low}-{total_high} words total). "
             f"Fill all {n}; never leave a segment empty. "
             f"Do not exceed {total_high} words total — going over forces a regeneration"
+        )
+
+    @staticmethod
+    def _structure_spec(language: str, spec: FormatSpec) -> str:
+        """独自解説を含む構成順序の指示を組み立てる。
+
+        フック → 事実 → 技術的な仕組み → 実務インパクト → 結論/CTA の順を
+        セグメント番号で指定する。番号は `segment_count` から計算するので、
+        プロンプト文字列には書かない（short/tiktok は6、long は10）。
+
+        分量の上限をここでも繰り返す理由: 構成を5パートに割った直後の実測で、
+        ショート3本すべてが予算（180〜240文字）を超えた（307/310/378文字、
+        1本は63秒で上限60秒を超えた）。パートを増やすとモデルは
+        各パートに書き足す。解説は事実のなぞりを**置き換える**もので、
+        総量を増やすものではないと明示する必要がある。
+
+        Args:
+            language: 言語コード
+            spec: 形式の仕様
+
+        Returns:
+            str: プロンプトに差し込む構成の指示
+        """
+        parts = segment_allocation(spec.segment_count)
+        # 各パートが占めるセグメント番号の範囲（1始まり）を作る
+        spans: dict[str, str] = {}
+        cursor = 1
+        for name, count in parts.items():
+            last = cursor + count - 1
+            spans[name] = str(cursor) if count == 1 else f"{cursor}〜{last}"
+            cursor = last + 1
+
+        if language == "ja":
+            return (
+                "segment_narrations は次の順序で構成する（この順序を崩さない）。\n"
+                f"- セグメント{spans['hook']}: フック。冒頭で視聴者を引き付ける\n"
+                f"- セグメント{spans['facts']}: 事実。何が起きたのかを簡潔に\n"
+                f"- セグメント{spans['mechanism']}: 技術的な仕組み。"
+                "technical_insight の内容をここで語る\n"
+                f"- セグメント{spans['impact']}: 実務インパクト。"
+                "practical_impact の内容をここで語る\n"
+                f"- セグメント{spans['conclusion']}: 結論とCTA\n"
+                "\n"
+                "【重要】technical_insight と practical_impact は"
+                "フィールドを埋めるだけでは不十分で、"
+                "対応するセグメントのナレーション本文に必ず反映すること。"
+                "ニュースをなぞるだけの台本は採用しない"
+                "（要約アカウントとの差別化が目的であり、"
+                "再利用コンテンツと判定されるリスクを避けるため）。\n"
+                "また text_overlays のうち**少なくとも1枚**は"
+                "考察パート（仕組み または 実務インパクト）の要点にすること。\n"
+                "\n"
+                "【分量】この構成にしても分量の予算は増えない。"
+                f"各セグメントは{spec.chars_per_segment[0]}〜{spec.chars_per_segment[1]}文字に収め、"
+                f"全体で{spec.total_chars[1]}文字を超えないこと。"
+                "解説は事実の説明を**置き換える**もので、足すものではない。"
+                "仕組みは専門用語を1つに絞って言い切り、"
+                "インパクトは「誰の何がどう変わるか」を1点だけ挙げる。\n"
+                "**各セグメントは単独で文として言い切ること。**"
+                "セグメントの境界は画像が切り替わる位置なので、"
+                "文を途中で切って次のセグメントに続けてはならない"
+                f"（短くしすぎて{spec.chars_per_segment[0]}文字を下回るとこれが起きる）。"
+            )
+
+        spans_en = {k: v.replace("〜", "-") for k, v in spans.items()}
+        return (
+            "Structure segment_narrations in this exact order (do not reorder):\n"
+            f"- Segment {spans_en['hook']}: Hook. Grab attention immediately\n"
+            f"- Segment {spans_en['facts']}: Facts. What happened, concisely\n"
+            f"- Segment {spans_en['mechanism']}: How it works technically. "
+            "Deliver the technical_insight content here\n"
+            f"- Segment {spans_en['impact']}: Practical impact. "
+            "Deliver the practical_impact content here\n"
+            f"- Segment {spans_en['conclusion']}: Conclusion and CTA\n"
+            "\n"
+            "IMPORTANT: filling the technical_insight and practical_impact fields is "
+            "not enough — their substance MUST appear in the narration of the "
+            "corresponding segments. A script that only restates the news is rejected "
+            "(the goal is to differentiate from summary accounts and to avoid being "
+            "flagged as reused content).\n"
+            "At least ONE of the text_overlays must carry a point from the analysis "
+            "part (the mechanism or the practical impact).\n"
+            "\n"
+            "LENGTH: this structure does NOT raise the budget. Keep every segment "
+            f"between {spec.words_per_segment[0]} and {spec.words_per_segment[1]} words "
+            f"({spec.total_words[1]} words total maximum). The analysis REPLACES "
+            "restated facts; it is not added on top. State the mechanism with a "
+            "single technical term, and name exactly one concrete change for the "
+            "practical impact.\n"
+            "**Every segment must stand alone as a complete sentence.** Segment "
+            "boundaries are where the image changes, so never split a sentence across "
+            f"two segments (this happens when a segment drops below "
+            f"{spec.words_per_segment[0]} words)."
         )

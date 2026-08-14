@@ -14,7 +14,13 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from src.models.script import Script, ScriptDraft, _join_narration, estimate_duration_sec
+from src.models.script import (
+    MIN_INSIGHT_CHARS,
+    Script,
+    ScriptDraft,
+    _join_narration,
+    estimate_duration_sec,
+)
 
 
 def _draft(**overrides: object) -> ScriptDraft:
@@ -26,6 +32,14 @@ def _draft(**overrides: object) -> ScriptDraft:
         "hook": "冒頭のフック",
         "main_points": ["ポイント1", "ポイント2"],
         "conclusion": "締めの一言",
+        "technical_insight": (
+            "内部では既存モデルの推論結果をキャッシュして再利用する仕組みになっているため、"
+            "2回目以降の応答が速い。"
+        ),
+        "practical_impact": (
+            "現場では手作業だったレビュー工程を自動化でき、日次の運用コストが下がる。"
+            "レビュー担当は判断だけに集中できる。"
+        ),
         "image_prompts": ["Scene 1", "Scene 2", "Scene 3"],
         "text_overlays": ["overlay 1", "overlay 2", "overlay 3"],
         "estimated_duration": 35,
@@ -273,3 +287,114 @@ def test_script_validates_on_load() -> None:
     data["segment_narrations"] = ["文A。", ""]
     with pytest.raises(ValidationError):
         Script.from_dict(data)
+
+
+# --------------------------------------------------------------------------
+# 独自解説（Issue #2）
+#
+# ニュースをなぞるだけの台本は埋もれるうえ、YouTube の
+# 「再利用されたコンテンツ」ポリシーに抵触するリスクがある。
+# Structured Outputs では必須フィールドをモデルが省略できないので、
+# 「解説が入っていること」はスキーマで担保する。
+# 「質」は担保できないので、生成物を読む工程は別に必要。
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field_name", ["technical_insight", "practical_impact"])
+def test_rejects_empty_insight(field_name: str) -> None:
+    """独自解説が空だと弾くこと。"""
+    with pytest.raises(ValidationError):
+        _draft(**{field_name: ""})
+
+
+@pytest.mark.parametrize("field_name", ["technical_insight", "practical_impact"])
+def test_rejects_whitespace_only_insight(field_name: str) -> None:
+    """空白だけの独自解説を弾くこと。
+
+    `Field(min_length=...)` は「全角空白を40個」を通してしまうため、
+    strip 後の長さで見る必要がある。
+    """
+    with pytest.raises(ValidationError, match=f"{field_name} が空です"):
+        _draft(**{field_name: "　" * (MIN_INSIGHT_CHARS + 10)})
+
+
+@pytest.mark.parametrize("field_name", ["technical_insight", "practical_impact"])
+def test_rejects_too_short_insight(field_name: str) -> None:
+    """一言で流した独自解説を弾くこと。"""
+    with pytest.raises(ValidationError):
+        _draft(**{field_name: "あ" * (MIN_INSIGHT_CHARS - 1)})
+
+
+@pytest.mark.parametrize("field_name", ["technical_insight", "practical_impact"])
+def test_accepts_insight_at_the_minimum(field_name: str) -> None:
+    """下限ちょうどは許すこと（境界の扱いを固定する）。"""
+    draft = _draft(**{field_name: "あ" * MIN_INSIGHT_CHARS})
+    assert len(getattr(draft, field_name)) == MIN_INSIGHT_CHARS
+
+
+def test_script_rejects_missing_insight() -> None:
+    """Script 側でも独自解説を必須にすること。
+
+    output/scripts/*.json はここを読んでレビューするので、
+    保存されるモデルにも無いと意味がない。
+    """
+    data = _draft().to_script("ja").to_dict()
+    del data["technical_insight"]
+    with pytest.raises(ValidationError):
+        Script.from_dict(data)
+
+
+def test_to_script_preserves_insights() -> None:
+    """独自解説が Script に引き継がれること。"""
+    draft = _draft()
+    script = draft.to_script("ja")
+    assert script.technical_insight == draft.technical_insight
+    assert script.practical_impact == draft.practical_impact
+
+
+# --------------------------------------------------------------------------
+# 出典 URL
+#
+# ScriptDraft には持たせない。モデルは URL を知らない（プロンプト入力は
+# 記事のタイトルと本文だけ）ので、出させれば捏造する。
+# language と同じく呼び出し元が権威を持つ。
+# --------------------------------------------------------------------------
+
+
+def test_draft_has_no_source_url_field() -> None:
+    """source_url は LLM への要求項目に含めない。
+
+    モデルは URL を知らないので、出させると捏造する。
+    """
+    assert "source_url" not in ScriptDraft.model_fields
+
+
+def test_to_script_appends_source_to_description_ja() -> None:
+    draft = _draft(description="要約文")
+    script = draft.to_script("ja", source_url="https://example.com/a")
+    assert script.description == "要約文\n\n出典: https://example.com/a"
+    assert script.source_url == "https://example.com/a"
+
+
+def test_to_script_appends_source_to_description_en() -> None:
+    draft = _draft(description="Summary")
+    script = draft.to_script("en", source_url="https://example.com/a")
+    assert script.description == "Summary\n\nSource: https://example.com/a"
+
+
+def test_to_script_does_not_duplicate_existing_url() -> None:
+    """モデルが説明文に URL を書いていたら二重に足さないこと。"""
+    draft = _draft(description="要約文\n\n参考: https://example.com/a")
+    script = draft.to_script("ja", source_url="https://example.com/a")
+    assert script.description.count("https://example.com/a") == 1
+
+
+def test_to_script_without_source_leaves_description_untouched() -> None:
+    """URL が無い呼び出しでは説明文を変えないこと。
+
+    CLI は自由テキストのトピックを取るので、URL を持たない実行がある。
+    """
+    draft = _draft(description="要約文")
+    script = draft.to_script("ja")
+    assert script.description == "要約文"
+    assert script.source_url == ""

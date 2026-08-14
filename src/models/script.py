@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 def _join_narration(segments: list[str], language: str) -> str:
@@ -38,6 +38,25 @@ class _HasAlignedSegments(Protocol):
     segment_narrations: list[str]
     image_prompts: list[str]
     text_overlays: list[str]
+
+
+class _HasInsights(Protocol):
+    """独自解説の2フィールドだけを表す構造的な型。
+
+    ScriptDraft と Script の両方がこれを満たす。
+    """
+
+    technical_insight: str
+    practical_impact: str
+
+
+# 独自解説フィールドの最低文字数。
+#
+# 言語非依存の値にしている。ScriptDraft は意図的に `language` を持たない
+# （呼び出し元が権威を持つ）ため、バリデータの中で言語別の閾値を選べない。
+# 40文字は「一言で流していない」ことの担保であって、質の保証ではない
+# （質はスキーマでは担保できないので、生成物を読む工程が必要）。
+MIN_INSIGHT_CHARS = 40
 
 
 # 話速 1.1〜1.25 での実測に基づく読み上げ速度。
@@ -96,6 +115,56 @@ def _validate_aligned_segments(model: _HasAlignedSegments) -> None:
                 raise ValueError(f"{field_name} の{i}番目が空です")
 
 
+def _validate_insights(model: _HasInsights) -> None:
+    """独自解説フィールドが実質的に埋まっているか検証する。
+
+    `Field(min_length=...)` は空白だけの文字列を通してしまう
+    （全角空白を40個並べれば通る）。strip 後の長さで見る。
+
+    Args:
+        model: 独自解説の2フィールドを持つモデル
+
+    Raises:
+        ValueError: 空、空白のみ、または短すぎる場合
+    """
+    for field_name in ("technical_insight", "practical_impact"):
+        value: str = getattr(model, field_name)
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(f"{field_name} が空です")
+        if len(stripped) < MIN_INSIGHT_CHARS:
+            raise ValueError(
+                f"{field_name} が短すぎます: {len(stripped)}文字 (最低{MIN_INSIGHT_CHARS}文字)"
+            )
+
+
+def _with_source(description: str, source_url: str, language: str) -> str:
+    """説明文に出典 URL を追記する。
+
+    YouTube の「再利用されたコンテンツ」ポリシー対策として、出典は必ず
+    説明文に載せる。モデルに書かせず**コード側で追記する**理由は、
+    モデルが URL を知らないため（プロンプト入力は記事のタイトルと本文だけ）。
+    出させれば確実に捏造する。
+
+    Args:
+        description: モデルが書いた説明文
+        source_url: 出典 URL（空なら何もしない）
+        language: 言語コード ("ja" or "en")
+
+    Returns:
+        str: 出典を含む説明文
+    """
+    # 空のときは追記しない。CLI は自由テキストのトピックを取るので
+    # URL を持たない呼び出しがある。
+    if not source_url:
+        return description
+    # モデルが本文中に URL を書いていた場合の二重追記を避ける
+    if source_url in description:
+        return description
+    label = "出典" if language == "ja" else "Source"
+    return f"{description}\n\n{label}: {source_url}"
+
+
 class ScriptDraft(BaseModel):
     """LLM が出力する台本（Structured Outputs のスキーマ）。
 
@@ -107,6 +176,15 @@ class ScriptDraft(BaseModel):
       両方を出力させると「連結が full_narration と一致すること」という
       冗長な制約が生まれ、モデルは一致を優先して空セグメントで
       パディングする挙動を示した。導出にすれば矛盾は構造的に起こらない。
+    - `source_url` を持たない — モデルは URL を知らない（プロンプト入力は
+      記事のタイトルと本文だけ）。出させれば捏造する。`language` と同じく
+      呼び出し元が権威を持つ値として `to_script` で受ける。
+
+    `technical_insight` / `practical_impact` を必須にしている理由:
+    ニュースをなぞるだけの出力は埋もれるうえ、YouTube の
+    「再利用されたコンテンツ」ポリシーに抵触するリスクがある。
+    Structured Outputs では**必須フィールドをモデルは省略できない**ので、
+    プロンプトでお願いするより保証が強い。
 
     Attributes:
         title: 動画タイトル（YouTube/TikTokアルゴリズム最適化）
@@ -115,6 +193,8 @@ class ScriptDraft(BaseModel):
         hook: フック（冒頭で視聴者を引き付ける）
         main_points: メインポイントのリスト
         conclusion: 結論（CTA含む）
+        technical_insight: 技術的にどういう仕組みなのかの独自解説
+        practical_impact: 実務・現場で何がインパクトなのかの独自考察
         image_prompts: 画像生成プロンプト（英語）
         text_overlays: 各画像に表示するテキスト
         estimated_duration: 推定秒数
@@ -127,14 +207,16 @@ class ScriptDraft(BaseModel):
     hook: str
     main_points: list[str]
     conclusion: str
+    technical_insight: str = Field(min_length=MIN_INSIGHT_CHARS)
+    practical_impact: str = Field(min_length=MIN_INSIGHT_CHARS)
     image_prompts: list[str]
     text_overlays: list[str]
     estimated_duration: int
     segment_narrations: list[str]
 
     @model_validator(mode="after")
-    def _check_segment_alignment(self) -> "ScriptDraft":
-        """セグメント・画像・オーバーレイの整合性を検証する。
+    def _check_content(self) -> "ScriptDraft":
+        """セグメントの整合性と独自解説の実質を検証する。
 
         音声のタイミング同期と動画合成が
         「segment_narrations / image_prompts / text_overlays の
@@ -144,9 +226,11 @@ class ScriptDraft(BaseModel):
             ScriptDraft: 検証済みの自身
 
         Raises:
-            ValueError: 要素数が一致しない、または空要素がある場合
+            ValueError: 要素数が一致しない、空要素がある、
+                または独自解説が空・短すぎる場合
         """
         _validate_aligned_segments(self)
+        _validate_insights(self)
         return self
 
     def narration_length(self, language: str) -> int:
@@ -187,17 +271,24 @@ class ScriptDraft(BaseModel):
             return f"ナレーションが短すぎます: {actual}文字 (目標下限{low}文字)"
         return None
 
-    def to_script(self, language: str, actual_duration_sec: float | None = None) -> "Script":
-        """言語を与えて `Script` に変換する。
+    def to_script(
+        self,
+        language: str,
+        actual_duration_sec: float | None = None,
+        source_url: str = "",
+    ) -> "Script":
+        """言語と出典を与えて `Script` に変換する。
 
         `full_narration` はセグメントの連結で導出する。
         `estimated_duration` はモデルの自己申告を使わず、
         文字数からの推定、または実測値で置き換える。
+        出典 URL は `description` に追記する（モデルには書かせない）。
 
         Args:
             language: 言語コード ("ja" or "en")
             actual_duration_sec: 音声生成後に実測した秒数。
                 与えられればこれを採用する
+            source_url: 元記事の URL。空なら説明文に追記しない
 
         Returns:
             Script: 完成した台本
@@ -210,20 +301,33 @@ class ScriptDraft(BaseModel):
 
         payload = self.model_dump()
         payload["estimated_duration"] = duration
-        return Script(language=language, full_narration=narration, **payload)
+        payload["description"] = _with_source(self.description, source_url, language)
+        return Script(
+            language=language,
+            full_narration=narration,
+            source_url=source_url,
+            **payload,
+        )
 
 
 class Script(BaseModel):
     """動画用台本データモデル。
 
+    `source_url` は必須フィールドだが**空文字列を許す**。CLI は自由テキストの
+    トピックを受け取るので、URL を持たない呼び出しが実在する
+    （ニュース経由の生成では常に `NewsArticle.url` が入る）。
+
     Attributes:
         language: 言語コード ("ja" or "en")
         title: 動画タイトル（YouTube/TikTokアルゴリズム最適化）
-        description: 動画説明文（CTA・ハッシュタグ含む）
+        description: 動画説明文（CTA・ハッシュタグ・出典含む）
         hashtags: ハッシュタグリスト（5〜8個）
         hook: フック（冒頭で視聴者を引き付ける）
         main_points: メインポイントのリスト
         conclusion: 結論（CTA含む）
+        technical_insight: 技術的にどういう仕組みなのかの独自解説
+        practical_impact: 実務・現場で何がインパクトなのかの独自考察
+        source_url: 元記事の URL（呼び出し元が与える。無ければ空文字列）
         full_narration: 完全なナレーション台本
         image_prompts: 画像生成プロンプト（英語）
         text_overlays: 各画像に表示するテキスト
@@ -238,6 +342,9 @@ class Script(BaseModel):
     hook: str
     main_points: list[str]
     conclusion: str
+    technical_insight: str = Field(min_length=MIN_INSIGHT_CHARS)
+    practical_impact: str = Field(min_length=MIN_INSIGHT_CHARS)
+    source_url: str
     full_narration: str
     image_prompts: list[str]
     text_overlays: list[str]
@@ -245,16 +352,18 @@ class Script(BaseModel):
     segment_narrations: list[str]
 
     @model_validator(mode="after")
-    def _check_segment_alignment(self) -> "Script":
-        """セグメント・画像・オーバーレイの整合性を検証する。
+    def _check_content(self) -> "Script":
+        """セグメントの整合性と独自解説の実質を検証する。
 
         Returns:
             Script: 検証済みの自身
 
         Raises:
-            ValueError: 要素数が一致しない、または空要素がある場合
+            ValueError: 要素数が一致しない、空要素がある、
+                または独自解説が空・短すぎる場合
         """
         _validate_aligned_segments(self)
+        _validate_insights(self)
         return self
 
     def to_dict(self) -> dict:
