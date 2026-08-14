@@ -18,8 +18,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write # OIDC。長期シークレットをリポジトリに置かないため
+  id-token: write # Azure への OIDC。長期シークレットをリポジトリに置かないため
   contents: read
+  packages: write # GHCR への push
 
 # 途中で切ると Container App が Activating のまま残るので、キャンセルはしない。
 concurrency:
@@ -34,11 +35,37 @@ jobs:
     env:
       RG: ${{ vars.AZURE_RESOURCE_GROUP }}
       APP: ${{ vars.AZURE_CONTAINER_APP_NAME }}
-      ACR: ${{ vars.AZURE_CONTAINER_REGISTRY_NAME }}
-      REPOSITORY: ${{ vars.AZURE_IMAGE_REPOSITORY }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve names
+        id: names
+        run: |
+          # レジストリは GHCR。イメージ名はリポジトリから決まるので設定は要らない。
+          tag="gh-${GITHUB_SHA::7}"
+          # 再実行（Re-run jobs）では run_number が変わらない。suffix が既存の
+          # リビジョンと衝突すると ACA に拒否されるので run_attempt も混ぜる。
+          suffix="gh${{ github.run_number }}-${{ github.run_attempt }}"
+          {
+            echo "image=ghcr.io/${{ github.repository }}:$tag"
+            echo "suffix=$suffix"
+            echo "revision=$APP--$suffix"
+          } >> "$GITHUB_OUTPUT"
+
+      # ランナー上の docker でビルドする。レジストリ側のビルド（ACR Tasks など）は
+      # 使えない。Dockerfile が `RUN --mount=type=cache` を使っており、これは
+      # BuildKit 専用構文で、quick build には BuildKit を有効にする口が無い。
+      #
+      # GITHUB_TOKEN はこの実行だけの短命なトークンで、長期シークレットではない。
+      - name: Build and push the image to GHCR
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+          docker build --tag "${{ steps.names.outputs.image }}" .
+          docker push "${{ steps.names.outputs.image }}"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -52,34 +79,12 @@ jobs:
       - name: Install the containerapp extension
         run: az extension add --name containerapp --upgrade --only-show-errors
 
-      - name: Resolve names
-        id: names
-        run: |
-          tag="gh-${GITHUB_SHA::7}"
-          # 再実行（Re-run jobs）では run_number が変わらない。suffix が既存の
-          # リビジョンと衝突すると ACA に拒否されるので run_attempt も混ぜる。
-          suffix="gh${{ github.run_number }}-${{ github.run_attempt }}"
-          {
-            echo "image=$ACR.azurecr.io/$REPOSITORY:$tag"
-            echo "suffix=$suffix"
-            echo "revision=$APP--$suffix"
-          } >> "$GITHUB_OUTPUT"
-
-      # ランナー上の docker でビルドする。ACR Tasks（az acr build）は使えない。
-      # Dockerfile が `RUN --mount=type=cache` を使っており、これは BuildKit 専用
-      # 構文で、ACR Tasks の quick build には BuildKit を有効にする口が無い。
-      - name: Build and push the image
-        env:
-          DOCKER_BUILDKIT: "1"
-        run: |
-          az acr login --name "$ACR"
-          docker build --tag "${{ steps.names.outputs.image }}" .
-          docker push "${{ steps.names.outputs.image }}"
-
       # azd は呼ばない。azd provision は containerImage を
       # main.parameters.json の既定（mcr.microsoft.com/k8se/quickstart:latest、
       # 8080 待ち受け）に戻しうる。プローブが通らず Activating のまま残る
       # （CLAUDE.md に記録済みの実害）。
+      #
+      # GHCR のパッケージは public なので pull 用の資格情報は渡さない。
       #
       # --no-wait にして待ちは次のステップに任せる。az の LRO ポーリングは
       # サブスクリプションスコープの containerappOperationStatuses を読むため、

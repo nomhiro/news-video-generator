@@ -83,8 +83,8 @@ def test_deploy_workflow_never_provisions() -> None:
         assert re.search(pattern, workflow) is None, f"{pattern} が現れている（{why}）"
 
 
-def test_deploy_workflow_does_not_build_in_acr_tasks() -> None:
-    """ビルドを ACR Tasks（`az acr build`）に投げないこと。
+def test_deploy_workflow_builds_on_the_runner() -> None:
+    """ビルドをレジストリ側（`az acr build` など）に投げないこと。
 
     Dockerfile が `RUN --mount=type=cache` を使っている。これは BuildKit 専用の
     構文で、ACR Tasks の quick build には BuildKit を有効にする口が無いため
@@ -98,6 +98,21 @@ def test_deploy_workflow_does_not_build_in_acr_tasks() -> None:
     assert "RUN --mount=" in dockerfile, "BuildKit 専用構文が消えている。この検査を見直す"
     assert "az acr build" not in workflow
     assert "docker build" in workflow
+    assert "DOCKER_BUILDKIT" in workflow
+
+
+def test_deploy_workflow_uses_ghcr_only() -> None:
+    """レジストリは GHCR だけを使うこと。
+
+    Azure Container Registry は使わない（Basic の課金と、GitHub の外に
+    もう1つレジストリを持つ運用を避けるため）。GHCR のパッケージは public に
+    してあるので、Container Apps 側に pull 用の資格情報は要らない。
+    """
+    workflow = _without_comments(DEPLOY_WORKFLOW)
+
+    assert "ghcr.io" in workflow
+    for forbidden in ("azurecr.io", "az acr "):
+        assert forbidden not in workflow, f"{forbidden} が残っている"
 
 
 # --------------------------------------------------------------------------
@@ -106,14 +121,25 @@ def test_deploy_workflow_does_not_build_in_acr_tasks() -> None:
 
 
 def test_deploy_workflow_uses_oidc_without_long_lived_secrets() -> None:
-    """OIDC で認証すること（サービスプリンシパルのパスワードを置かない）。"""
+    """長期シークレットを使わないこと。
+
+    Azure は OIDC の federated credential、GHCR はこの実行だけの GITHUB_TOKEN。
+    どちらもリポジトリに寿命の長い資格情報を置かない。
+    """
     workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
 
     assert "id-token: write" in workflow
     assert "azure/login@v2" in workflow
-    # 長期シークレットの置き場所として使われがちな名前が現れないこと
-    for forbidden in ("AZURE_CREDENTIALS", "client-secret", "--password"):
-        assert forbidden not in workflow, f"{forbidden} は使わない"
+    # docker login はパスワードを引数で渡さない（プロセス一覧やログに出る）
+    assert "--password-stdin" in workflow
+    for pattern, why in [
+        (r"AZURE_CREDENTIALS", "サービスプリンシパルのパスワードを置かない"),
+        (r"client-secret", "同上"),
+        (r"--password[ =]", "パスワードを引数で渡さない"),
+        # PAT を GHCR の pull/push に使わない（GITHUB_TOKEN で足りる）
+        (r"\bGH_PAT\b|\bPACKAGES_TOKEN\b", "PAT を持ち込まない"),
+    ]:
+        assert re.search(pattern, workflow) is None, f"{pattern} は使わない（{why}）"
 
 
 def test_deploy_workflow_serializes_deployments() -> None:

@@ -415,6 +415,8 @@ azd down           # 破棄（課金を止める）
 - **`AZURE_CONTAINER_REGISTRY_ENDPOINT` を output に出す。** 無いと
   `azd deploy` が push 先を決められず
   `could not determine container registry endpoint` で止まる。
+  （`azd deploy` は使わなくなり、レジストリも GHCR に移したので、この output も
+  ACR ごと消す予定。後述の「アプリの反映は `main` へのマージで起きる」を参照）
 - **1 vCPU では ffmpeg が異常終了した。** 1080x1920 / preset=medium の
   エンコードが 0.4x speed しか出ず、終了コード付きで落ちた。2 vCPU / 4Gi に
   上げてショートは完走している（長尺はまだ OOM する。上の負債を参照）。
@@ -465,9 +467,10 @@ Container Apps Jobs を使わない理由は、ジョブ表がコンテナのロ
 ### アプリの反映は `main` へのマージで起きる
 
 `.github/workflows/deploy.yml` が `main` への push で走る。Actions に置くのは
-**この1本だけ**（lint / 型 / テストは後述の pre-push）。中身は az CLI で、
-イメージをビルドして push し、`az containerapp update` でリビジョンを差し替え、
-新リビジョンがトラフィックを受けるまで待つ。
+**この1本だけ**（lint / 型 / テストは後述の pre-push）。ランナーでイメージを
+ビルドして **GHCR**（`ghcr.io/nomhiro/news-video-generator`）に push し、
+`az containerapp update` でリビジョンを差し替え、新リビジョンがトラフィックを
+受けるまで待つ。
 
 この仕組みが無かったとき、マージしても反映されず、**気付かないまま毎朝
 06:30 JST の自動生成が旧コードで走り続けていた**（PR #14 のマージ 14:18 UTC に対し、
@@ -478,9 +481,22 @@ Container Apps Jobs を使わない理由は、ジョブ表がコンテナのロ
 8080 待ち受け）に戻り、プローブが通らず Activating のままリビジョンが残る。
 `tests/test_deploy_workflow.py` が workflow の中身を検査している。
 
-**ビルドは ACR Tasks（`az acr build`）ではなくランナー上の docker で行う。**
+**レジストリは GHCR だけ。Azure Container Registry は使わない。**
+GitHub の外にもう1つレジストリを持たないため。**GHCR のパッケージは public に
+してある**ので、Container Apps 側に pull 用の資格情報を持たせていない。
+private にすると、ACA はリビジョン作成時とレプリカ再起動時に毎回 pull するため
+短命な `GITHUB_TOKEN` では足りず、**長期の PAT を Container App の secret として
+持たせることになる**（それを避けるために public にしている）。
+GHCR は public パッケージのストレージが無料で、容量上限も気にしなくてよい。
+
+push は `GITHUB_TOKEN`（この実行だけの短命なトークン）で行う。`packages: write`
+権限が要る。イメージ名は `ghcr.io/${{ github.repository }}` で決まるので、
+レジストリ名やリポジトリ名の設定は要らない。
+
+**ビルドはレジストリ側ではなくランナー上の docker で行う。**
 Dockerfile が `RUN --mount=type=cache` を使っており、これは BuildKit 専用の構文で、
-ACR Tasks の quick build には BuildKit を有効にする口が無い。
+ACR Tasks の quick build には BuildKit を有効にする口が無い（レジストリ側ビルドに
+戻そうとしたときにここで詰まる）。
 
 **生存確認は「リビジョン名 + `latestReadyRevisionName` + `trafficWeight == 100`」で
 判定する。** `active == true` では判定できない。`activeRevisionsMode = Single` では
@@ -514,13 +530,13 @@ az ad app federated-credential create --id "$APP_ID" --parameters '{
 subject はブランチに紐づくので、**`main` 以外から `workflow_dispatch` すると
 login が失敗する**。
 
-ロールは3つ。**API キーは1つも渡さない**（`az containerapp update --image` は
-bicep パラメータを評価しないので、キーは既存の Container App の secrets のまま）。
+Azure 側のロールは2つだけ。レジストリが GHCR なので ACR への権限は要らない。
+**API キーは1つも渡さない**（`az containerapp update --image` は bicep パラメータを
+評価しないので、キーは既存の Container App の secrets のまま）。
 
 | ロール | スコープ | 理由 |
 |---|---|---|
-| `Reader` | リソースグループ | レジストリ名やアプリの状態を引くため。キーは読めない |
-| `AcrPush` | ACR | イメージの push |
+| `Reader` | リソースグループ | アプリとリビジョンの状態を引くため。キーは読めない |
 | `Contributor` | Container App | `Container Apps Contributor` は `Microsoft.App/containerApps/*/write`（サブリソース）しか持たず、アプリ本体への `write` を持たないので使えない |
 
 戻すときに壊しやすい点・運用上の注意。
@@ -546,11 +562,16 @@ bicep パラメータを評価しないので、キーは既存の Container App
   動き続ける。ただし `latestRevisionName` は壊れたリビジョンを指したまま残るので、
   非活性のリビジョンは適宜掃除する。
 - **切り戻しはリビジョンではなくイメージタグで行う。** リビジョンは1件しか
-  残らないため `az containerapp revision activate` に頼れない。ACR にタグが残るので、
-  前のタグで `az containerapp update --image` を打つ。
-- **ACR Basic は 10GB 上限で、タグは毎回一意なので永久に増える**（untagged
-  manifest が生まれないため retention policy も効かない）。ときどき
-  `az acr repository show-tags` / `az acr repository delete` で掃除する。
+  残らないため `az containerapp revision activate` に頼れない。GHCR にタグ
+  （`gh-<短縮sha>`）が残るので、前のタグで `az containerapp update --image` を打つ。
+- **GHCR の新規パッケージは既定で private。** 初回の push のあとに一度だけ手で
+  public に切り替える（Packages → Package settings → Change visibility）。
+  private のままだと ACA が pull できず、リビジョンが Activating のまま残る。
+- **ACR（`crnewsvideoimgmimujd6zyifm6`）はまだインフラに残っている。** GHCR からの
+  デプロイが動くことを確認したうえで、`infra/core/app-hosting.bicep` の ACR /
+  AcrPull ロール割当 / `registries` と `main.bicep` の
+  `AZURE_CONTAINER_REGISTRY_ENDPOINT` 出力を消して `azd provision` する。
+  **先に消すと切り戻し先（稼働中のイメージ）が無くなる**ので、順序を守る。
 
 ### チェックは pre-push に寄せている
 
