@@ -155,9 +155,11 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    # 既定では課金・低速なテストを除外する。CI もこの既定で走る。
+    # 既定では課金・低速なテストを除外する。
     # 明示的に走らせたいときは `-m slow` / `-m live` を渡せば
     # コマンドラインの -m が addopts より優先される。
+    # push 前の hook（.githooks/pre-push）は `-m "not live"` を渡すので、
+    # slow（実 ffmpeg）はそこで走り、課金する live だけが外れる。
     "-m", "not slow and not live",
 ]
 asyncio_mode = "auto"

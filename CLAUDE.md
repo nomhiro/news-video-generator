@@ -23,6 +23,13 @@ npm run build:css                                 # テンプレートのクラ�
 
 `-f` は `short`（縦・約35秒）/ `tiktok`（縦・60〜90秒）/ `long`（横・約5分）。
 
+**clone した直後に一度だけ hook を有効化する。** lint / 型 / テストは GitHub Actions
+ではなく push 前のローカルで走る（後述の「チェックは pre-push に寄せている」）。
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## 外部依存
 
 **ffmpeg / ffprobe** が PATH に必要（`video_composer.py` が subprocess で直接呼ぶ）。
@@ -212,11 +219,17 @@ Node は CSS のビルドにだけ必要で、アプリの実行には不要。
 ### AIモデルを変えたら登録簿を更新する
 
 `src/model_registry.py` に使用中の全モデルと廃止日を集約している。
-`tests/test_model_registry.py` が廃止日の90日前を過ぎたら失敗し、CI の週次 cron でも走る。
+`tests/test_model_registry.py` が廃止日の90日前を過ぎたら失敗する。
 
 この仕組みがある理由: `imagen-3.0-generate-002` が 2025-11-10 に停止していたのに
 9か月気付かず、その間パイプライン全体が動作していなかった。モデルIDがアダプタ内に
 散在し、廃止日をどこにも記録していなかったことが原因。
+
+**この検査は push 契機でしか走らない。** 以前は Actions の週次 cron でも回していたが、
+Actions を CD 専用にしたときに外した（Issue #15）。現時点では `ACTIVE_MODELS` の
+3件すべてが `shutdown_on=None` なので日付の経過だけで失敗しうる状態ではないが、
+**`shutdown_on` に日付を入れた時点で、気付く経路を作り直す必要がある**
+（pre-push は作業していなければ走らない）。
 
 ## 既知の設計上の負債
 
@@ -377,12 +390,16 @@ Starlette の `BackgroundTask` は非同期関数をイベントループ上で�
 ```bash
 azd env set DEPLOY_APP true
 azd provision      # インフラ（ACR / Container Apps 環境 / Container App）
-azd deploy         # イメージのビルド・push・リビジョン更新
 azd down           # 破棄（課金を止める）
 ```
 
-`azd deploy` には Docker が動いている必要がある（イメージをローカルで
-ビルドして ACR に push する）。
+**アプリの反映は `azd deploy` ではなく CD で行う**（後述の「アプリの反映は
+`main` へのマージで起きる」）。`azd` はインフラの払い出しと破棄にだけ使う。
+
+`azd deploy` を打つと、CD が付けるタグ（`gh-<sha>`）とは別系列の
+`azd-deploy-<timestamp>` タグと suffix 無しのリビジョンができ、
+「いま動いているものがどの commit か」が追えなくなる。手で緊急に反映する必要が
+あるときは CD と同じ経路（下記）を打つ。
 
 実際に踏んだ落とし穴。
 
@@ -444,6 +461,120 @@ Container Apps Jobs を使わない理由は、ジョブ表がコンテナのロ
 **minReplicas = 1 なので、動かしている間は常に課金される。**
 使わないときは `azd down` で破棄する（ストレージの生成物も消えるので、
 必要なものは先に取り出す）。
+
+### アプリの反映は `main` へのマージで起きる
+
+`.github/workflows/deploy.yml` が `main` への push で走る。Actions に置くのは
+**この1本だけ**（lint / 型 / テストは後述の pre-push）。中身は az CLI で、
+イメージをビルドして push し、`az containerapp update` でリビジョンを差し替え、
+新リビジョンがトラフィックを受けるまで待つ。
+
+この仕組みが無かったとき、マージしても反映されず、**気付かないまま毎朝
+06:30 JST の自動生成が旧コードで走り続けていた**（PR #14 のマージ 14:18 UTC に対し、
+稼働リビジョンの作成は 12:09 UTC）。
+
+**`azd provision` を CD から絶対に走らせない。** `containerImage` パラメータが
+`main.parameters.json` の既定（`mcr.microsoft.com/k8se/quickstart:latest`、
+8080 待ち受け）に戻り、プローブが通らず Activating のままリビジョンが残る。
+`tests/test_deploy_workflow.py` が workflow の中身を検査している。
+
+**ビルドは ACR Tasks（`az acr build`）ではなくランナー上の docker で行う。**
+Dockerfile が `RUN --mount=type=cache` を使っており、これは BuildKit 専用の構文で、
+ACR Tasks の quick build には BuildKit を有効にする口が無い。
+
+**生存確認は「リビジョン名 + `latestReadyRevisionName` + `trafficWeight == 100`」で
+判定する。** `active == true` では判定できない。`activeRevisionsMode = Single` では
+新リビジョンが ready になるまで旧リビジョンを落とさないため、移行中は新旧どちらも
+active になる。イメージのタグでも判定できない（同じ commit を再デプロイすると
+旧リビジョンのイメージも一致する）。
+
+**`az containerapp update` は `--no-wait` で返させる。** az の LRO ポーリングは
+サブスクリプションスコープの `containerappOperationStatuses` を読むため、権限を
+リソースグループ以下に絞ると「更新は成功しているのに CLI が失敗を返す」形で
+落ちうる。待つのは自前のスクリプト（`.github/scripts/wait_for_revision.sh`）。
+
+**`--revision-suffix` には `run_attempt` も混ぜる。** GitHub の Re-run は
+`run_number` を変えないため、失敗して再実行する経路で suffix が既存リビジョンと
+衝突して必ず落ちる。
+
+認証は **OIDC の federated credential**。長期シークレット（サービスプリンシパルの
+パスワード）はリポジトリに置かない。一度だけ次を実行する。
+
+```bash
+APP_ID=$(az ad app create --display-name gh-newsvideo-cd --query appId -o tsv)
+az ad sp create --id "$APP_ID"
+az ad app federated-credential create --id "$APP_ID" --parameters '{
+  "name": "github-main",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:nomhiro/news-video-generator:ref:refs/heads/main",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
+```
+
+subject はブランチに紐づくので、**`main` 以外から `workflow_dispatch` すると
+login が失敗する**。
+
+ロールは3つ。**API キーは1つも渡さない**（`az containerapp update --image` は
+bicep パラメータを評価しないので、キーは既存の Container App の secrets のまま）。
+
+| ロール | スコープ | 理由 |
+|---|---|---|
+| `Reader` | リソースグループ | レジストリ名やアプリの状態を引くため。キーは読めない |
+| `AcrPush` | ACR | イメージの push |
+| `Contributor` | Container App | `Container Apps Contributor` は `Microsoft.App/containerApps/*/write`（サブリソース）しか持たず、アプリ本体への `write` を持たないので使えない |
+
+戻すときに壊しやすい点・運用上の注意。
+
+- **CD 後にローカルの azd env が古くなる。** `SERVICE_WEB_IMAGE_NAME` は CD では
+  更新されない。未設定のまま（新しい clone や新しい azd env）`azd provision` を
+  打つと、巻き戻り先は「古いイメージ」ではなく **quickstart イメージ**になる。
+  provision の前に現行イメージを取り込む。
+
+  ```bash
+  azd env set SERVICE_WEB_IMAGE_NAME "$(az containerapp show \
+    -n ca-newsvideo-img-mimujd6zyifm6 -g rg-newsvideo-img \
+    --query 'properties.template.containers[0].image' -o tsv)"
+  ```
+
+- **デプロイごとにジョブ表が消える。** `DATABASE_URL` はコンテナのローカル
+  ディスク上の SQLite なので、リビジョン更新で実行待ちのジョブと履歴が失われる。
+  マージが即デプロイになるぶん頻度が上がり、**生成中にマージするとその回の生成が
+  失われる**（記事の選択状態は Azure Files なので残る）。
+  イメージに入らないもの（`**.md` / `tests/` / `infra/` / `.claude/` / `.githooks/`）は
+  `paths-ignore` で除外して、無駄な再起動を減らしている。
+- **デプロイが失敗してもアプリは止まらない。** Single モードなので旧リビジョンが
+  動き続ける。ただし `latestRevisionName` は壊れたリビジョンを指したまま残るので、
+  非活性のリビジョンは適宜掃除する。
+- **切り戻しはリビジョンではなくイメージタグで行う。** リビジョンは1件しか
+  残らないため `az containerapp revision activate` に頼れない。ACR にタグが残るので、
+  前のタグで `az containerapp update --image` を打つ。
+- **ACR Basic は 10GB 上限で、タグは毎回一意なので永久に増える**（untagged
+  manifest が生まれないため retention policy も効かない）。ときどき
+  `az acr repository show-tags` / `az acr repository delete` で掃除する。
+
+### チェックは pre-push に寄せている
+
+lint / 型 / テストは GitHub Actions ではなく `.githooks/pre-push` で走る。
+ローカルで数十秒（実測: 全体で約30秒）で終わるものを、push のたびに ubuntu
+ランナーで再実行しても遅くなるだけだった。
+
+```bash
+git config core.hooksPath .githooks   # clone した直後に一度だけ
+```
+
+- **`uv sync --frozen` ではなく `uv lock --check` を使う。** 見たいのは
+  「lock が pyproject と一致しているか」だけで、sync は `.venv` を書き換えるため、
+  Windows で開発サーバを上げたまま push すると
+  `Access is denied (os error 5)` で push できなくなる。
+- **`-m "not live"` を渡して slow（実 ffmpeg）を含める。** 実 ffmpeg のテストは
+  ここが唯一の実行契機。ただし ffmpeg が PATH に無いと `pytest.skip` で静かに
+  飛ぶので、hook の先頭で `command -v ffmpeg` を検査して落としている。
+  **hook の PATH は push を起動したプロセスから継承される**ので、ターミナルでは
+  通って GUI クライアントでは skip という差が出る。
+- **これは門番ではない。** `--no-verify` で飛ばせるし、`core.hooksPath` の設定を
+  忘れた clone や GitHub の Web エディタ経由では動かない。PR に対しても何も
+  走らないので、**無検査のコードが `main` に入るとそのまま CD が走る**。
+  ブランチ保護を入れていないこととセットで意識しておく。
 
 ### 長尺は当面作らない
 
