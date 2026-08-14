@@ -1,14 +1,40 @@
-"""Voice generation using Google Cloud Text-to-Speech API (Chirp 3 HD)."""
+"""音声合成（Azure AI Speech）。
 
-import time
+なぜ Google Cloud TTS から移行したか
+------------------------------------
+以前は Chirp 3 HD を使っていたが、SSML の ``<mark>`` をサポートしないため
+セグメント境界のタイミングを取得できなかった。その結果、実装が3系統に
+分かれていた。
+
+1. セグメントごとに個別に合成し、mutagen で実測して pydub で結合する
+2. 全体を1回合成し、文字数比で按分してタイミングを推定する
+3. SSML の ``<mark>`` でタイムポイントを取ろうとするが、Chirp 3 HD が
+   非対応なので必ず 2 にフォールバックする（実質デッドコード）
+
+実際に使われていたのは 2 の推定で、ナレーションと画像の切り替えが
+ずれていた。
+
+Azure AI Speech は SSML ``<bookmark>`` と ``bookmark_reached`` イベントで
+**1回の合成で正確なオフセット**を返す。実測（3セグメント）:
+0.000s / 3.780s / 9.680s、総尺 11.485s。
+これで 1〜3 の全部が1系統に置き換わり、`pydub` / `mutagen` /
+`audioop-lts` / `google-cloud-texttospeech` の4依存も不要になった。
+
+ボイスの選定
+------------
+標準の Neural ボイスを使う。Dragon HD 系（``*:MAI-Voice-*``）は
+``<prosody>`` をサポートせず、形式別の話速（1.1〜1.25）を指定できない。
+音質は上がるが機能が退行するため採用しない。
+"""
+
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import ClassVar
+from xml.sax.saxutils import escape as xml_escape
 
-from google.cloud import texttospeech_v1beta1 as texttospeech
-from google.api_core.client_options import ClientOptions
-from google.api_core import exceptions as google_exceptions
+import azure.cognitiveservices.speech as speechsdk
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from src.utils.logger import log_step, log_success, log_error
+from src.utils.logger import log_error, log_step, log_success
 
 
 class VoiceGenerationError(Exception):
@@ -17,501 +43,288 @@ class VoiceGenerationError(Exception):
     pass
 
 
-class VoiceGenerator:
-    """Google Cloud Text-to-Speech APIを使用して音声を生成するクラス。
+class VoiceRetryableError(VoiceGenerationError):
+    """再試行すれば成功する見込みのある失敗（スロットリング・接続エラー）。"""
 
-    Chirp 3 HD Voicesモデルを使用。
+    pass
+
+
+# Speech SDK は 100ナノ秒刻み（tick）でオフセットを返す。
+_TICKS_PER_SECOND = 10_000_000
+
+
+class VoiceGenerator:
+    """Azure AI Speech でナレーション音声を生成するクラス。
 
     Attributes:
-        client: Google Cloud TTS client
-        voice_names: 言語別のボイス名辞書
+        voice_name_ja: 日本語のボイス名
+        voice_name_en: 英語のボイス名
+        region: Speech リソースのリージョン
     """
 
-    MAX_RETRIES = 3
-    BASE_DELAY = 1.0
-    API_ENDPOINT = "texttospeech.googleapis.com"
+    # 既定のボイス。いずれも標準 Neural（<prosody> 対応）。
+    DEFAULT_VOICE_JA = "ja-JP-NanamiNeural"
+    DEFAULT_VOICE_EN = "en-US-AvaNeural"
 
-    # Default Chirp 3 HD voice mappings
-    DEFAULT_VOICES = {
-        "ja": "ja-JP-Chirp3-HD-Zephyr",  # Japanese - Zephyr (Female)
-        "en": "en-US-Chirp3-HD-Zephyr",  # English - Zephyr (Female)
-    }
-
-    # Language code mappings (short code -> BCP-47)
-    LANGUAGE_CODES = {
+    LANGUAGE_CODES: ClassVar[dict[str, str]] = {
         "ja": "ja-JP",
         "en": "en-US",
     }
 
+    # 出力形式。動画の音声トラックに使うので 24kHz あれば足りる。
+    # ffmpeg 側で AAC に再エンコードされる。
+    OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz96KBitRateMonoMp3
+
+    API_RETRIES = 4
+
     def __init__(
         self,
-        voice_name_ja: Optional[str] = None,
-        voice_name_en: Optional[str] = None,
-        credentials_path: Optional[str] = None,
+        api_key: str,
+        region: str,
+        voice_name_ja: str | None = None,
+        voice_name_en: str | None = None,
     ):
         """VoiceGeneratorを初期化する。
 
         Args:
-            voice_name_ja: 日本語用ボイス名 (e.g., "ja-JP-Chirp3-HD-Zephyr")
-            voice_name_en: 英語用ボイス名 (e.g., "en-US-Chirp3-HD-Zephyr")
-            credentials_path: Google Cloud認証情報JSONファイルのパス
-                             (省略時はGOOGLE_APPLICATION_CREDENTIALS環境変数を使用)
-        """
-        # Set up client options
-        client_options = ClientOptions(api_endpoint=self.API_ENDPOINT)
-
-        # Create client (uses ADC or GOOGLE_APPLICATION_CREDENTIALS automatically)
-        if credentials_path:
-            from google.oauth2 import service_account
-
-            credentials = service_account.Credentials.from_service_account_file(
-                credentials_path
-            )
-            self.client = texttospeech.TextToSpeechClient(
-                credentials=credentials,
-                client_options=client_options,
-            )
-        else:
-            self.client = texttospeech.TextToSpeechClient(
-                client_options=client_options,
-            )
-
-        # Set up voice mappings
-        self.voice_names: Dict[str, str] = {
-            "ja": voice_name_ja or self.DEFAULT_VOICES["ja"],
-            "en": voice_name_en or self.DEFAULT_VOICES["en"],
-        }
-
-    def generate(self, text: str, language: str, output_path: Path, speaking_rate: float = 1.25) -> Path:
-        """テキストから音声を生成する。
-
-        Args:
-            text: 読み上げるテキスト
-            language: 言語コード ("ja" or "en")
-            output_path: 出力ファイルパス
-            speaking_rate: 話速 (範囲: 0.25-2.0、デフォルト: 1.25)
-
-        Returns:
-            Path: 生成された音声ファイルのパス
+            api_key: Speech リソースの API キー
+            region: Speech リソースのリージョン（例: japaneast）
+            voice_name_ja: 日本語ボイス名（省略時は DEFAULT_VOICE_JA）
+            voice_name_en: 英語ボイス名（省略時は DEFAULT_VOICE_EN）
 
         Raises:
-            VoiceGenerationError: 音声生成に失敗した場合
+            ValueError: api_key または region が空の場合
         """
-        log_step(f"音声を生成中... ({language}, 話速{speaking_rate}x)", "🎙️")
+        if not api_key:
+            raise ValueError("Azure Speech の API キーが指定されていません")
+        if not region:
+            raise ValueError("Azure Speech のリージョンが指定されていません")
 
-        voice_name = self.voice_names.get(language, self.voice_names["en"])
-        language_code = self.LANGUAGE_CODES.get(language, "en-US")
+        self._api_key = api_key
+        self.region = region
+        self.voice_name_ja = voice_name_ja or self.DEFAULT_VOICE_JA
+        self.voice_name_en = voice_name_en or self.DEFAULT_VOICE_EN
 
-        # Prepare request parameters
-        synthesis_input = texttospeech.SynthesisInput(text=text)
+    def _voice_for(self, language: str) -> str:
+        """言語に対応するボイス名を返す。"""
+        return self.voice_name_ja if language == "ja" else self.voice_name_en
 
-        voice_params = texttospeech.VoiceSelectionParams(
-            name=voice_name,
-            language_code=language_code,
-        )
+    def _locale_for(self, language: str) -> str:
+        """言語コードを BCP-47 に変換する。"""
+        return self.LANGUAGE_CODES.get(language, "ja-JP")
 
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3,
-            speaking_rate=speaking_rate,
-        )
+    def build_ssml(self, segments: list[str], language: str, speaking_rate: float) -> str:
+        """セグメント境界に bookmark を置いた SSML を組み立てる。
 
-        for attempt in range(self.MAX_RETRIES):
-            try:
-                response = self.client.synthesize_speech(
-                    input=synthesis_input,
-                    voice=voice_params,
-                    audio_config=audio_config,
-                )
+        各セグメントの**先頭**に bookmark を置く。読み上げ中に
+        `bookmark_reached` が発火し、その時点の音声オフセットが得られる。
+        これがセグメントの開始時刻になり、動画側の画像切り替えに使う。
 
-                # Save audio content to file
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(output_path, "wb") as f:
-                    f.write(response.audio_content)
-
-                log_success(f"{language}音声を生成しました")
-                return output_path
-
-            except google_exceptions.ResourceExhausted as e:
-                # Rate limited / quota exceeded
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2**attempt)
-                    time.sleep(delay)
-                    continue
-                log_error("Google Cloud TTS API呼び出しに失敗しました (Quota exceeded)")
-                raise VoiceGenerationError(
-                    "Google Cloud TTS API呼び出しに失敗しました (Quota exceeded)\n"
-                    "→ 3回リトライしましたが失敗しました\n"
-                    "→ クォータを確認してください"
-                )
-
-            except google_exceptions.InvalidArgument as e:
-                log_error(f"無効な引数: {e}")
-                raise VoiceGenerationError(f"無効なパラメータです: {e}")
-
-            except google_exceptions.GoogleAPICallError as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2**attempt)
-                    time.sleep(delay)
-                    continue
-                log_error(f"Google Cloud TTS APIエラー: {e}")
-                raise VoiceGenerationError(f"音声生成に失敗しました: {e}")
-
-            except Exception as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2**attempt)
-                    time.sleep(delay)
-                    continue
-                log_error(f"予期しないエラー: {e}")
-                raise VoiceGenerationError(f"音声生成に失敗しました: {e}")
-
-        raise VoiceGenerationError("最大リトライ回数を超えました")
-
-    def generate_segments_individually(
-        self,
-        segment_narrations: List[str],
-        language: str,
-        output_path: Path,
-        speaking_rate: float = 1.25,
-    ) -> Tuple[Path, List[float]]:
-        """各セグメントを個別に音声生成し、結合して正確なタイミングを取得する。
-
-        Chirp 3 HDはSSML Markタイムポイントをサポートしていないため、
-        各セグメントを個別に生成して実際の音声長さから正確なタイミングを取得する。
+        テキストは XML エスケープする。記事タイトルに `&` や `<` が
+        混じることが実際にあり、そのまま埋め込むと SSML が壊れる。
 
         Args:
-            segment_narrations: 各セグメントのナレーションテキスト
+            segments: ナレーションのセグメント
             language: 言語コード ("ja" or "en")
-            output_path: 最終的な結合音声ファイルのパス
-            speaking_rate: 話速 (範囲: 0.25-2.0、デフォルト: 1.25)
+            speaking_rate: 話速（1.0 が標準）
 
         Returns:
-            Tuple[Path, List[float]]: (音声ファイルパス, 各セグメントの開始時刻リスト)
-                タイミングリストはセグメント数+1の長さ（最後は終了時刻）
-
-        Raises:
-            VoiceGenerationError: 音声生成に失敗した場合
+            str: SSML 文字列
         """
-        from mutagen.mp3 import MP3
-        from pydub import AudioSegment
-        import tempfile
-
-        log_step(f"セグメント別に音声を生成中... ({language}, 話速{speaking_rate}x, {len(segment_narrations)}セグメント)", "🎙️")
-
-        voice_name = self.voice_names.get(language, self.voice_names["en"])
-        language_code = self.LANGUAGE_CODES.get(language, "en-US")
-
-        voice_params = texttospeech.VoiceSelectionParams(
-            name=voice_name,
-            language_code=language_code,
+        marked = "".join(
+            f'<bookmark mark="seg_{i}"/>{xml_escape(segment.strip())}'
+            for i, segment in enumerate(segments)
         )
-
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3,
-            speaking_rate=speaking_rate,
+        return (
+            '<speak version="1.0" '
+            'xmlns="http://www.w3.org/2001/10/synthesis" '
+            f'xml:lang="{self._locale_for(language)}">'
+            f'<voice name="{self._voice_for(language)}">'
+            # rate は倍率で指定する。Dragon HD 系は prosody 非対応なので
+            # 標準 Neural ボイスを使う前提。
+            f'<prosody rate="{speaking_rate:.2f}">{marked}</prosody>'
+            "</voice></speak>"
         )
-
-        segment_audio_files: List[Path] = []
-        segment_durations: List[float] = []
-
-        # 一時ディレクトリを作成
-        temp_dir = Path(tempfile.mkdtemp())
-
-        try:
-            # 各セグメントを個別に生成
-            for i, segment_text in enumerate(segment_narrations):
-                # 空のセグメントをチェック
-                if not segment_text or not segment_text.strip():
-                    raise VoiceGenerationError(
-                        f"セグメント{i+1}が空です。台本生成で問題が発生した可能性があります。"
-                    )
-
-                segment_path = temp_dir / f"segment_{i}.mp3"
-
-                synthesis_input = texttospeech.SynthesisInput(text=segment_text)
-
-                for attempt in range(self.MAX_RETRIES):
-                    try:
-                        response = self.client.synthesize_speech(
-                            input=synthesis_input,
-                            voice=voice_params,
-                            audio_config=audio_config,
-                        )
-
-                        # セグメント音声を保存
-                        with open(segment_path, "wb") as f:
-                            f.write(response.audio_content)
-
-                        # 音声の長さを取得
-                        audio = MP3(str(segment_path))
-                        duration = audio.info.length
-                        segment_durations.append(duration)
-                        segment_audio_files.append(segment_path)
-
-                        log_step(f"  セグメント{i+1}: {duration:.2f}秒", "")
-                        break
-
-                    except google_exceptions.ResourceExhausted:
-                        if attempt < self.MAX_RETRIES - 1:
-                            delay = self.BASE_DELAY * (2**attempt)
-                            time.sleep(delay)
-                            continue
-                        raise VoiceGenerationError("Google Cloud TTS API クォータ超過")
-
-                    except Exception as e:
-                        if attempt < self.MAX_RETRIES - 1:
-                            delay = self.BASE_DELAY * (2**attempt)
-                            time.sleep(delay)
-                            continue
-                        raise VoiceGenerationError(f"セグメント{i+1}の音声生成に失敗: {e}")
-
-            # 全セグメントを結合
-            combined = AudioSegment.empty()
-            for segment_path in segment_audio_files:
-                segment_audio = AudioSegment.from_mp3(str(segment_path))
-                combined += segment_audio
-
-            # 結合音声を保存
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            combined.export(str(output_path), format="mp3")
-
-            # タイミングリストを作成（各セグメントの開始時刻）
-            timings: List[float] = [0.0]
-            cumulative = 0.0
-            for duration in segment_durations:
-                cumulative += duration
-                timings.append(cumulative)
-
-            log_success(f"{language}音声を生成しました（{len(segment_narrations)}セグメント, 合計{cumulative:.2f}秒）")
-            return output_path, timings
-
-        finally:
-            # 一時ファイルを削除
-            import shutil
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def _estimate_timings_from_text(
-        self,
-        segment_narrations: List[str],
-        audio_path: Path,
-        language: str,
-    ) -> List[float]:
-        """音声ファイルの長さと文字数から各セグメントの開始時刻を推定する。
-
-        Chirp 3 HDがSSML Markタイムポイントをサポートしていないため、
-        文字数比率に基づいて各セグメントの開始時刻を推定する。
-
-        Args:
-            segment_narrations: 各セグメントのナレーションテキスト
-            audio_path: 生成された音声ファイルのパス
-            language: 言語コード ("ja" or "en")
-
-        Returns:
-            List[float]: 各セグメントの推定開始時刻リスト（セグメント数+1の長さ）
-        """
-        from mutagen.mp3 import MP3
-
-        # 音声ファイルの長さを取得
-        try:
-            audio = MP3(str(audio_path))
-            total_duration = audio.info.length
-        except Exception as e:
-            log_error(f"音声ファイルの長さを取得できませんでした: {e}")
-            # フォールバック: 空リストを返して均等分割を使わせる
-            return []
-
-        # 各セグメントの文字数を計算
-        char_counts = [len(segment) for segment in segment_narrations]
-        total_chars = sum(char_counts)
-
-        if total_chars == 0:
-            return []
-
-        # 文字数比率に基づいて各セグメントの開始時刻を計算
-        timings: List[float] = [0.0]  # 最初のセグメントは0秒から開始
-        cumulative_time = 0.0
-
-        for i, char_count in enumerate(char_counts):
-            # このセグメントの推定時間（文字数比率 × 全体時間）
-            segment_duration = (char_count / total_chars) * total_duration
-            cumulative_time += segment_duration
-            timings.append(cumulative_time)
-
-        log_step(f"文字数ベースでタイミングを推定: {len(timings)}ポイント", "📊")
-        for i, t in enumerate(timings[:-1]):
-            duration = timings[i + 1] - t
-            log_step(f"  セグメント{i+1}: {t:.2f}s〜{timings[i+1]:.2f}s ({duration:.2f}s)", "")
-
-        return timings
-
-    def _build_ssml_with_marks(self, segment_narrations: List[str]) -> str:
-        """セグメントごとにマーカーを挿入したSSMLを構築する。
-
-        Args:
-            segment_narrations: 各セグメントのナレーションテキスト
-
-        Returns:
-            str: マーカー付きSSML文字列
-        """
-        ssml_parts = ["<speak>"]
-        for i, segment in enumerate(segment_narrations):
-            # セグメントの前にマーカーを挿入
-            ssml_parts.append(f'<mark name="seg{i}"/>')
-            # SSML特殊文字をエスケープ
-            escaped_segment = (
-                segment.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace('"', "&quot;")
-                .replace("'", "&apos;")
-            )
-            ssml_parts.append(escaped_segment)
-        # 終了マーカーを追加（最後のセグメントの終了時刻取得用）
-        ssml_parts.append(f'<mark name="seg{len(segment_narrations)}"/>')
-        ssml_parts.append("</speak>")
-        return "".join(ssml_parts)
 
     def generate_with_timings(
         self,
-        segment_narrations: List[str],
+        segments: list[str],
         language: str,
         output_path: Path,
         speaking_rate: float = 1.25,
-    ) -> Tuple[Path, List[float]]:
-        """セグメント付きナレーションから音声を生成し、タイミング情報を返す。
-
-        Chirp 3 HDはSSML Markタイムポイントをサポートしていないため、
-        各セグメントを個別に生成して正確なタイミングを取得する方式を使用する。
+    ) -> tuple[Path, list[float]]:
+        """セグメントを1回で合成し、各セグメントの開始時刻を返す。
 
         Args:
-            segment_narrations: 各セグメントのナレーションテキスト
+            segments: ナレーションのセグメント（空要素は不可）
             language: 言語コード ("ja" or "en")
-            output_path: 出力ファイルパス
-            speaking_rate: 話速 (範囲: 0.25-2.0、デフォルト: 1.25)
+            output_path: 出力する MP3 のパス
+            speaking_rate: 話速
 
         Returns:
-            Tuple[Path, List[float]]: (音声ファイルパス, 各セグメントの開始時刻リスト)
-                タイミングリストはセグメント数+1の長さ（最後は終了時刻）
+            tuple[Path, list[float]]: (音声ファイル, 開始時刻のリスト)。
+            開始時刻は各セグメントの先頭に加えて、末尾に音声全体の
+            終了時刻が入る（要素数はセグメント数 + 1）。
+            `video_composer._calculate_durations` がこの形を期待している。
 
         Raises:
-            VoiceGenerationError: 音声生成に失敗した場合
+            VoiceGenerationError: 合成に失敗した場合
         """
-        # Chirp 3 HDはSSML <mark>タグをサポートしていないため、
-        # セグメント別生成方式を使用して正確なタイミングを取得
-        return self.generate_segments_individually(
-            segment_narrations=segment_narrations,
-            language=language,
-            output_path=output_path,
-            speaking_rate=speaking_rate,
+        if not segments:
+            raise VoiceGenerationError("ナレーションのセグメントが空です")
+
+        log_step(
+            f"音声を合成中... ({language}, {self._voice_for(language)}, "
+            f"話速{speaking_rate}x, {len(segments)}セグメント)",
+            "🎙️",
         )
 
-    def _generate_with_timings_ssml(
+        ssml = self.build_ssml(segments, language, speaking_rate)
+        offsets, total_duration = self._synthesize(ssml, output_path)
+
+        timings = self._build_timings(offsets, total_duration, len(segments))
+
+        log_success(
+            f"{language}音声を合成しました（{len(segments)}セグメント, 合計{total_duration:.2f}秒）"
+        )
+        return output_path, timings
+
+    def generate(
         self,
-        segment_narrations: List[str],
+        text: str,
         language: str,
         output_path: Path,
         speaking_rate: float = 1.25,
-    ) -> Tuple[Path, List[float]]:
-        """（非推奨）SSML Markを使用してタイミングを取得する。
-
-        注意: Chirp 3 HDはSSML Markをサポートしていないため、この方法では
-        タイムポイントが返されません。generate_segments_individuallyを使用してください。
+    ) -> Path:
+        """1つのテキストを合成する（タイミングは取らない）。
 
         Args:
-            segment_narrations: 各セグメントのナレーションテキスト
-            language: 言語コード ("ja" or "en")
-            output_path: 出力ファイルパス
-            speaking_rate: 話速 (範囲: 0.25-2.0、デフォルト: 1.25)
+            text: 読み上げるテキスト
+            language: 言語コード
+            output_path: 出力する MP3 のパス
+            speaking_rate: 話速
 
         Returns:
-            Tuple[Path, List[float]]: (音声ファイルパス, 各セグメントの開始時刻リスト)
+            Path: 音声ファイルのパス
 
         Raises:
-            VoiceGenerationError: 音声生成に失敗した場合
+            VoiceGenerationError: 合成に失敗した場合
         """
-        log_step(f"音声を生成中（SSML Mark方式）... ({language}, 話速{speaking_rate}x)", "🎙️")
+        audio_path, _ = self.generate_with_timings([text], language, output_path, speaking_rate)
+        return audio_path
 
-        voice_name = self.voice_names.get(language, self.voice_names["en"])
-        language_code = self.LANGUAGE_CODES.get(language, "en-US")
+    @staticmethod
+    def _build_timings(
+        offsets: dict[int, float], total_duration: float, segment_count: int
+    ) -> list[float]:
+        """bookmark のオフセットから開始時刻のリストを作る。
 
-        # SSMLを構築
-        ssml = self._build_ssml_with_marks(segment_narrations)
-        synthesis_input = texttospeech.SynthesisInput(ssml=ssml)
+        bookmark が欠けた場合（読み上げがスキップされた等）は、
+        直前の開始時刻を使って単調増加を保つ。ここが崩れると
+        動画側の duration 計算が負の値になる。
 
-        voice_params = texttospeech.VoiceSelectionParams(
-            name=voice_name,
-            language_code=language_code,
+        Args:
+            offsets: セグメント番号 -> 開始時刻
+            total_duration: 音声全体の長さ
+            segment_count: セグメント数
+
+        Returns:
+            list[float]: 長さ segment_count + 1 の開始時刻リスト
+        """
+        timings: list[float] = []
+        previous = 0.0
+        for i in range(segment_count):
+            current = offsets.get(i, previous)
+            # 単調増加を保証する
+            current = max(current, previous)
+            timings.append(current)
+            previous = current
+
+        # 末尾に音声の終了時刻を足す。
+        # 最後のセグメントの表示時間を決めるのに必要。
+        timings.append(max(total_duration, previous))
+        return timings
+
+    @retry(
+        retry=retry_if_exception_type(VoiceRetryableError),
+        stop=stop_after_attempt(API_RETRIES),
+        wait=wait_exponential(multiplier=2, min=2, max=60),
+        reraise=True,
+    )
+    def _synthesize(self, ssml: str, output_path: Path) -> tuple[dict[int, float], float]:
+        """SSML を合成してファイルに書き、bookmark のオフセットを集める。
+
+        Args:
+            ssml: 合成する SSML
+            output_path: 出力する MP3 のパス
+
+        Returns:
+            tuple[dict[int, float], float]: (セグメント番号 -> 開始秒, 全体の秒数)
+
+        Raises:
+            VoiceRetryableError: スロットリングや接続の問題
+            VoiceGenerationError: それ以外の失敗
+        """
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        speech_config = speechsdk.SpeechConfig(subscription=self._api_key, region=self.region)
+        speech_config.set_speech_synthesis_output_format(self.OUTPUT_FORMAT)
+
+        synthesizer = speechsdk.SpeechSynthesizer(
+            speech_config=speech_config,
+            audio_config=speechsdk.audio.AudioOutputConfig(filename=str(output_path)),
         )
 
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3,
-            speaking_rate=speaking_rate,
-        )
+        offsets: dict[int, float] = {}
 
-        for attempt in range(self.MAX_RETRIES):
+        def on_bookmark(event: speechsdk.SpeechSynthesisBookmarkEventArgs) -> None:
+            # mark は "seg_<番号>" の形で埋め込んでいる
+            name = event.text
+            if not name.startswith("seg_"):
+                return
             try:
-                # enable_time_pointingでSSML_MARKを指定
-                response = self.client.synthesize_speech(
-                    request=texttospeech.SynthesizeSpeechRequest(
-                        input=synthesis_input,
-                        voice=voice_params,
-                        audio_config=audio_config,
-                        enable_time_pointing=[
-                            texttospeech.SynthesizeSpeechRequest.TimepointType.SSML_MARK
-                        ],
-                    )
-                )
+                index = int(name.removeprefix("seg_"))
+            except ValueError:
+                return
+            offsets[index] = event.audio_offset / _TICKS_PER_SECOND
 
-                # タイムポイントを抽出
-                timings: List[float] = []
-                for timepoint in response.timepoints:
-                    timings.append(timepoint.time_seconds)
+        synthesizer.bookmark_reached.connect(on_bookmark)
 
-                # 音声ファイル保存（タイミング推定前に必要）
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(output_path, "wb") as f:
-                    f.write(response.audio_content)
+        result = synthesizer.speak_ssml_async(ssml).get()
 
-                # タイミングが取得できなかった場合のフォールバック（文字数ベース推定）
-                # Chirp 3 HDはSSML <mark>タグをサポートしていないため、タイムポイントが返されない
-                if not timings:
-                    log_step("Chirp 3 HDはタイムポイント未対応。文字数ベースで推定します。", "⏱️")
-                    timings = self._estimate_timings_from_text(
-                        segment_narrations, output_path, language
-                    )
+        if result.reason == speechsdk.ResultReason.Canceled:
+            details = result.cancellation_details
+            message = f"{details.reason}: {details.error_details}"
+            # スロットリングと接続の問題は再試行する価値がある。
+            # 認証エラーや不正な SSML は何度やっても同じ。
+            if self._is_retryable(details):
+                log_error(f"音声合成が中断されました（再試行します）: {message}")
+                raise VoiceRetryableError(message)
+            raise VoiceGenerationError(f"音声合成に失敗しました: {message}")
 
-                log_success(f"{language}音声を生成しました（{len(timings)}個のタイムポイント）")
-                return output_path, timings
+        if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
+            raise VoiceGenerationError(f"音声合成が完了しませんでした: {result.reason}")
 
-            except google_exceptions.ResourceExhausted as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2**attempt)
-                    time.sleep(delay)
-                    continue
-                log_error("Google Cloud TTS API呼び出しに失敗しました (Quota exceeded)")
-                raise VoiceGenerationError(
-                    "Google Cloud TTS API呼び出しに失敗しました (Quota exceeded)\n"
-                    "→ 3回リトライしましたが失敗しました\n"
-                    "→ クォータを確認してください"
-                )
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise VoiceGenerationError(f"音声ファイルが作成されませんでした: {output_path}")
 
-            except google_exceptions.InvalidArgument as e:
-                log_error(f"無効な引数: {e}")
-                raise VoiceGenerationError(f"無効なパラメータです: {e}")
+        return offsets, result.audio_duration.total_seconds()
 
-            except google_exceptions.GoogleAPICallError as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2**attempt)
-                    time.sleep(delay)
-                    continue
-                log_error(f"Google Cloud TTS APIエラー: {e}")
-                raise VoiceGenerationError(f"音声生成に失敗しました: {e}")
+    @staticmethod
+    def _is_retryable(details: speechsdk.CancellationDetails) -> bool:
+        """中断の理由が再試行に値するか判定する。
 
-            except Exception as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2**attempt)
-                    time.sleep(delay)
-                    continue
-                log_error(f"予期しないエラー: {e}")
-                raise VoiceGenerationError(f"音声生成に失敗しました: {e}")
+        Args:
+            details: SDK が返した中断の詳細
 
-        raise VoiceGenerationError("最大リトライ回数を超えました")
+        Returns:
+            bool: 再試行すべきなら True
+        """
+        retryable_codes = {
+            speechsdk.CancellationErrorCode.TooManyRequests,
+            speechsdk.CancellationErrorCode.ServiceUnavailable,
+            speechsdk.CancellationErrorCode.ServiceTimeout,
+            speechsdk.CancellationErrorCode.ConnectionFailure,
+            speechsdk.CancellationErrorCode.ServiceError,
+        }
+        return details.error_code in retryable_codes

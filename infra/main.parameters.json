@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "principalId": {
+      "value": "${AZURE_PRINCIPAL_ID}"
+    },
+    "imageDeploymentName": {
+      "value": "${AZURE_OPENAI_IMAGE_DEPLOYMENT=gpt-image-2}"
+    },
+    "imageDeploymentCapacity": {
+      "value": "${AZURE_OPENAI_IMAGE_CAPACITY=4}"
+    },
+    "deployApp": {
+      "value": "${DEPLOY_APP=false}"
+    },
+    "scriptEndpoint": {
+      "value": "${AZURE_OPENAI_ENDPOINT=}"
+    },
+    "scriptDeployment": {
+      "value": "${AZURE_OPENAI_DEPLOYMENT=gpt-5.1}"
+    },
+    "scriptApiKey": {
+      "value": "${AZURE_OPENAI_API_KEY=}"
+    },
+    "imageApiKey": {
+      "value": "${AZURE_OPENAI_IMAGE_API_KEY=}"
+    },
+    "speechApiKey": {
+      "value": "${AZURE_SPEECH_API_KEY=}"
+    },
+    "scheduleEnabled": {
+      "value": "${SCHEDULE_ENABLED=true}"
+    },
+    "scheduleTime": {
+      "value": "${SCHEDULE_TIME=06:30}"
+    },
+    "scheduleFormats": {
+      "value": "${SCHEDULE_FORMATS=short}"
+    },
+    "containerImage": {
+      "value": "${SERVICE_WEB_IMAGE_NAME=mcr.microsoft.com/k8se/quickstart:latest}"
+    },
+    "authClientId": {
+      "value": "${AUTH_CLIENT_ID=}"
+    },
+    "authClientSecret": {
+      "value": "${AUTH_CLIENT_SECRET=}"
+    },
+    "authTenantId": {
+      "value": "${AUTH_TENANT_ID=}"
+    }
+  }
+}

@@ -5,9 +5,10 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import ClassVar
 
-from src.utils.logger import log_step, log_success, log_error
+from src.models.formats import FormatSpec, get_spec
+from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
 class VideoCompositionError(Exception):
@@ -16,17 +17,107 @@ class VideoCompositionError(Exception):
     pass
 
 
-class VideoComposer:
-    """FFmpegを使用して動画を合成するクラス。"""
+# cgroup のパス。テストから差し替えられるように定数にしておく。
+CGROUP_V2_CPU_MAX = Path("/sys/fs/cgroup/cpu.max")
+CGROUP_V1_QUOTA = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+CGROUP_V1_PERIOD = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
 
-    OUTPUT_WIDTH = 1080
-    OUTPUT_HEIGHT = 1920
+
+def _available_cpus(
+    cpu_max: Path = CGROUP_V2_CPU_MAX,
+    quota_path: Path = CGROUP_V1_QUOTA,
+    period_path: Path = CGROUP_V1_PERIOD,
+) -> int:
+    """このプロセスが実際に使える CPU 数を返す。
+
+    なぜ `os.cpu_count()` を使わないか
+    ---------------------------------
+    コンテナの中でも `os.cpu_count()` は**ホストのコア数**を返す
+    （実測: Container Apps の 2 vCPU 割り当てに対して 20 を返した）。
+    ffmpeg / x264 は既定でこの数だけスレッドを立て、スレッドごとに
+    フレームバッファを持つため、割り当てメモリを超えて OOM killer に
+    殺される。実際に長尺（1920x1080 / 307秒）が
+    `終了コード -9` で落ちた。34秒のショートは通っていたので、
+    長い動画でだけ露見する。
+
+    cgroup v2 の `cpu.max`（"quota period" または "max period"）と
+    v1 の `cpu.cfs_quota_us` / `cpu.cfs_period_us` を見て、
+    割り当てられた CPU 数を求める。
+
+    Args:
+        cpu_max: cgroup v2 の cpu.max
+        quota_path: cgroup v1 の cpu.cfs_quota_us
+        period_path: cgroup v1 の cpu.cfs_period_us
+
+    Returns:
+        int: 使える CPU 数（最低1）
+    """
+    # cgroup v2
+    if cpu_max.is_file():
+        try:
+            quota_text, period_text = cpu_max.read_text().split()
+            if quota_text != "max":
+                quota, period = int(quota_text), int(period_text)
+                if quota > 0 and period > 0:
+                    return max(1, quota // period)
+        except (OSError, ValueError):
+            pass
+
+    # cgroup v1
+    if quota_path.is_file() and period_path.is_file():
+        try:
+            quota = int(quota_path.read_text().strip())
+            period = int(period_path.read_text().strip())
+            if quota > 0 and period > 0:
+                return max(1, quota // period)
+        except (OSError, ValueError):
+            pass
+
+    # 制限が無い（ローカル実行など）
+    return max(1, os.cpu_count() or 1)
+
+
+def _tail(text: str | None, limit: int = 2000) -> str:
+    """標準エラーの末尾だけを返す。
+
+    ffmpeg は進捗を1行ずつ stderr に出すため、全部残すと2万文字を超え、
+    UI に出したときに肝心のエラー行が埋もれる（実際に埋もれた）。
+
+    Args:
+        text: 標準エラー全体
+        limit: 残す文字数
+
+    Returns:
+        str: 末尾（切り詰めたことが分かる印を付ける）
+    """
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return f"...(前略 {len(text) - limit}文字)\n{text[-limit:]}"
+
+
+class VideoComposer:
+    """FFmpegを使用して動画を合成するクラス。
+
+    出力解像度と形式ごとのパラメータは `src/models/formats.py` が持つ。
+    """
+
     FRAME_RATE = 30
     VIDEO_CODEC = "libx264"
     AUDIO_CODEC = "aac"
     AUDIO_BITRATE = "192k"
     CRF = 23
     PRESET = "medium"
+
+    # ffmpeg を諦めるまでの時間。
+    #
+    # エンコードは実時間より遅い。Container Apps の 1 vCPU では
+    # 1080x1920 / preset=medium が実測 0.4x speed だった。
+    # 以前の 300秒では、長尺（5分）を作ろうとすると必ずタイムアウトする。
+    # 長く取ると本当にハングしたときの発覚が遅れるが、ジョブのリース
+    # （15分・heartbeat で延長）が別に見張っている。
+    FFMPEG_TIMEOUT_SEC = 1800
 
     # テキストオーバーレイ設定
     TEXT_FONT_SIZE = 64  # 幅1080pxに収まるサイズ
@@ -43,14 +134,33 @@ class VideoComposer:
     TEXT_LINE_SPACING = -70  # 行間（ピクセル）- 負の値で行を詰める
     TEXT_MAX_CHARS_PER_LINE = 14  # 1行の最大文字数
 
-    # Windows用日本語フォントパス（親しみのある丸ゴシック系を優先）
-    JAPANESE_FONTS_WINDOWS = [
-        "C:/Windows/Fonts/YuGothB.ttc",    # Yu Gothic Bold（太めで見やすい）
-        "C:/Windows/Fonts/meiryob.ttc",    # Meiryo Bold
-        "C:/Windows/Fonts/meiryo.ttc",     # Meiryo
-        "C:/Windows/Fonts/YuGothM.ttc",    # Yu Gothic Medium
-        "C:/Windows/Fonts/msgothic.ttc",   # MS Gothic
+    # テキストオーバーレイに使う日本語フォントの候補。
+    #
+    # Windows と Linux の両方を並べる理由: 開発は Windows、コンテナは Linux。
+    # 以前は Windows のパスしか持っておらず、Linux コンテナでは
+    # 必ず「日本語フォントが見つかりません」で動画合成が失敗していた。
+    #
+    # 環境変数 VIDEO_FONT_PATH を設定すれば、この一覧より優先される。
+    JAPANESE_FONT_CANDIDATES: ClassVar[list[str]] = [
+        # Windows
+        "C:/Windows/Fonts/YuGothB.ttc",  # Yu Gothic Bold（太めで見やすい）
+        "C:/Windows/Fonts/meiryob.ttc",  # Meiryo Bold
+        "C:/Windows/Fonts/meiryo.ttc",  # Meiryo
+        "C:/Windows/Fonts/YuGothM.ttc",  # Yu Gothic Medium
+        "C:/Windows/Fonts/msgothic.ttc",  # MS Gothic
+        # Linux（Dockerfile が fonts-noto-cjk を入れる）
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+        # macOS
+        "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
     ]
+
+    # フォントを明示指定する環境変数。
+    # 候補に無いフォントを使いたい場合や、コンテナイメージの
+    # フォント配置が変わった場合の逃げ道。
+    FONT_PATH_ENV_VAR = "VIDEO_FONT_PATH"
 
     def _get_japanese_font_path(self) -> str:
         """使用可能な日本語フォントのパスを取得する。
@@ -61,18 +171,41 @@ class VideoComposer:
         Raises:
             VideoCompositionError: 使用可能な日本語フォントが見つからない場合
         """
-        for font_path in self.JAPANESE_FONTS_WINDOWS:
-            if os.path.exists(font_path):
-                # Escape for FFmpeg on Windows: C:/path -> C\:/path
-                escaped_path = font_path.replace(":", "\\:")
-                return escaped_path
-
-        raise VideoCompositionError(
-            "日本語フォントが見つかりません。以下のいずれかをインストールしてください:\n"
-            "- Meiryo\n- Yu Gothic\n- MS Gothic"
+        override = os.environ.get(self.FONT_PATH_ENV_VAR)
+        candidates = (
+            [override, *self.JAPANESE_FONT_CANDIDATES]
+            if override
+            else list(self.JAPANESE_FONT_CANDIDATES)
         )
 
-    def _wrap_text(self, text: str, max_chars: int = None) -> str:
+        for font_path in candidates:
+            if font_path and Path(font_path).exists():
+                return self._escape_for_ffmpeg(font_path)
+
+        raise VideoCompositionError(
+            "日本語フォントが見つかりません。次のいずれかで解決してください:\n"
+            f"  - {self.FONT_PATH_ENV_VAR} にフォントファイルのパスを設定する\n"
+            "  - Windows: Meiryo / Yu Gothic / MS Gothic を入れる\n"
+            "  - Linux: fonts-noto-cjk を入れる（apt install fonts-noto-cjk）\n"
+            f"探索したパス:\n" + "\n".join(f"    {c}" for c in candidates if c)
+        )
+
+    @staticmethod
+    def _escape_for_ffmpeg(font_path: str) -> str:
+        """fontfile の値として ffmpeg のフィルタ式に埋め込める形にする。
+
+        ffmpeg のフィルタ記法ではコロンが引数の区切りなので、
+        Windows のドライブレター（C:/...）をそのまま渡すと解釈が壊れる。
+
+        Args:
+            font_path: フォントファイルのパス
+
+        Returns:
+            str: エスケープ済みのパス
+        """
+        return font_path.replace("\\", "/").replace(":", "\\:")
+
+    def _wrap_text(self, text: str, max_chars: int | None = None) -> str:
         """テキストを指定文字数で自動改行する。
 
         Args:
@@ -100,7 +233,7 @@ class VideoComposer:
 
         return "\n".join(lines)
 
-    def _create_text_file(self, text: str, output_dir: Optional[Path] = None, index: int = 0) -> Path:
+    def _create_text_file(self, text: str, output_dir: Path | None = None, index: int = 0) -> Path:
         """テキストオーバーレイ用のファイルを作成する。
 
         Args:
@@ -130,11 +263,11 @@ class VideoComposer:
     def compose(
         self,
         audio_path: Path,
-        image_paths: List[Path],
+        image_paths: list[Path],
         output_path: Path,
-        text_overlays: Optional[List[str]] = None,
+        text_overlays: list[str] | None = None,
         language: str = "ja",
-        segment_timings: Optional[List[float]] = None,
+        segment_timings: list[float] | None = None,
         video_format: str = "short",
     ) -> Path:
         """音声と画像から動画を合成する。
@@ -154,18 +287,12 @@ class VideoComposer:
         Raises:
             VideoCompositionError: 動画合成に失敗した場合
         """
-        # 動画形式に応じて解像度を設定
-        # TikTok format uses vertical 1080x1920 like short format
-        if video_format == "long":
-            output_width = 1920
-            output_height = 1080
-            format_label = "ロング(1920x1080)"
-        else:  # "short" or "tiktok"
-            output_width = self.OUTPUT_WIDTH  # 1080
-            output_height = self.OUTPUT_HEIGHT  # 1920
-            format_label = "TikTok(1080x1920)" if video_format == "tiktok" else "ショート(1080x1920)"
+        # 解像度は formats.py が単一の情報源
+        spec = get_spec(video_format)
+        output_width = spec.output_width
+        output_height = spec.output_height
 
-        log_step(f"動画を合成中... ({format_label})", "🎬")
+        log_step(f"動画を合成中... ({spec.label} {output_width}x{output_height})", "🎬")
 
         if not audio_path.exists():
             raise VideoCompositionError(f"音声ファイルが見つかりません: {audio_path}")
@@ -176,13 +303,11 @@ class VideoComposer:
 
         try:
             # Get audio duration
-            audio_duration = self._get_audio_duration(audio_path)
+            audio_duration = self._get_media_duration(audio_path)
             num_images = len(image_paths)
 
             # Calculate durations for each image
-            durations = self._calculate_durations(
-                num_images, audio_duration, segment_timings
-            )
+            durations = self._calculate_durations(num_images, audio_duration, segment_timings)
 
             # Create concat file with variable durations
             filelist_path = self._create_filelist(image_paths, durations)
@@ -205,21 +330,50 @@ class VideoComposer:
             # Cleanup temp file
             filelist_path.unlink(missing_ok=True)
 
-            log_success("動画を合成しました")
+            # 実尺を測って許容範囲に収まっているか確認する。
+            # モデルが自己申告する estimated_duration は実尺と一致しない
+            # （35と申告して実測59.6秒だった）ため、ここで実測で見る。
+            actual = self._get_media_duration(output_path)
+            self._warn_if_duration_out_of_range(actual, spec)
+
+            log_success(f"動画を合成しました ({actual:.1f}秒)")
             return output_path
 
         except VideoCompositionError:
             raise
         except Exception as e:
             log_error(f"動画合成エラー: {e}")
-            raise VideoCompositionError(f"動画合成に失敗しました: {e}")
+            raise VideoCompositionError(f"動画合成に失敗しました: {e}") from e
+
+    @staticmethod
+    def _warn_if_duration_out_of_range(actual_sec: float, spec: FormatSpec) -> None:
+        """完成した動画の尺が形式の想定範囲から外れていたら警告する。
+
+        失敗させずに警告に留める理由: 動画自体は再生でき、投稿もできる。
+        止めてしまうと生成コスト（画像6枚＋音声）が無駄になる。
+        分量の抑制は台本生成側の再生成で行い、ここは最後の観測点にする。
+
+        Args:
+            actual_sec: ffprobe で測った実際の秒数
+            spec: 形式の仕様
+        """
+        if spec.max_duration_sec and actual_sec > spec.max_duration_sec:
+            log_warning(
+                f"{spec.label}の想定尺を超えています: "
+                f"{actual_sec:.1f}秒 (上限{spec.max_duration_sec:.0f}秒)"
+            )
+        elif spec.min_duration_sec and actual_sec < spec.min_duration_sec:
+            log_warning(
+                f"{spec.label}の想定尺に届いていません: "
+                f"{actual_sec:.1f}秒 (下限{spec.min_duration_sec:.0f}秒)"
+            )
 
     def _calculate_durations(
         self,
         num_images: int,
         audio_duration: float,
-        segment_timings: Optional[List[float]] = None,
-    ) -> List[float]:
+        segment_timings: list[float] | None = None,
+    ) -> list[float]:
         """各画像の表示時間を計算する。
 
         Args:
@@ -251,14 +405,17 @@ class VideoComposer:
         log_step(f"均等分割を使用: {duration_per_image:.2f}秒/画像", "⏱️")
         return [duration_per_image] * num_images
 
-    def _get_audio_duration(self, audio_path: Path) -> float:
-        """音声ファイルの長さを取得する。
+    def _get_media_duration(self, media_path: Path) -> float:
+        """メディアファイルの長さを ffprobe で取得する。
+
+        音声にも動画にも使う。合成後の動画の実尺を測るのは、
+        モデルが自己申告する estimated_duration が実尺と一致しないため。
 
         Args:
-            audio_path: 音声ファイルパス
+            media_path: 音声または動画のファイルパス
 
         Returns:
-            float: 音声の長さ（秒）
+            float: 長さ（秒）
 
         Raises:
             VideoCompositionError: 長さの取得に失敗した場合
@@ -272,12 +429,12 @@ class VideoComposer:
                     "-print_format",
                     "json",
                     "-show_format",
-                    str(audio_path),
+                    str(media_path),
                 ],
                 capture_output=True,
                 text=True,
-                encoding='utf-8',
-                errors='replace',
+                encoding="utf-8",
+                errors="replace",
                 check=True,
             )
 
@@ -286,13 +443,11 @@ class VideoComposer:
             return duration
 
         except subprocess.CalledProcessError as e:
-            raise VideoCompositionError(f"ffprobeの実行に失敗しました: {e.stderr}")
+            raise VideoCompositionError(f"ffprobeの実行に失敗しました: {e.stderr}") from e
         except (KeyError, ValueError, json.JSONDecodeError) as e:
-            raise VideoCompositionError(f"音声の長さを解析できませんでした: {e}")
+            raise VideoCompositionError(f"音声の長さを解析できませんでした: {e}") from e
 
-    def _create_filelist(
-        self, image_paths: List[Path], durations: List[float]
-    ) -> Path:
+    def _create_filelist(self, image_paths: list[Path], durations: list[float]) -> Path:
         """FFmpeg concatデマクサー用のファイルリストを作成する。
 
         Args:
@@ -306,7 +461,9 @@ class VideoComposer:
         fd, filelist_path = tempfile.mkstemp(suffix=".txt")
 
         with open(fd, "w", encoding="utf-8") as f:
-            for img_path, duration in zip(image_paths, durations):
+            # strict=True: 画像と表示時間の数は _calculate_durations で
+            # 必ず一致するはずなので、ずれたら黙って画像を落とすのではなく失敗させる
+            for img_path, duration in zip(image_paths, durations, strict=True):
                 # Use forward slashes and escape single quotes
                 safe_path = str(img_path.resolve()).replace("\\", "/").replace("'", "'\\''")
                 f.write(f"file '{safe_path}'\n")
@@ -324,10 +481,10 @@ class VideoComposer:
         filelist_path: Path,
         audio_path: Path,
         output_path: Path,
-        text_overlays: Optional[List[str]] = None,
-        durations: Optional[List[float]] = None,
+        text_overlays: list[str] | None = None,
+        durations: list[float] | None = None,
         num_images: int = 0,
-        segment_timings: Optional[List[float]] = None,
+        segment_timings: list[float] | None = None,
         audio_duration: float = 0.0,
         output_width: int = 1080,
         output_height: int = 1920,
@@ -364,10 +521,16 @@ class VideoComposer:
             try:
                 font_path = self._get_japanese_font_path()
 
-                # segment_timingsがある場合は音声タイミングを直接使用
-                use_segment_timings = segment_timings and len(segment_timings) >= len(text_overlays)
-                if use_segment_timings:
-                    log_step(f"音声タイミングを使用: {[f'{t:.2f}s' for t in segment_timings[:len(text_overlays)+1]]}", "🎯")
+                # segment_timingsがある場合は音声タイミングを直接使用。
+                # フラグではなく絞り込んだローカル変数に入れることで、
+                # 以降のブロックで None ではないことが型として保証される。
+                timings: list[float] | None = None
+                if segment_timings and len(segment_timings) >= len(text_overlays):
+                    timings = segment_timings
+                    log_step(
+                        f"音声タイミングを使用: {[f'{t:.2f}s' for t in timings[: len(text_overlays) + 1]]}",
+                        "🎯",
+                    )
 
                 # フォールバック用の累積時間
                 cumulative_time = 0.0
@@ -384,13 +547,18 @@ class VideoComposer:
                     text_file_path = str(text_file.resolve()).replace("\\", "/").replace(":", "\\:")
 
                     # Calculate timing: 音声タイミングを優先、なければdurationsベース
-                    if use_segment_timings and i < len(segment_timings):
-                        start_time = segment_timings[i]
-                        if i + 1 < len(segment_timings):
-                            end_time = segment_timings[i + 1]
+                    if timings is not None and i < len(timings):
+                        start_time = timings[i]
+                        if i + 1 < len(timings):
+                            end_time = timings[i + 1]
                         else:
-                            end_time = audio_duration if audio_duration > 0 else start_time + durations[i]
-                        log_step(f"テキスト{i+1}: '{text[:15]}...' → {start_time:.2f}s - {end_time:.2f}s", "📝")
+                            end_time = (
+                                audio_duration if audio_duration > 0 else start_time + durations[i]
+                            )
+                        log_step(
+                            f"テキスト{i + 1}: '{text[:15]}...' → {start_time:.2f}s - {end_time:.2f}s",
+                            "📝",
+                        )
                     else:
                         # フォールバック: durationsベースの累積時間
                         start_time = cumulative_time
@@ -424,8 +592,22 @@ class VideoComposer:
             except VideoCompositionError as e:
                 log_error(f"テキストオーバーレイをスキップ: {e}")
 
-        # Build FFmpeg command
-        cmd = [
+        # --- 2段構えにする理由 ---
+        #
+        # 以前は「画像 + 音声 → 出力」を1回の ffmpeg で行っていた。これが
+        # 長尺（1920x1080 / 341秒）でメモリを食い潰し、OOM killer に
+        # 殺されていた（終了コード -9）。
+        #
+        # ローカルで 2 vCPU / 4Gi の制限を与えて再現したところ、
+        # エンコード速度は 1.04x 出ているのに **出力サイズが
+        # 数百フレームぶん変化しない**まま、子プロセスのピーク RSS が
+        # 4,077MB に達して落ちた。マクサーが書き出さずに映像パケットを
+        # 溜め込んでいる（stderr の "buffers queued in out_#0:0" と一致）。
+        #
+        # そこで、映像だけを作る第1段と、音声を混ぜる第2段に分ける。
+        # 第2段は `-c copy` で再エンコードしないため、溜め込む対象が無い。
+        silent_path = output_path.with_name(f"{output_path.stem}_silent.mp4")
+        video_cmd = [
             "ffmpeg",
             "-y",
             "-f",
@@ -434,8 +616,8 @@ class VideoComposer:
             "0",
             "-i",
             str(filelist_path),
-            "-i",
-            str(audio_path),
+            # 音声はこの段では扱わない
+            "-an",
             "-vf",
             video_filter,
             "-c:v",
@@ -444,35 +626,90 @@ class VideoComposer:
             self.PRESET,
             "-crf",
             str(self.CRF),
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            str(self.FRAME_RATE),
+            # 映像の長さは音声に合わせる。concat の最後の画像は
+            # 尺を持たないため、指定しないと1フレームで終わる。
+            "-t",
+            f"{audio_duration:.3f}",
+            # スレッド数を割り当て CPU 数に合わせる。
+            #
+            # 既定（0 = 自動）だと ffmpeg はホストのコア数だけスレッドを
+            # 立てる。コンテナの割り当てを見ないので、2 vCPU の環境で
+            # 20 スレッドが動き、スレッドごとのフレームバッファで
+            # メモリを食い潰して OOM killer に殺される
+            # （実測: 長尺 1920x1080 / 307秒 が 終了コード -9 で落ちた）。
+            "-threads",
+            str(_available_cpus()),
+            str(silent_path),
+        ]
+
+        # 第2段: 音声を混ぜるだけ。映像は再エンコードしない。
+        mux_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(silent_path),
+            "-i",
+            str(audio_path),
+            "-c:v",
+            "copy",
             "-c:a",
             self.AUDIO_CODEC,
             "-b:a",
             self.AUDIO_BITRATE,
             "-shortest",
-            "-pix_fmt",
-            "yuv420p",
-            "-r",
-            str(self.FRAME_RATE),
             str(output_path),
         ]
 
         try:
             log_step(f"FFmpegフィルター: {video_filter[:200]}...", "🔧")
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', check=True, timeout=300
+            log_step(f"FFmpegスレッド数: {_available_cpus()}", "🧵")
+            log_step("映像を作成中（音声なし）...", "🎞️")
+            # check=True なので失敗時は例外になる。戻り値は使わない。
+            subprocess.run(
+                video_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+                timeout=self.FFMPEG_TIMEOUT_SEC,
             )
+            log_step("音声を多重化中（映像は再エンコードしない）...", "🔉")
+            subprocess.run(
+                mux_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+                timeout=self.FFMPEG_TIMEOUT_SEC,
+            )
+            silent_path.unlink(missing_ok=True)
         except subprocess.CalledProcessError as e:
             # Cleanup temp files before raising
             for text_file in text_files:
                 text_file.unlink(missing_ok=True)
+            silent_path.unlink(missing_ok=True)
+            # 終了コードを必ず残す。負の値はシグナルで殺されたことを意味し
+            # （-9 なら OOM killer の可能性が高い）、stderr の内容だけでは
+            # 「エンコードの失敗」と区別できない。実際にコンテナ上で困った。
             raise VideoCompositionError(
-                f"FFmpegの実行に失敗しました:\nstdout: {e.stdout}\nstderr: {e.stderr}"
-            )
-        except subprocess.TimeoutExpired:
+                f"FFmpegの実行に失敗しました (終了コード {e.returncode}):\n"
+                f"stdout: {_tail(e.stdout)}\nstderr: {_tail(e.stderr)}"
+            ) from e
+        except subprocess.TimeoutExpired as e:
             # Cleanup temp files before raising
             for text_file in text_files:
                 text_file.unlink(missing_ok=True)
-            raise VideoCompositionError("FFmpegの実行がタイムアウトしました")
+            silent_path.unlink(missing_ok=True)
+            # TimeoutExpired はタイムアウト値と部分出力を持つので連結して残す
+            raise VideoCompositionError(
+                f"FFmpegの実行が {self.FFMPEG_TIMEOUT_SEC}秒でタイムアウトしました"
+            ) from e
 
         # Cleanup text overlay temp files on success
         for text_file in text_files:

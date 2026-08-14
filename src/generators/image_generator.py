@@ -1,13 +1,27 @@
-"""Image generation using Google Imagen 4 Fast."""
+"""Image generation using Azure AI Foundry gpt-image-2."""
 
-import time
+import base64
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Optional
+from typing import Literal
 
-from google import genai
-from google.genai import types
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    BadRequestError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
-from src.utils.logger import log_step, log_success, log_error
+from src.models.formats import get_spec
+from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
 class ImageGenerationError(Exception):
@@ -16,185 +30,390 @@ class ImageGenerationError(Exception):
     pass
 
 
-class ImageGenerator:
-    """Google Imagen 4 Fast を使用して画像を生成するクラス。
+class ContentFilterError(ImageGenerationError):
+    """Azure のコンテンツフィルタがプロンプトまたは生成画像を拒否した。
 
-    高速・低コストな画像生成（$0.02/枚）。
-
-    Attributes:
-        client: Google GenAI client
+    リトライしても結果は変わらないため、即座に伝播させる。
     """
 
-    MODEL = "imagen-3.0-generate-002"
-    MAX_RETRIES = 3
-    BASE_DELAY = 1.0
+    pass
 
-    def __init__(self, api_key: Optional[str] = None):
+
+def validate_size(size: str) -> tuple[int, int]:
+    """gpt-image-2 のサイズ制約を満たしているか検証する。
+
+    gpt-image-2 の制約:
+        - 両辺が16の倍数
+        - 長辺が3840px以下（4K）
+        - アスペクト比が3:1以下
+        - 総ピクセル数が 655,360 〜 8,294,400
+
+    Args:
+        size: "<幅>x<高さ>" 形式の文字列（例: "1152x2048"）
+
+    Returns:
+        Tuple[int, int]: (幅, 高さ)
+
+    Raises:
+        ValueError: 制約を満たさない場合
+    """
+    try:
+        width_str, height_str = size.lower().split("x")
+        width, height = int(width_str), int(height_str)
+    except ValueError:
+        # int() や unpack が出す低レベルなメッセージは利用者に有用でないため、
+        # 意図的にチェーンを切って呼び出し側に分かる文言だけを返す。
+        raise ValueError(f"サイズの形式が不正です: {size!r} (期待: '<幅>x<高さ>')") from None
+
+    if width <= 0 or height <= 0:
+        raise ValueError(f"サイズが正の値ではありません: {size}")
+
+    if width % 16 != 0 or height % 16 != 0:
+        raise ValueError(
+            f"両辺は16の倍数でなければなりません: {size} "
+            f"(1080x1920 は 1080 が16の倍数でないため指定できません)"
+        )
+
+    long_edge = max(width, height)
+    if long_edge > 3840:
+        raise ValueError(f"長辺は3840px以下でなければなりません: {size}")
+
+    ratio = long_edge / min(width, height)
+    if ratio > 3.0:
+        raise ValueError(f"アスペクト比は3:1以下でなければなりません: {size} (比={ratio:.2f})")
+
+    pixels = width * height
+    if not (655_360 <= pixels <= 8_294_400):
+        raise ValueError(
+            f"総ピクセル数は 655,360〜8,294,400 でなければなりません: {size} ({pixels:,}px)"
+        )
+
+    return width, height
+
+
+def _is_content_filter_error(exc: BadRequestError) -> bool:
+    """BadRequestError がコンテンツフィルタ由来かを判定する。
+
+    Azure はプロンプト拒否と生成画像拒否の両方で
+    error.code == "contentFilter" を返す。
+
+    Args:
+        exc: openai SDK の BadRequestError
+
+    Returns:
+        bool: コンテンツフィルタ由来なら True
+    """
+    if getattr(exc, "code", None) == "contentFilter":
+        return True
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and error.get("code") == "contentFilter":
+            return True
+    return "content_filter" in str(exc) or "contentFilter" in str(exc)
+
+
+class ImageGenerator:
+    """Azure AI Foundry の gpt-image-2 を使用して画像を生成するクラス。
+
+    台本生成（ScriptGenerator）と同じ Azure OpenAI の /openai/v1
+    エンドポイントを使うため、資格情報とクライアントを共有できる。
+
+    Attributes:
+        client: OpenAI クライアント（Azure v1 エンドポイント向け）
+        deployment: 画像生成モデルのデプロイ名
+        max_concurrency: 同時に投げる画像生成リクエスト数
+    """
+
+    # 生成サイズは formats.py（FormatSpec.image_size）が持つ。
+    # gpt-image-2 は両辺が16の倍数であることを要求するため、動画の出力解像度
+    # 1080x1920 をそのまま指定できない。詳細は formats.py と validate_size()。
+
+    # openai SDK は quality / output_format を Literal で型付けしているため、
+    # 素の str ではなく Literal として宣言する（そうしないと overload に合致しない）
+    QUALITY: Literal["low", "medium", "high"] = "high"
+    OUTPUT_FORMAT: Literal["png", "jpeg"] = "png"
+    MAX_RETRIES = 4
+
+    # gpt-image-2 の既定クォータは 5 images/min per deployment。
+    # 並行数を絞って 429 の頻発を避ける。クォータ引き上げ後は
+    # コンストラクタ引数で上げられる。
+    DEFAULT_MAX_CONCURRENCY = 3
+
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        deployment: str,
+        max_concurrency: int | None = None,
+    ):
         """ImageGeneratorを初期化する。
 
         Args:
-            api_key: Gemini API key (省略時は環境変数 GEMINI_API_KEY を使用)
+            endpoint: Azure OpenAI endpoint URL
+            api_key: Azure OpenAI API key
+            deployment: 画像生成モデルのデプロイ名（例: "gpt-image-2"）
+            max_concurrency: 同時リクエスト数（省略時は DEFAULT_MAX_CONCURRENCY）
+
+        Raises:
+            ValueError: endpoint / api_key / deployment が空の場合
         """
-        # API キーが明示的に渡された場合はそれを使用
-        # そうでない場合は環境変数から自動取得
-        if api_key:
-            self.client = genai.Client(api_key=api_key)
-        else:
-            # 環境変数 GEMINI_API_KEY または GOOGLE_API_KEY から自動取得
-            self.client = genai.Client()
+        if not endpoint:
+            raise ValueError("Azure OpenAI endpoint が指定されていません")
+        if not api_key:
+            raise ValueError("Azure OpenAI API key が指定されていません")
+        if not deployment:
+            raise ValueError("画像生成モデルのデプロイ名が指定されていません")
+
+        # Azure OpenAI v1 エンドポイント形式（ScriptGenerator と同じ組み立て）
+        base_url = endpoint.rstrip("/")
+        if not base_url.endswith("/openai/v1"):
+            base_url = f"{base_url}/openai/v1"
+
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.deployment = deployment
+        self.max_concurrency = max_concurrency or self.DEFAULT_MAX_CONCURRENCY
+
+    def _size_for_format(self, video_format: str) -> str:
+        """動画形式に対応する生成サイズを返す。
+
+        サイズは formats.py が単一の情報源。
+
+        Args:
+            video_format: 動画形式 ("short", "tiktok", "long")
+
+        Returns:
+            str: "<幅>x<高さ>" 形式のサイズ
+        """
+        return get_spec(video_format).image_size
 
     def generate_batch(
-        self, prompts: List[str], output_dir: Path, language: str = "ja",
-        video_format: str = "short"
-    ) -> List[Path]:
+        self,
+        prompts: list[str],
+        output_dir: Path,
+        language: str = "ja",
+        video_format: str = "short",
+    ) -> list[Path]:
         """複数のプロンプトから画像を生成する。
+
+        プロンプトごとに1リクエストを投げる。gpt-image-2 の n パラメータは
+        「同一プロンプトから複数枚」を得るもので、異なるプロンプトを
+        1リクエストに畳むことはできないため、並行実行で短縮する。
 
         Args:
             prompts: 画像生成プロンプトのリスト
             output_dir: 出力ディレクトリ
             language: 言語コード ("ja" or "en")
-            video_format: 動画形式 ("short" or "long")
+            video_format: 動画形式 ("short", "tiktok", "long")
 
         Returns:
-            List[Path]: 生成された画像ファイルのパスリスト
+            List[Path]: 生成された画像ファイルのパスリスト（prompts と同じ順序）
 
         Raises:
-            ImageGenerationError: 画像生成に失敗した場合
+            ImageGenerationError: いずれかの画像生成に失敗した場合
         """
-        # アスペクト比を動画形式に応じて設定
-        # TikTok format uses vertical 9:16 like short format
-        aspect_ratio = "16:9" if video_format == "long" else "9:16"
+        if not prompts:
+            raise ImageGenerationError("画像生成プロンプトが空です")
+
+        size = self._size_for_format(video_format)
+        validate_size(size)  # 定数の取り違えを起動時に検出する
+
         format_labels = {
-            "long": "ロング(16:9)",
-            "tiktok": "TikTok(9:16)",
-            "short": "ショート(9:16)"
+            "long": f"ロング({size})",
+            "tiktok": f"TikTok({size})",
+            "short": f"ショート({size})",
         }
-        format_label = format_labels.get(video_format, "ショート(9:16)")
-        log_step(f"{len(prompts)}枚の画像を生成中... ({format_label})", "🎨")
+        format_label = format_labels.get(video_format, f"ショート({size})")
+        log_step(
+            f"{len(prompts)}枚の画像を生成中... ({format_label}, 並行数={self.max_concurrency})",
+            "🎨",
+        )
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        image_paths: List[Path] = []
 
-        for i, prompt in enumerate(prompts, 1):
+        # 順序を保つため index を持ち回す
+        def task(indexed: tuple[int, str]) -> Path:
+            index, prompt = indexed
             enhanced_prompt = self._enhance_prompt(prompt, language, video_format)
-            output_path = output_dir / f"image_{i:03d}.png"
-            
-            # デバッグ: プロンプトの長さを確認
-            log_step(f"画像{i}: プロンプト長={len(enhanced_prompt)}文字", "🔍")
+            output_path = output_dir / f"image_{index:03d}.png"
+            return self._generate_single(enhanced_prompt, output_path, size, index)
 
+        workers = min(self.max_concurrency, len(prompts))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             try:
-                path = self._generate_single(enhanced_prompt, output_path, aspect_ratio)
-                image_paths.append(path)
+                # ContentFilterError も ImageGenerationError の一種なので
+                # そのまま呼び出し元へ伝播する
+                image_paths = list(executor.map(task, enumerate(prompts, 1)))
             except ImageGenerationError:
-                log_error(f"画像{i}の生成に失敗")
-                log_error(f"完全なプロンプト: {enhanced_prompt}")
-                raise  # 元のエラーをそのまま伝播
+                raise
             except Exception as e:
-                log_error(f"画像{i}の生成に失敗: {e}")
-                raise ImageGenerationError(f"予期しないエラー (画像{i}): {e}")
+                raise ImageGenerationError(f"予期しないエラー: {e}") from e
 
         log_success(f"{len(image_paths)}枚の画像を生成しました")
         return image_paths
 
-    def _generate_single(self, prompt: str, output_path: Path, aspect_ratio: str = "9:16") -> Path:
-        """単一の画像を生成する。
+    def _generate_single(self, prompt: str, output_path: Path, size: str, index: int) -> Path:
+        """単一の画像を生成して保存する。
 
         Args:
-            prompt: 画像生成プロンプト
+            prompt: 画像生成プロンプト（強化済み）
             output_path: 出力ファイルパス
-            aspect_ratio: アスペクト比 ("9:16" or "16:9")
+            size: "<幅>x<高さ>" 形式のサイズ
+            index: 画像番号（ログ用、1始まり）
 
         Returns:
             Path: 生成された画像ファイルのパス
 
         Raises:
-            ImageGenerationError: 画像生成に失敗した場合
+            ContentFilterError: コンテンツフィルタに拒否された場合
+            ImageGenerationError: その他の理由で生成に失敗した場合
         """
-        for attempt in range(self.MAX_RETRIES):
-            try:
-                response = self.client.models.generate_images(
-                    model=self.MODEL,
-                    prompt=prompt,
-                    config=types.GenerateImagesConfig(
-                        number_of_images=1,
-                        aspect_ratio=aspect_ratio,
-                    ),
-                )
+        try:
+            image_bytes = self._request_image(prompt, size, index)
+        except ContentFilterError as e:
+            log_error(f"画像{index}: コンテンツフィルタに拒否されました - {e}")
+            log_error(f"画像{index}: プロンプト = {prompt}")
+            raise
+        except BadRequestError as e:
+            log_error(f"画像{index}: リクエストが拒否されました - {e}")
+            log_error(f"画像{index}: プロンプト = {prompt}")
+            raise ImageGenerationError(f"画像{index}の生成に失敗しました: {e}") from e
+        except Exception as e:
+            log_error(f"画像{index}の生成に失敗: {e}")
+            raise ImageGenerationError(f"画像{index}の生成に失敗しました: {e}") from e
 
-                # レスポンスから画像を抽出して保存
-                if response.generated_images:
-                    response.generated_images[0].image.save(str(output_path))
-                    return output_path
+        output_path.write_bytes(image_bytes)
+        log_step(f"画像{index}: {output_path.name} ({len(image_bytes):,} bytes)", "🖼️")
+        return output_path
 
-                # 画像が生成されなかった場合 - 詳細なレスポンス情報をログに出力
-                error_details = ""
-                if hasattr(response, 'prompt_feedback'):
-                    error_details += f"\nPrompt feedback: {response.prompt_feedback}"
-                if hasattr(response, 'candidates') and response.candidates:
-                    for i, candidate in enumerate(response.candidates):
-                        if hasattr(candidate, 'finish_reason'):
-                            error_details += f"\nCandidate {i} finish_reason: {candidate.finish_reason}"
-                        if hasattr(candidate, 'safety_ratings'):
-                            error_details += f"\nCandidate {i} safety_ratings: {candidate.safety_ratings}"
-                log_error(f"APIレスポンス詳細: {response}{error_details}")
-                raise ImageGenerationError(
-                    f"画像が生成されませんでした\n"
-                    f"プロンプト: {prompt[:100]}..."
-                )
+    @retry(
+        retry=retry_if_exception_type(
+            (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
+        ),
+        stop=stop_after_attempt(MAX_RETRIES),
+        wait=wait_exponential(multiplier=2, min=2, max=60),
+        reraise=True,
+    )
+    def _request_image(self, prompt: str, size: str, index: int) -> bytes:
+        """画像生成APIを呼び出して画像バイト列を返す。
 
-            except ImageGenerationError:
-                raise
-            except Exception as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2**attempt)
-                    log_step(f"リトライ中 ({attempt + 1}/{self.MAX_RETRIES})...", "⏳")
-                    time.sleep(delay)
-                    continue
-                raise ImageGenerationError(f"画像生成に失敗しました: {e}")
+        レートリミット（429）・接続エラー・タイムアウト・5xx は
+        指数バックオフで再試行する。コンテンツフィルタ拒否は
+        再試行しても結果が変わらないため即座に伝播させる。
 
-        raise ImageGenerationError("最大リトライ回数を超えました")
+        Args:
+            prompt: 画像生成プロンプト
+            size: "<幅>x<高さ>" 形式のサイズ
+            index: 画像番号（ログ用）
 
-    def _enhance_prompt(self, prompt: str, language: str = "ja", video_format: str = "short") -> str:
+        Returns:
+            bytes: PNG 画像のバイト列
+
+        Raises:
+            ContentFilterError: コンテンツフィルタに拒否された場合
+            ImageGenerationError: レスポンスに画像が含まれない場合
+        """
+        try:
+            response = self.client.images.generate(
+                model=self.deployment,
+                prompt=prompt,
+                # openai 2.53.0 で size の型が Union[str, Literal[...]] に緩和され、
+                # gpt-image-2 の任意解像度を型安全に渡せるようになった。
+                # （それ以前は閉じた Literal で、extra_body 経由が必要だった）
+                size=size,
+                quality=self.QUALITY,
+                n=1,
+                output_format=self.OUTPUT_FORMAT,
+            )
+        except BadRequestError as e:
+            if _is_content_filter_error(e):
+                raise ContentFilterError(str(e)) from e
+            raise
+        except RateLimitError:
+            log_warning(
+                f"画像{index}: レートリミット（gpt-image-2 の既定は 5 images/min）。"
+                f"バックオフして再試行します"
+            )
+            raise
+
+        if not response.data:
+            raise ImageGenerationError(
+                f"APIレスポンスに画像が含まれていません "
+                f"(size={response.size}, quality={response.quality})"
+            )
+
+        b64_data = response.data[0].b64_json
+        if not b64_data:
+            # gpt-image-2 は常に base64 を返す。url が返ることはない。
+            raise ImageGenerationError(
+                f"APIレスポンスに b64_json が含まれていません (url={response.data[0].url!r})"
+            )
+
+        return base64.b64decode(b64_data)
+
+    def _enhance_prompt(
+        self, prompt: str, language: str = "ja", video_format: str = "short"
+    ) -> str:
         """プロンプトを強化する。
+
+        gpt-image-2 は指示追従性が高いため、旧 Imagen 向けの
+        冗長な否定表現の列挙はやめ、簡潔な指示にとどめる。
 
         Args:
             prompt: 元のプロンプト
             language: 言語コード ("ja" or "en")
-            video_format: 動画形式 ("short" or "long")
+            video_format: 動画形式 ("short", "tiktok", "long")
 
         Returns:
             str: 強化されたプロンプト
         """
-        enhanced = prompt
+        parts = [prompt.strip()]
 
-        # 縦向き/横向きを明示的に指定（API側のaspect_ratioだけでは不十分な場合がある）
-        if video_format in ("short", "tiktok"):
-            # 縦長 9:16 の構図を明示的に指示 (short と tiktok は同じ)
-            enhanced = f"IMPORTANT: Vertical portrait orientation (9:16 aspect ratio), tall composition optimized for mobile viewing. {enhanced}"
+        # 構図の指定（size でも指定するが、構図の意図も言葉で伝える）
+        if video_format == "long":
+            parts.append(
+                "Horizontal landscape composition, wide framing suitable for a "
+                "16:9 explainer video."
+            )
         else:
-            # 横長 16:9 の構図を明示的に指示
-            enhanced = f"IMPORTANT: Horizontal landscape orientation (16:9 aspect ratio), wide composition optimized for desktop viewing. {enhanced}"
+            parts.append(
+                "Vertical portrait composition, tall framing suitable for a "
+                "9:16 mobile short video."
+            )
 
-        # Check if quality keywords already present
-        quality_keywords = ["high quality", "cinematic", "detailed", "professional"]
+        # 品質指定（既に指定されている場合は重複させない）
+        quality_keywords = ("high quality", "cinematic", "detailed", "professional")
         if not any(kw in prompt.lower() for kw in quality_keywords):
-            enhanced = f"{enhanced}, high quality, detailed, professional, cinematic lighting"
+            parts.append("High quality, detailed, professional, cinematic lighting.")
 
-        # 画像内にテキストを含めない（テキストはオーバーレイで追加するため）
-        enhanced = f"{enhanced}, no text, no words, no letters, no writing, no captions, no labels, no watermarks"
-        
-        # 人物に関するキーワードが含まれているかチェック
-        person_keywords = ["person", "people", "man", "woman", "minister", "president", 
-                          "leader", "politician", "ceo", "executive", "speaker", "figure",
-                          "human", "face", "portrait", "headshot"]
-        has_person = any(kw in prompt.lower() for kw in person_keywords)
-        
-        if has_person:
-            # 人物が含まれる場合: 実在の人物の肖像権を避けるため、
-            # 特定の人物ではなく一般的な人物として描写するよう指示
-            enhanced = f"{enhanced}, generic anonymous person, not a real celebrity or politician, stylized illustration style"
+        # テキストはオーバーレイで載せるため画像内には入れない
+        parts.append("Do not render any text, letters, captions, or watermarks.")
+
+        # 実在人物の肖像を避ける
+        person_keywords = (
+            "person",
+            "people",
+            "man",
+            "woman",
+            "minister",
+            "president",
+            "leader",
+            "politician",
+            "ceo",
+            "executive",
+            "speaker",
+            "figure",
+            "human",
+            "face",
+            "portrait",
+            "headshot",
+        )
+        if any(kw in prompt.lower() for kw in person_keywords):
+            parts.append(
+                "Depict only generic, anonymous figures in a stylized illustration "
+                "style. Do not depict any real, identifiable person."
+            )
         else:
-            # 人物が含まれない場合: 顔なしの制約を追加
-            enhanced = f"{enhanced}, no human faces, no portraits, no facial features, show people from behind or silhouettes only if needed"
+            parts.append("Avoid depicting human faces; use silhouettes if needed.")
 
-        return enhanced
+        return " ".join(parts)

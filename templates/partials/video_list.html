@@ -27,7 +27,7 @@
                     type="button"
                     class="bg-red-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium
                            hover:bg-red-700 transition-colors flex items-center gap-1 whitespace-nowrap upload-btn"
-                    data-path="{{ video.path | replace('\\', '\\\\') }}"
+                    data-key="{{ video.key }}"
                     data-title="{{ video.title | default(video.filename, true) }}"
                     data-description="{{ video.description }}"
                     title="YouTubeにアップロード"
@@ -42,7 +42,7 @@
                     type="button"
                     class="bg-black text-white px-3 py-1.5 rounded-lg text-sm font-medium
                            hover:bg-gray-800 transition-colors flex items-center gap-1 whitespace-nowrap tiktok-upload-btn"
-                    data-path="{{ video.path | replace('\\', '\\\\') }}"
+                    data-key="{{ video.key }}"
                     data-title="{{ video.title | default(video.filename, true) }}"
                     title="TikTokにアップロード"
                 >

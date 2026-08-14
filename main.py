@@ -17,6 +17,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from config import Config
 from src.pipeline import Pipeline
 from src.utils.logger import setup_logger
@@ -51,40 +53,45 @@ Examples:
         "-o", "--output", default="./output", help="出力ディレクトリ (default: ./output)"
     )
     parser.add_argument(
-        "-f", "--format",
+        "-f",
+        "--format",
         default="short",
         choices=["short", "tiktok", "long"],
-        help="動画形式: short(35秒), tiktok(60-90秒), long(5分) (default: short)"
+        help="動画形式: short(35秒), tiktok(60-90秒), long(5分) (default: short)",
     )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="詳細なログを出力"
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="詳細なログを出力")
 
     args = parser.parse_args()
 
     # Setup logger
     setup_logger("news_video_generator", verbose=args.verbose)
 
-    # Load config
-    config = Config.from_env()
-    config.output_dir = Path(args.output)
-
-    # Validate config
-    errors = config.validate()
-    if errors:
+    # Load config.
+    # pydantic-settings が必須項目の欠落や不正な値をここで検出する。
+    # 使う直前に落ちるより、起動時に落ちた方が原因が分かりやすい。
+    try:
+        config = Config.from_env()
+    except ValidationError as e:
         print("❌ 設定エラー:")
-        for error in errors:
-            print(f"   {error}")
+        for error in e.errors():
+            field = ".".join(str(loc) for loc in error["loc"]) or "(不明)"
+            print(f"   {field.upper()}: {error['msg']}")
         print("")
-        print("💡 ヒント: .envファイルにAPIキーを設定してください")
+        print("💡 ヒント: .envファイルに必要な値を設定してください")
         print("   .env.exampleを参考にしてください")
         return 1
+
+    config.output_dir = Path(args.output)
 
     # Run pipeline
     pipeline = Pipeline(config)
     try:
-        format_names = {"short": "ショート(35秒)", "tiktok": "TikTok(60-90秒)", "long": "ロング(5分)"}
-        print(f"🚀 動画生成を開始します")
+        format_names = {
+            "short": "ショート(35秒)",
+            "tiktok": "TikTok(60-90秒)",
+            "long": "ロング(5分)",
+        }
+        print("🚀 動画生成を開始します")
         print(f"   トピック: {args.topic}")
         print(f"   言語: {', '.join(args.languages)}")
         print(f"   形式: {format_names.get(args.format, args.format)}")

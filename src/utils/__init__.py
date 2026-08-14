@@ -1,4 +1,4 @@
 # Utils Package
-from .logger import setup_logger, log_step, log_success, log_error, log_warning
+from .logger import log_error, log_step, log_success, log_warning, setup_logger
 
-__all__ = ["setup_logger", "log_step", "log_success", "log_error", "log_warning"]
+__all__ = ["log_error", "log_step", "log_success", "log_warning", "setup_logger"]

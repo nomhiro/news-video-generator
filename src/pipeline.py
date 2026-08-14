@@ -2,18 +2,20 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from src.models.news import NewsArticle
+    pass
 
 from config import Config
-from src.models.script import Script
-from src.generators.script_generator import ScriptGenerator
-from src.generators.voice_generator import VoiceGenerator
 from src.generators.image_generator import ImageGenerator
+from src.generators.script_generator import ScriptGenerator
 from src.generators.video_composer import VideoComposer
-from src.utils.logger import log_step, log_success, log_error
+from src.generators.voice_generator import VoiceGenerator
+from src.models.formats import get_spec
+from src.models.script import Script
+from src.storage.artifacts import ArtifactStore, build_artifact_store
+from src.utils.logger import log_error, log_step, log_success
 
 
 class PipelineError(Exception):
@@ -33,25 +35,42 @@ class Pipeline:
         video_composer: 動画合成器
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, artifact_store: ArtifactStore | None = None):
         """Pipelineを初期化する。
 
         Args:
             config: アプリケーション設定
+            artifact_store: 生成物の保存先。省略時は設定から組み立てる
+                （テストではフェイクを渡す）
         """
         self.config = config
+        # 生成は必ず output_dir（ローカル）で行う。ffmpeg は外部プロセスで
+        # パスしか受け取れないため。保存先だけが差し替え可能。
+        self.artifact_store = artifact_store or build_artifact_store(
+            config.artifact_store,
+            local_root=config.output_dir,
+            account_url=config.azure_storage_account_url,
+            container_name=config.azure_storage_container,
+        )
+        api_key = config.azure_openai_api_key.get_secret_value()
         self.script_generator = ScriptGenerator(
             config.azure_openai_endpoint,
-            config.azure_openai_api_key,
+            api_key,
             config.azure_openai_deployment,
         )
         self.voice_generator = VoiceGenerator(
+            api_key=config.azure_speech_api_key.get_secret_value(),
+            region=config.azure_speech_region,
             voice_name_ja=config.voice_name_ja,
             voice_name_en=config.voice_name_en,
-            credentials_path=config.google_credentials_path,
         )
+        # 画像生成は台本生成と別リソースのことがある（別リージョンの
+        # 専用 Foundry プロジェクト）。config が使い分けを解決する。
         self.image_generator = ImageGenerator(
-            api_key=config.gemini_api_key,
+            endpoint=config.image_endpoint,
+            api_key=config.image_api_key.get_secret_value(),
+            deployment=config.azure_openai_image_deployment,
+            max_concurrency=config.image_max_concurrency,
         )
         self.video_composer = VideoComposer()
 
@@ -66,10 +85,11 @@ class Pipeline:
             str: サニタイズされたファイル名
         """
         import re
+
         # ファイル名に使えない文字を置換
-        sanitized = re.sub(r'[\\/*?:"<>|]', '', name)
+        sanitized = re.sub(r'[\\/*?:"<>|]', "", name)
         # 連続する空白を1つに
-        sanitized = re.sub(r'\s+', ' ', sanitized)
+        sanitized = re.sub(r"\s+", " ", sanitized)
         # 前後の空白を削除
         sanitized = sanitized.strip()
         # 長さを制限
@@ -80,10 +100,57 @@ class Pipeline:
             sanitized = "video"
         return sanitized
 
+    def _artifact_key(self, path: Path) -> str:
+        """ローカルパスを保存先のキーに変換する。
+
+        キーは `output_dir` からの相対パスを posix 形式にしたもの
+        （`videos/20260814_005245_ja.mp4`）。Windows の `\\` をそのまま
+        使うと Blob 名として別物になるため posix に寄せる。
+
+        Args:
+            path: 生成したファイルのパス
+
+        Returns:
+            str: 保存先のキー
+        """
+        return path.resolve().relative_to(self.config.output_dir.resolve()).as_posix()
+
+    def _publish_artifacts(self, paths: list[Path]) -> list[str]:
+        """生成物を保存先へ送る。
+
+        1件の失敗で生成全体を失敗させない。動画は既にローカルに存在して
+        おり、アップロードだけが失敗した状態は「あとで再送すればよい」。
+        ここで例外を投げると、成功した動画も含めて生成が失敗扱いになる。
+
+        Args:
+            paths: 生成したファイル
+
+        Returns:
+            list[str]: 保存に成功したキー
+        """
+        published: list[str] = []
+        failed: list[str] = []
+        for path in paths:
+            key = self._artifact_key(path)
+            try:
+                self.artifact_store.publish(path, key)
+                published.append(key)
+            # 保存の失敗で生成物を失わせない（ローカルには残る）
+            except Exception as e:
+                log_error(f"生成物の保存に失敗しました（{key}）: {e}")
+                failed.append(key)
+
+        if failed:
+            log_error(f"{len(failed)}件の生成物を保存できませんでした（ローカルには残っています）")
+        return published
+
     def run(
-        self, news_topic: str, languages: List[str] = None, output_name: str = None,
-        video_format: str = "short"
-    ) -> Dict[str, Any]:
+        self,
+        news_topic: str,
+        languages: list[str] | None = None,
+        output_name: str | None = None,
+        video_format: str = "short",
+    ) -> dict[str, Any]:
         """パイプライン全体を実行する。
 
         Args:
@@ -101,9 +168,9 @@ class Pipeline:
         if languages is None:
             languages = ["ja", "en"]
 
-        # 話速を動画形式に応じて設定
-        speaking_rates = {"long": 1.1, "tiktok": 1.15, "short": 1.25}
-        speaking_rate = speaking_rates.get(video_format, 1.25)
+        # 形式ごとのパラメータは formats.py が単一の情報源
+        spec = get_spec(video_format)
+        speaking_rate = spec.speaking_rate
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -119,17 +186,15 @@ class Pipeline:
         try:
             # 1. Generate scripts for each language
             log_step("台本を生成中...", "📝")
-            scripts: Dict[str, Script] = {}
-            script_paths: Dict[str, Path] = {}
+            scripts: dict[str, Script] = {}
+            script_paths: dict[str, Path] = {}
 
             for lang in languages:
                 script = self.script_generator.generate(news_topic, lang, video_format)
                 scripts[lang] = script
 
                 # Save script to file
-                script_path = (
-                    self.config.output_dir / "scripts" / f"{base_name}_{lang}.json"
-                )
+                script_path = self.config.output_dir / "scripts" / f"{base_name}_{lang}.json"
                 script.to_json_file(script_path)
                 script_paths[lang] = script_path
 
@@ -138,32 +203,33 @@ class Pipeline:
             first_lang = languages[0]
             image_dir = self.config.output_dir / "images" / base_name
             image_paths = self.image_generator.generate_batch(
-                scripts[first_lang].image_prompts, image_dir, language=first_lang,
-                video_format=video_format
+                scripts[first_lang].image_prompts,
+                image_dir,
+                language=first_lang,
+                video_format=video_format,
             )
 
             # 3. Generate voices for each language (with timing if available)
             log_step("音声を生成中...", "🎙️")
-            audio_paths: Dict[str, Path] = {}
-            segment_timings: Dict[str, List[float]] = {}
+            audio_paths: dict[str, Path] = {}
+            segment_timings: dict[str, list[float]] = {}
 
             for lang in languages:
-                audio_path = (
-                    self.config.output_dir / "audio" / f"{base_name}_{lang}.mp3"
-                )
+                audio_path = self.config.output_dir / "audio" / f"{base_name}_{lang}.mp3"
 
                 # segment_narrationsがある場合はタイミング付き生成
                 if scripts[lang].segment_narrations:
                     _, timings = self.voice_generator.generate_with_timings(
-                        scripts[lang].segment_narrations, lang, audio_path,
-                        speaking_rate=speaking_rate
+                        scripts[lang].segment_narrations,
+                        lang,
+                        audio_path,
+                        speaking_rate=speaking_rate,
                     )
                     segment_timings[lang] = timings
                 else:
                     # フォールバック: 従来の生成方式
                     self.voice_generator.generate(
-                        scripts[lang].full_narration, lang, audio_path,
-                        speaking_rate=speaking_rate
+                        scripts[lang].full_narration, lang, audio_path, speaking_rate=speaking_rate
                     )
                     segment_timings[lang] = []
 
@@ -171,12 +237,10 @@ class Pipeline:
 
             # 4. Compose videos for each language (with timing if available)
             log_step("動画を合成中...", "🎬")
-            video_paths: Dict[str, Path] = {}
+            video_paths: dict[str, Path] = {}
 
             for lang in languages:
-                video_path = (
-                    self.config.output_dir / "videos" / f"{base_name}_{lang}.mp4"
-                )
+                video_path = self.config.output_dir / "videos" / f"{base_name}_{lang}.mp4"
                 self.video_composer.compose(
                     audio_paths[lang],
                     image_paths,
@@ -188,6 +252,19 @@ class Pipeline:
                 )
                 video_paths[lang] = video_path
 
+            # 5. 生成物を保存先へ送る
+            #
+            # ローカル保存なら生成した場所がそのまま保存先なので何も起きない。
+            # Blob 保存なら実際のアップロードが走る。
+            artifact_keys = self._publish_artifacts(
+                [
+                    *script_paths.values(),
+                    *image_paths,
+                    *audio_paths.values(),
+                    *video_paths.values(),
+                ]
+            )
+
             log_success("パイプライン完了!")
 
             return {
@@ -197,15 +274,27 @@ class Pipeline:
                 "images": [str(p) for p in image_paths],
                 "audio": {lang: str(path) for lang, path in audio_paths.items()},
                 "videos": {lang: str(path) for lang, path in video_paths.items()},
+                # 保存先の中でのキー。ローカルパスと違い、Blob でもそのまま通じる
+                "artifact_keys": {
+                    "scripts": {
+                        lang: self._artifact_key(path) for lang, path in script_paths.items()
+                    },
+                    "images": [self._artifact_key(p) for p in image_paths],
+                    "audio": {lang: self._artifact_key(path) for lang, path in audio_paths.items()},
+                    "videos": {
+                        lang: self._artifact_key(path) for lang, path in video_paths.items()
+                    },
+                },
+                "published": artifact_keys,
             }
 
         except Exception as e:
             log_error(f"パイプラインエラー: {e}")
-            raise PipelineError(f"パイプライン実行に失敗しました: {e}")
+            raise PipelineError(f"パイプライン実行に失敗しました: {e}") from e
 
     def run_from_article(
-        self, article: Any, languages: List[str] = None, video_format: str = "short"
-    ) -> Dict[str, Any]:
+        self, article: Any, languages: list[str] | None = None, video_format: str = "short"
+    ) -> dict[str, Any]:
         """ニュース記事から動画を生成する。
 
         Args:

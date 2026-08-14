@@ -1,19 +1,20 @@
 """News article data models."""
 
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
-from enum import Enum
-from typing import Optional, Dict, Any
 import hashlib
 import json
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 
-class NewsCategory(str, Enum):
+class NewsCategory(StrEnum):
     """ニュースカテゴリの列挙型。
 
     Google News RSSのトピックに対応するカテゴリを定義。
     """
+
     AI = "ai"
     POLITICS = "politics"
     TECHNOLOGY = "technology"
@@ -59,6 +60,7 @@ class NewsArticle:
         is_selected: ユーザーが動画生成用に選択したか
         video_generated: 動画が生成済みか
     """
+
     id: str
     title: str
     url: str
@@ -66,8 +68,8 @@ class NewsArticle:
     category: NewsCategory
     summary: str = ""
     content: str = ""
-    thumbnail_url: Optional[str] = None
-    published_at: Optional[datetime] = None
+    thumbnail_url: str | None = None
+    published_at: datetime | None = None
     fetched_at: datetime = field(default_factory=datetime.now)
     is_selected: bool = False
     video_generated: bool = False
@@ -84,7 +86,7 @@ class NewsArticle:
         """
         return hashlib.md5(url.encode()).hexdigest()[:16]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """辞書に変換する。
 
         Returns:
@@ -98,7 +100,7 @@ class NewsArticle:
         return data
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "NewsArticle":
+    def from_dict(cls, data: dict[str, Any]) -> "NewsArticle":
         """辞書から復元する。
 
         Args:
@@ -135,6 +137,6 @@ class NewsArticle:
         Returns:
             NewsArticle: 読み込まれた記事オブジェクト
         """
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return cls.from_dict(data)

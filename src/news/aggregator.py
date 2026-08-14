@@ -1,14 +1,17 @@
 """News aggregation orchestrator with JSON storage."""
 
 import json
+import tempfile
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from src.models.news import NewsArticle, NewsCategory
 from src.news.sources.google_news import GoogleNewsSource
 from src.news.sources.scraper import ArticleScraper
-from src.utils.logger import log_step, log_success, log_error
+from src.utils.logger import log_error, log_step, log_success
 
 
 class NewsAggregator:
@@ -32,8 +35,43 @@ class NewsAggregator:
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
+        # カテゴリごとの read-modify-write を直列化する。
+        #
+        # 動画生成は Starlette の threadpool（イベントループ外のスレッド）で
+        # 走り、その中で mark_as_generated がファイルを書き換える。一方
+        # イベントループ側は同時に toggle_selection などを処理しうる。
+        # 排他しないと、読み込んでから書き戻すまでの間に他方の更新が挟まり、
+        # その更新が失われる（選択状態や生成済みフラグが消える）。
+        #
+        # ロックはカテゴリ単位。全カテゴリで1つにすると、
+        # 9カテゴリの並行取得が直列化してしまう。
+        #
+        # RLock（再入可能）である理由: `_load_category` / `_save_category` が
+        # それぞれロックを取る一方、read-modify-write の区間は外側で
+        # 同じロックを取る。通常の Lock だと入れ子で自分自身を待って
+        # デッドロックする。
+        self._locks: dict[NewsCategory, threading.RLock] = {
+            category: threading.RLock() for category in NewsCategory
+        }
+
         self.google_news = GoogleNewsSource()
         self.scraper = ArticleScraper()
+
+    @contextmanager
+    def _category_lock(self, category: NewsCategory) -> Iterator[None]:
+        """カテゴリのファイルを排他する。
+
+        read-modify-write の**全体**をこれで囲む必要がある。
+        読みだけ、書きだけを個別に守っても失われた更新は防げない。
+
+        Args:
+            category: ニュースカテゴリ
+
+        Yields:
+            None
+        """
+        with self._locks[category]:
+            yield
 
     def _get_category_file(self, category: NewsCategory) -> Path:
         """カテゴリのJSONファイルパスを取得する。
@@ -46,7 +84,7 @@ class NewsAggregator:
         """
         return self.data_dir / f"{category.value}.json"
 
-    def _load_category(self, category: NewsCategory) -> List[NewsArticle]:
+    def _load_category(self, category: NewsCategory) -> list[NewsArticle]:
         """カテゴリのニュースをJSONから読み込む。
 
         Args:
@@ -57,22 +95,29 @@ class NewsAggregator:
         """
         file_path = self._get_category_file(category)
 
-        if not file_path.exists():
-            return []
+        # 読み取りもロックで守る。
+        #
+        # 保存は一時ファイルを os.replace で差し替えるが、Windows では
+        # 置換の瞬間に開こうとした読み手が PermissionError を受ける
+        # （実測で発生した）。ロックを取れば置換と読み取りが重ならない。
+        with self._category_lock(category):
+            if not file_path.exists():
+                return []
 
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            try:
+                with open(file_path, encoding="utf-8") as f:
+                    data = json.load(f)
 
-            return [NewsArticle.from_dict(item) for item in data]
+                return [NewsArticle.from_dict(item) for item in data]
 
-        except (json.JSONDecodeError, KeyError) as e:
-            log_error(f"Error loading {file_path}: {e}")
-            return []
+            except (json.JSONDecodeError, KeyError, OSError) as e:
+                # OSError も捕まえる。ロックで守ってはいるが、
+                # 別プロセス（エディタなど）がファイルを掴んでいる場合に
+                # 記事一覧の表示ごと 500 にはしたくない。
+                log_error(f"ニュースデータの読み込みに失敗 {file_path}: {e}")
+                return []
 
-    def _save_category(
-        self, category: NewsCategory, articles: List[NewsArticle]
-    ) -> None:
+    def _save_category(self, category: NewsCategory, articles: list[NewsArticle]) -> None:
         """カテゴリのニュースをJSONに保存する。
 
         Args:
@@ -80,15 +125,26 @@ class NewsAggregator:
             articles: 保存する記事のリスト
         """
         file_path = self._get_category_file(category)
-
         data = [article.to_dict() for article in articles]
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        with self._category_lock(category):
+            # 一時ファイルへ書いてから置換する。
+            # 直接上書きすると、書き込み中にプロセスが落ちた場合に
+            # 壊れた JSON が残り、次回の読み込みで全記事を失う。
+            # Path.replace（os.replace）は同一ディレクトリ内なら原子的。
+            fd, temp_name = tempfile.mkstemp(dir=file_path.parent, suffix=".tmp")
+            temp_path = Path(temp_name)
+            try:
+                with open(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                temp_path.replace(file_path)
+            except BaseException:
+                temp_path.unlink(missing_ok=True)
+                raise
 
     async def fetch_and_store(
         self, limit_per_category: int = 10
-    ) -> Dict[NewsCategory, List[NewsArticle]]:
+    ) -> dict[NewsCategory, list[NewsArticle]]:
         """ニュースを取得してJSONに保存する。
 
         既存の記事は選択状態を保持しながらマージします。
@@ -104,26 +160,16 @@ class NewsAggregator:
         # Fetch from Google News
         fetched = await self.google_news.fetch_all_categories(limit_per_category)
 
-        result: Dict[NewsCategory, List[NewsArticle]] = {}
+        result: dict[NewsCategory, list[NewsArticle]] = {}
 
         for category, new_articles in fetched.items():
-            # Load existing articles to preserve selection state
-            existing = self._load_category(category)
-            existing_by_id = {a.id: a for a in existing}
-
-            # Merge: preserve selection state from existing
-            merged = []
-            for article in new_articles:
-                if article.id in existing_by_id:
-                    old = existing_by_id[article.id]
-                    article.is_selected = old.is_selected
-                    article.video_generated = old.video_generated
-                    article.content = old.content or article.content
-                    article.thumbnail_url = old.thumbnail_url or article.thumbnail_url
-                merged.append(article)
-
-            # Save to JSON
-            self._save_category(category, merged)
+            # 読み込み→マージ→保存の全体をロックで囲む。
+            # ここも read-modify-write なので、途中で選択状態が
+            # 変更されると既存状態の引き継ぎに失敗する。
+            with self._category_lock(category):
+                existing_by_id = {a.id: a for a in self._load_category(category)}
+                merged = self._merge_preserving_state(new_articles, existing_by_id)
+                self._save_category(category, merged)
             result[category] = merged
 
         total = sum(len(articles) for articles in result.values())
@@ -132,8 +178,8 @@ class NewsAggregator:
         return result
 
     async def fetch_ai_news_and_store(
-        self, search_queries: List[str], limit_per_query: int = 5
-    ) -> List[NewsArticle]:
+        self, search_queries: list[str], limit_per_query: int = 5
+    ) -> list[NewsArticle]:
         """AI関連ニュースを取得してJSONに保存する。
 
         Args:
@@ -146,37 +192,46 @@ class NewsAggregator:
         log_step("AI関連ニュースを取得・保存中...", "🤖")
 
         # AIニュースを取得
-        new_articles = await self.google_news.fetch_ai_news(
-            search_queries, limit_per_query
-        )
+        new_articles = await self.google_news.fetch_ai_news(search_queries, limit_per_query)
 
-        # AIカテゴリ用のJSON保存
         category = NewsCategory.AI
+        with self._category_lock(category):
+            existing_by_id = {a.id: a for a in self._load_category(category)}
+            merged = self._merge_preserving_state(new_articles, existing_by_id)
+            self._save_category(category, merged)
 
-        # 既存の記事を読み込んで状態を保持
-        existing = self._load_category(category)
-        existing_by_id = {a.id: a for a in existing}
+        log_success(f"保存完了: {len(merged)}件のAI関連記事")
 
-        # マージ: 既存の選択状態を保持
+        return merged
+
+    @staticmethod
+    def _merge_preserving_state(
+        new_articles: list[NewsArticle], existing_by_id: dict[str, NewsArticle]
+    ) -> list[NewsArticle]:
+        """取得した記事に、既存の状態を引き継ぐ。
+
+        同じ記事を再取得したときに、ユーザーの選択や生成済みフラグ、
+        すでにスクレイピングした本文を失わないようにする。
+
+        Args:
+            new_articles: 新しく取得した記事
+            existing_by_id: 既存の記事（ID をキーにした辞書）
+
+        Returns:
+            list[NewsArticle]: 状態を引き継いだ記事のリスト
+        """
         merged = []
         for article in new_articles:
-            if article.id in existing_by_id:
-                old = existing_by_id[article.id]
+            old = existing_by_id.get(article.id)
+            if old is not None:
                 article.is_selected = old.is_selected
                 article.video_generated = old.video_generated
                 article.content = old.content or article.content
                 article.thumbnail_url = old.thumbnail_url or article.thumbnail_url
             merged.append(article)
-
-        # JSONに保存
-        self._save_category(category, merged)
-        log_success(f"保存完了: {len(merged)}件のAI関連記事")
-
         return merged
 
-    def get_articles_by_category(
-        self, category: NewsCategory
-    ) -> List[NewsArticle]:
+    def get_articles_by_category(self, category: NewsCategory) -> list[NewsArticle]:
         """カテゴリの記事を取得する。
 
         Args:
@@ -188,30 +243,23 @@ class NewsAggregator:
         articles = self._load_category(category)
 
         # Sort by published_at descending
-        return sorted(
-            articles,
-            key=lambda a: a.published_at or datetime.min,
-            reverse=True
-        )
+        return sorted(articles, key=lambda a: a.published_at or datetime.min, reverse=True)
 
-    def get_all_articles(self) -> Dict[NewsCategory, List[NewsArticle]]:
+    def get_all_articles(self) -> dict[NewsCategory, list[NewsArticle]]:
         """全カテゴリの記事を取得する。
 
         Returns:
             Dict[NewsCategory, List[NewsArticle]]: カテゴリ別の記事
         """
-        return {
-            category: self.get_articles_by_category(category)
-            for category in NewsCategory
-        }
+        return {category: self.get_articles_by_category(category) for category in NewsCategory}
 
-    def get_selected_articles(self) -> List[NewsArticle]:
+    def get_selected_articles(self) -> list[NewsArticle]:
         """選択された記事を取得する。
 
         Returns:
             List[NewsArticle]: 選択済み記事のリスト
         """
-        selected = []
+        selected: list[NewsArticle] = []
 
         for category in NewsCategory:
             articles = self._load_category(category)
@@ -219,7 +267,53 @@ class NewsAggregator:
 
         return selected
 
-    def toggle_selection(self, article_id: str) -> Optional[bool]:
+    def _update_article(
+        self, article_id: str, mutate: Callable[[NewsArticle], None]
+    ) -> NewsArticle | None:
+        """記事を1件見つけて更新し、保存する。
+
+        「全カテゴリを走査して記事を探し、書き換えて保存する」という
+        同じ手順が3箇所にあったので、ここに集約した。
+        重要なのは、読み込みから保存までをカテゴリのロックで囲むこと。
+        囲まないと、他方の更新が間に挟まって失われる。
+
+        Args:
+            article_id: 記事ID
+            mutate: 見つけた記事を書き換える関数
+
+        Returns:
+            NewsArticle | None: 更新後の記事。見つからなければ None
+        """
+        for category in NewsCategory:
+            with self._category_lock(category):
+                articles = self._load_category(category)
+                for article in articles:
+                    if article.id == article_id:
+                        mutate(article)
+                        self._save_category(category, articles)
+                        return article
+        return None
+
+    def _replace_article(self, replacement: NewsArticle) -> bool:
+        """同じIDの記事を差し替えて保存する。
+
+        Args:
+            replacement: 差し替える記事
+
+        Returns:
+            bool: 見つかって差し替えたら True
+        """
+        for category in NewsCategory:
+            with self._category_lock(category):
+                articles = self._load_category(category)
+                for i, existing in enumerate(articles):
+                    if existing.id == replacement.id:
+                        articles[i] = replacement
+                        self._save_category(category, articles)
+                        return True
+        return False
+
+    def toggle_selection(self, article_id: str) -> bool | None:
         """記事の選択状態を切り替える。
 
         Args:
@@ -228,16 +322,12 @@ class NewsAggregator:
         Returns:
             Optional[bool]: 新しい選択状態、記事が見つからない場合はNone
         """
-        for category in NewsCategory:
-            articles = self._load_category(category)
 
-            for article in articles:
-                if article.id == article_id:
-                    article.is_selected = not article.is_selected
-                    self._save_category(category, articles)
-                    return article.is_selected
+        def flip(article: NewsArticle) -> None:
+            article.is_selected = not article.is_selected
 
-        return None
+        updated = self._update_article(article_id, flip)
+        return None if updated is None else updated.is_selected
 
     def clear_selection(self, article_id: str) -> bool:
         """記事の選択を解除する。
@@ -248,19 +338,18 @@ class NewsAggregator:
         Returns:
             bool: 成功したかどうか
         """
-        for category in NewsCategory:
-            articles = self._load_category(category)
 
-            for article in articles:
-                if article.id == article_id:
-                    article.is_selected = False
-                    self._save_category(category, articles)
-                    return True
+        def deselect(article: NewsArticle) -> None:
+            article.is_selected = False
 
-        return False
+        return self._update_article(article_id, deselect) is not None
 
     def mark_as_generated(self, article_id: str) -> bool:
         """記事を動画生成済みとしてマークする。
+
+        動画生成は threadpool のスレッドから呼ぶため、
+        イベントループ側の toggle_selection と同時に走りうる。
+        `_update_article` がロックで直列化する。
 
         Args:
             article_id: 記事ID
@@ -268,48 +357,51 @@ class NewsAggregator:
         Returns:
             bool: 成功したかどうか
         """
-        for category in NewsCategory:
-            articles = self._load_category(category)
 
-            for article in articles:
-                if article.id == article_id:
-                    article.video_generated = True
-                    article.is_selected = False
-                    self._save_category(category, articles)
-                    return True
+        def mark(article: NewsArticle) -> None:
+            article.video_generated = True
+            article.is_selected = False
 
-        return False
+        return self._update_article(article_id, mark) is not None
 
-    async def scrape_selected_content(self) -> List[NewsArticle]:
+    async def scrape_selected_content(self) -> list[NewsArticle]:
         """選択記事の本文をスクレイピングする。
 
         Returns:
             List[NewsArticle]: スクレイピング済みの記事リスト
         """
-        selected = self.get_selected_articles()
+        return await self.scrape_articles(self.get_selected_articles())
 
-        if not selected:
+    async def scrape_articles(self, articles: list[NewsArticle]) -> list[NewsArticle]:
+        """指定した記事の本文をスクレイピングし、結果を保存する。
+
+        選択状態と切り離してある理由: 定期実行は利用者の選択を触らずに
+        記事を選ぶ。`is_selected` を書き換えると、画面で選んでいた記事が
+        勝手に増減してしまう。
+
+        Args:
+            articles: 対象の記事
+
+        Returns:
+            list[NewsArticle]: スクレイピング済みの記事（本文が取れなかった
+            ものも含む。呼び出し側が判断する）
+        """
+        if not articles:
             return []
 
-        log_step(f"選択記事{len(selected)}件をスクレイピング中...", "🔍")
+        log_step(f"記事{len(articles)}件をスクレイピング中...", "🔍")
 
-        # Scrape content
-        scraped = await self.scraper.scrape_batch(selected)
+        scraped = await self.scraper.scrape_batch(articles)
 
-        # Update JSON with scraped content
+        # 取れた本文を書き戻す。ジョブは article_id しか持たないので、
+        # ここで保存しておかないと実行時に本文を読めない。
         for article in scraped:
             if article.content:
-                for category in NewsCategory:
-                    articles = self._load_category(category)
-                    for i, a in enumerate(articles):
-                        if a.id == article.id:
-                            articles[i] = article
-                            self._save_category(category, articles)
-                            break
+                self._replace_article(article)
 
         return scraped
 
-    def get_article_by_id(self, article_id: str) -> Optional[NewsArticle]:
+    def get_article_by_id(self, article_id: str) -> NewsArticle | None:
         """IDで記事を取得する。
 
         Args:

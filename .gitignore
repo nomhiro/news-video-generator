@@ -65,3 +65,38 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Type checking / linting caches
+.mypy_cache/
+.ruff_cache/
+
+# Claude Code
+# settings.json（共有設定）は追跡する。以下は個人・セッション固有のもの。
+.claude/settings.local.json
+.claude/plans/
+
+# Runtime data
+# data/news/*.json は取得したニュースと、その選択状態・生成済みフラグを
+# 書き換える実行時のデータストア。追跡するとアプリを動かすたびに差分が出る。
+# ディレクトリ構造だけ .gitkeep で保持する。
+data/news/*
+!data/news/.gitkeep
+
+# ジョブ表の SQLite。実行時の状態そのもので、環境ごとに中身が違う。
+# -wal / -shm は WAL モードの副産物（journal_mode=WAL にしている）。
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# MCP server artifacts
+.playwright-mcp/
+.serena/
+*.png
+!static/**/*.png
+
+# Node (CSS のビルドにのみ使う)
+# 生成物 static/css/app.css は追跡する。アプリの実行に Node は不要。
+node_modules/
+
+# azd (環境ごとの設定と払い出し結果。キーを含むため追跡しない)
+.azure/

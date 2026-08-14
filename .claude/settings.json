@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv run mypy:*)",
+      "Bash(uv run python -m compileall:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv lock:*)",
+      "Bash(uv tree:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git ls-files:*)",
+      "Bash(ffprobe:*)",
+      "Bash(az cognitiveservices account deployment list:*)",
+      "Bash(az cognitiveservices model list:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./client_secrets.json)",
+      "Read(./youtube_token.json)",
+      "Read(./tiktok_token.json)",
+      "Read(./neat-tube-*.json)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python .claude/hooks/format_python.py",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

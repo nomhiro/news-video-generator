@@ -1,199 +1,488 @@
-"""Configuration management for News Video Generator."""
+"""アプリケーション設定。
 
-from dataclasses import dataclass, field
+pydantic-settings で環境変数を読み、型と必須項目を検証する。
+以前は `os.getenv` を手書きし、`validate()` がエラー文字列のリストを
+返す独自方式だった。差し替えた理由:
+
+- 必須項目の欠落や型の誤りを、使う直前ではなく起動時に検出できる
+- APIキーを `SecretStr` にすると、ログや例外・`repr()` に平文が出ない。
+  設定オブジェクトはエラー時に丸ごと出力されることがあるため実害がある
+- 検証ロジックを自分で書かなくて済む
+
+環境変数名はフラットなまま維持している。`env_nested_delimiter` で
+グループ化すると `AZURE_OPENAI__API_KEY` のような改名が必要になり、
+既存の `.env` が動かなくなるため。
+"""
+
+from datetime import time as dt_time
 from pathlib import Path
-from typing import List, Optional
-import os
-from dotenv import load_dotenv
+from typing import Annotated, Literal, Self
+
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# リスト型の設定は `NoDecode` を付ける。
+#
+# pydantic-settings は list 型のフィールドを「複雑な型」として扱い、
+# 環境変数の値を **field_validator より前に json.loads する**。
+# そのため `AI_SEARCH_QUERIES=生成AI,ChatGPT` のような素直な書き方は
+# `SettingsError: error parsing value for field ...` で落ちる。
+#
+# 厄介なのは、`.env` 経由（DotEnvSettingsSource）では通り、
+# **実際の環境変数のときだけ落ちる**こと。ローカルは .env で動くので
+# 気付かず、Container Apps に env として渡した時点で起動しなくなった
+# （一度踏んだ）。NoDecode を付けると JSON 解釈を飛ばし、
+# 下の mode="before" バリデータが分割を担当する。
+CommaSeparated = Annotated[list[str], NoDecode]
+
+# AI関連ニュースの既定の検索クエリ。
+# 環境変数 AI_SEARCH_QUERIES で上書きできる。
+DEFAULT_AI_SEARCH_QUERIES: tuple[str, ...] = (
+    "生成AI",
+    "ChatGPT",
+    "Claude AI",
+    "Claude Code",
+    "Gemini AI",
+    "GitHub Copilot",
+    "大規模言語モデル LLM",
+    "OpenAI",
+    "Anthropic",
+    "Stable Diffusion",
+    "Midjourney",
+    "画像生成AI",
+)
 
 
-@dataclass
-class Config:
+class Config(BaseSettings):
     """アプリケーション設定。
 
-    Attributes:
-        azure_openai_endpoint: Azure OpenAI endpoint URL
-        azure_openai_api_key: Azure OpenAI API key
-        azure_openai_deployment: Azure OpenAI deployment name (model)
-        google_credentials_path: Google Cloud認証情報JSONファイルのパス (optional)
-        google_cloud_project: Google Cloud project ID (for TTS)
-        google_cloud_location: Google Cloud region (default: us-central1)
-        gemini_api_key: Gemini API key (for Image Generation - Gemini 3 Pro Image)
-        voice_name_ja: Japanese voice name for Google Cloud TTS
-        voice_name_en: English voice name for Google Cloud TTS
-        output_dir: Output directory path
-        news_data_dir: News data storage directory
-        web_host: Web server host
-        web_port: Web server port
-        news_fetch_limit: Max articles per category
+    環境変数（および `.env`）から読み込む。フィールド名の大文字が
+    そのまま環境変数名になる（`azure_openai_endpoint` ←
+    `AZURE_OPENAI_ENDPOINT`）。
+
+    必須項目が欠けていると `ValidationError` を投げる。
+    使う直前に None を踏むより、起動時に落ちた方が原因が分かりやすい。
     """
 
-    # Azure OpenAI Settings
-    azure_openai_endpoint: str
-    azure_openai_api_key: str
-    azure_openai_deployment: str
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        # .env には他のツール向けの変数が混ざることがあるため、
+        # 知らないキーはエラーにしない
+        extra="ignore",
+    )
 
-    # Google Cloud TTS Settings
-    google_credentials_path: Optional[str] = None  # Uses ADC if not set
+    # --- Azure OpenAI（台本生成と画像生成で共用） ---
+    azure_openai_endpoint: str = Field(description="Azure OpenAI のエンドポイント URL")
+    azure_openai_api_key: SecretStr = Field(description="Azure OpenAI の API キー")
+    azure_openai_deployment: str = Field(description="台本生成モデルのデプロイ名（例: gpt-5.1）")
+    # 既定値を置かない。デプロイ名はモデル名と一致しないことが多く
+    # （以前は モデル gpt-image-2 のデプロイ名が "gpt-image-2-1" だった）、
+    # 推測した既定値は unknown_model という分かりにくい 400 を招く。
+    azure_openai_image_deployment: str = Field(
+        description="画像生成モデルのデプロイ名（例: gpt-image-2）"
+    )
 
-    # Google Cloud Project Settings (for TTS)
-    google_cloud_project: str = ""
-    google_cloud_location: str = "us-central1"
+    # --- Azure OpenAI（画像生成のリソースが台本生成と別の場合） ---
+    #
+    # 画像生成は専用の Foundry プロジェクト（infra/ の azd で払い出す）に
+    # 置いており、台本生成とは別リージョン・別リソースになる。
+    # 理由: gpt-image-2 のクォータはサブスクリプション単位・リージョン単位で
+    # 上限 4 で、台本生成のある eastus2 は既存デプロイで使い切っていた。
+    #
+    # 未設定なら台本生成と同じエンドポイント・キーを使う。
+    # 単一リソースに両方のデプロイを置く構成も引き続き有効なので、
+    # その場合に設定を増やさなくて済むようにしている。
+    azure_openai_image_endpoint: str | None = Field(
+        default=None,
+        description="画像生成リソースのエンドポイント。未指定なら台本生成と同じものを使う",
+    )
+    azure_openai_image_api_key: SecretStr | None = Field(
+        default=None,
+        description="画像生成リソースの API キー。未指定なら台本生成と同じものを使う",
+    )
 
-    # Gemini API Settings (for Image Generation - Gemini 3 Pro Image)
-    gemini_api_key: str = ""
+    # 画像生成の同時リクエスト数。
+    # gpt-image-2 の既定クォータは 5 images/min 程度なので小さく保つ。
+    image_max_concurrency: int = Field(default=3, ge=1, le=20)
 
-    # Voice Settings (Google Cloud TTS Chirp 3 HD)
-    voice_name_ja: str = "ja-JP-Chirp3-HD-Zephyr"
-    voice_name_en: str = "en-US-Chirp3-HD-Zephyr"
+    # --- Azure AI Speech（音声合成） ---
+    #
+    # Google Cloud TTS から移行した。Chirp 3 HD が SSML の <mark> を
+    # サポートせず、セグメント境界のタイミングを取得できなかったのが理由。
+    # 詳細は src/generators/voice_generator.py の docstring を参照。
+    #
+    # 副産物として Google Cloud のサービスアカウント JSON が不要になり、
+    # コンテナ実行時にシークレットをマウントする必要も消えた。
+    azure_speech_api_key: SecretStr = Field(description="Azure AI Speech の API キー")
+    azure_speech_region: str = Field(
+        default="japaneast",
+        description="Azure AI Speech のリージョン（例: japaneast）",
+    )
 
-    # Output Settings
-    output_dir: Path = field(default_factory=lambda: Path("./output"))
+    # 標準の Neural ボイスを使う。Dragon HD 系（*:MAI-Voice-*）は
+    # <prosody> 非対応で、形式別の話速を指定できない。
+    azure_speech_voice_ja: str = Field(default="ja-JP-NanamiNeural")
+    azure_speech_voice_en: str = Field(default="en-US-AvaNeural")
 
-    # News Aggregation Settings
-    news_data_dir: Path = field(default_factory=lambda: Path("./data/news"))
-    news_fetch_limit: int = 10  # Articles per category
+    # --- 出力 ---
+    #
+    # output_dir は「生成の作業場所」。ffmpeg は subprocess で動く外部
+    # プロセスなので、生成そのものは必ずローカルのファイルシステムで行う。
+    output_dir: Path = Field(default=Path("./output"))
 
-    # AI News Settings
-    ai_search_queries: List[str] = field(default_factory=lambda: [
-        "生成AI",
-        "ChatGPT",
-        "Claude AI",
-        "Claude Code",
-        "Gemini AI",
-        "GitHub Copilot",
-        "大規模言語モデル LLM",
-        "OpenAI",
-        "Anthropic",
-        "Stable Diffusion",
-        "Midjourney",
-        "画像生成AI",
-    ])
-    ai_news_limit_per_query: int = 5  # Articles per search query
+    # 生成物の保存先。local はローカルのファイルシステム、
+    # blob は Azure Blob Storage。
+    #
+    # コンテナで動かすときに local だと、再起動で生成物が消え、
+    # レプリカ間でも共有されない（YouTube に上げる前に成果物を失う）。
+    artifact_store: Literal["local", "blob"] = Field(default="local")
 
-    # Web Server Settings
-    web_host: str = "127.0.0.1"
-    web_port: int = 8000
+    # Blob の認証はアカウントキーではなく Entra ID（DefaultAzureCredential）。
+    # ローカルは az login、Container Apps はマネージド ID を使う。
+    # ストレージアカウント側で共有キー認証を無効にしてあるので、
+    # キーを使う経路はそもそも存在しない。
+    azure_storage_account_url: str | None = Field(
+        default=None,
+        description="https://<account>.blob.core.windows.net。ARTIFACT_STORE=blob のとき必須",
+    )
+    azure_storage_container: str = Field(
+        default="artifacts",
+        description="生成物を入れる Blob コンテナ名",
+    )
 
-    # YouTube Upload Settings
-    youtube_client_secrets_file: str = "client_secrets.json"
-    youtube_token_file: str = "youtube_token.json"
-    youtube_default_privacy: str = "public"  # "public", "private", or "unlisted"
+    # --- データベース（ジョブ表） ---
+    #
+    # 進捗をプロセスメモリではなく行として持つための DB。
+    # SQLite のファイルは1台のファイルシステム上にしかないので、
+    # レプリカを2つ以上にするなら共有できる DB（PostgreSQL）に
+    # 差し替える。SQLAlchemy を挟んでいるのはそのため。
+    database_url: str = Field(
+        default="sqlite:///./data/newsvideo.db",
+        description="SQLAlchemy の接続 URL",
+    )
 
-    # TikTok Upload Settings
-    tiktok_client_key: str = ""
-    tiktok_client_secret: str = ""
-    tiktok_token_file: str = "tiktok_token.json"
-    tiktok_redirect_uri: str = "http://127.0.0.1:8090/callback"
-    tiktok_default_privacy: str = "SELF_ONLY"  # "PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"
+    # SQLite の journal mode。
+    #
+    # 既定は WAL。書き込み中でも読めるので、ワーカーが書いている最中に
+    # /status が読む構成に合っている。
+    #
+    # ただし **Azure Files（SMB）の上では WAL が使えない**。WAL は
+    # 共有メモリ（-shm の mmap）を要求し、SMB はそれを提供しないため
+    # "disk I/O error" や "database is locked" になる。
+    # クラウドでファイル共有にマウントするときは DELETE にする
+    # （同時読み書きは弱くなるが、レプリカ1・ワーカー1なので実害は小さい）。
+    sqlite_journal_mode: Literal["WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY"] = Field(
+        default="WAL",
+        description="SQLite の journal_mode。Azure Files 上では DELETE",
+    )
 
+    # --- ニュース取得 ---
+    news_data_dir: Path = Field(default=Path("./data/news"))
+    news_fetch_limit: int = Field(default=10, ge=1)
+    ai_search_queries: CommaSeparated = Field(default=list(DEFAULT_AI_SEARCH_QUERIES))
+    ai_news_limit_per_query: int = Field(default=5, ge=1)
+
+    # --- 定期実行 ---
+    #
+    # 既定は無効。ローカルで開発しているだけのときに、勝手にニュースを
+    # 取得して動画を作り始めると課金が発生する。
+    # クラウド側は infra/ の Bicep が有効にする。
+    schedule_enabled: bool = Field(default=False)
+
+    # 実行時刻（SCHEDULE_TIMEZONE のローカル時刻、HH:MM）。
+    # 朝に回すと、出社前に前日夜〜当日朝のニュースで作れる。
+    schedule_time: str = Field(default="06:30")
+    schedule_timezone: str = Field(default="Asia/Tokyo")
+
+    # 作る形式。既定はショートのみ（長尺は当面作らない。CLAUDE.md 参照）。
+    schedule_formats: CommaSeparated = Field(default=["short"])
+
+    # 形式ごとに何件の記事を対象にするか。
+    # 画像生成のクォータが律速なので、増やす前にクォータを上げる。
+    schedule_articles_per_format: int = Field(default=1, ge=1, le=10)
+
+    # --- Web サーバー ---
+    web_host: str = Field(default="127.0.0.1")
+    web_port: int = Field(default=8000, ge=1, le=65535)
+
+    # --- OAuth トークンの保存先 ---
+    #
+    # local はローカルのファイル（従来どおり）、blob は Azure Blob Storage。
+    #
+    # コンテナで local だと、再起動でトークンが消えて毎回ブラウザ認証が
+    # 必要になる。YouTube の OAuth は localhost にリダイレクトする方式
+    # （InstalledAppFlow）なので、コンテナの中では実質的に完了できない。
+    # blob にすれば、認証はローカルで1回行い、コンテナは読むだけで済む。
+    token_store: Literal["local", "blob"] = Field(default="local")
+
+    # トークン用の Blob コンテナ。生成物とは分けている
+    # （トークンは長期の資格情報で、生成物より扱いが重い）。
+    azure_token_container: str = Field(default="tokens")
+
+    # --- YouTube アップロード（任意） ---
+    youtube_client_secrets_file: str = Field(default="client_secrets.json")
+    youtube_token_file: str = Field(default="youtube_token.json")
+    youtube_default_privacy: str = Field(default="public")
+
+    # --- TikTok アップロード（任意） ---
+    tiktok_client_key: SecretStr = Field(default=SecretStr(""))
+    tiktok_client_secret: SecretStr = Field(default=SecretStr(""))
+    tiktok_token_file: str = Field(default="tiktok_token.json")
+    tiktok_redirect_uri: str = Field(default="http://127.0.0.1:8090/callback")
+    tiktok_default_privacy: str = Field(default="SELF_ONLY")
+
+    @field_validator("ai_search_queries", mode="before")
     @classmethod
-    def _parse_ai_search_queries(cls, env_value: str) -> List[str]:
-        """環境変数からAI検索クエリをパースする。
+    def _parse_ai_search_queries(cls, value: object) -> object:
+        """カンマ区切りの文字列をリストに変換する。
+
+        pydantic は list 型の環境変数を JSON として解釈しようとするため、
+        `AI_SEARCH_QUERIES=生成AI,ChatGPT` のような素直な書き方を
+        受け付けるにはここで変換する必要がある。
 
         Args:
-            env_value: カンマ区切りのクエリ文字列
+            value: 環境変数の生の値、またはすでにリスト
 
         Returns:
-            List[str]: クエリのリスト（空の場合はデフォルト値）
+            リスト（空文字列なら既定値）
         """
-        if not env_value:
-            return [
-                "生成AI",
-                "ChatGPT",
-                "Claude AI",
-                "Claude Code",
-                "Gemini AI",
-                "GitHub Copilot",
-                "大規模言語モデル LLM",
-                "OpenAI",
-                "Anthropic",
-                "Stable Diffusion",
-                "Midjourney",
-                "画像生成AI",
-            ]
-        return [q.strip() for q in env_value.split(",") if q.strip()]
+        if isinstance(value, str):
+            queries = [q.strip() for q in value.split(",") if q.strip()]
+            return queries or list(DEFAULT_AI_SEARCH_QUERIES)
+        return value
+
+    @field_validator("schedule_formats", mode="before")
+    @classmethod
+    def _parse_schedule_formats(cls, value: object) -> object:
+        """カンマ区切りの文字列をリストに変換する。
+
+        `SCHEDULE_FORMATS=short,long` と書けるようにする
+        （pydantic は list を JSON として解釈しようとする）。
+        """
+        if isinstance(value, str):
+            formats = [f.strip() for f in value.split(",") if f.strip()]
+            return formats or ["short"]
+        return value
+
+    @field_validator("schedule_formats")
+    @classmethod
+    def _check_schedule_formats(cls, value: list[str]) -> list[str]:
+        """未知の形式を起動時に弾く。
+
+        定期実行の中で初めて弾かれると、気付くのが翌朝になる。
+        """
+        from src.models.formats import VideoFormat
+
+        allowed = {f.value for f in VideoFormat}
+        unknown = [f for f in value if f not in allowed]
+        if unknown:
+            raise ValueError(
+                f"SCHEDULE_FORMATS に未知の形式があります: {unknown}（{sorted(allowed)}）"
+            )
+        return value
+
+    @field_validator("schedule_time")
+    @classmethod
+    def _check_schedule_time(cls, value: str) -> str:
+        """HH:MM として解釈できること。
+
+        解釈できない値だと、スケジューラの起動時に落ちる。
+        設定を読む時点で弾いた方が原因が分かりやすい。
+        """
+        from datetime import time as _time
+
+        try:
+            hour, minute = (int(part) for part in value.split(":", 1))
+            _time(hour=hour, minute=minute)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"SCHEDULE_TIME は HH:MM の形式で指定してください: {value!r}") from e
+        return value
+
+    @field_validator("schedule_timezone")
+    @classmethod
+    def _check_schedule_timezone(cls, value: str) -> str:
+        """実在するタイムゾーン名であること。"""
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            raise ValueError(f"SCHEDULE_TIMEZONE が不正です: {value!r}") from e
+        return value
+
+    @field_validator("youtube_default_privacy")
+    @classmethod
+    def _check_youtube_privacy(cls, value: str) -> str:
+        """YouTube の公開設定が API の受け付ける値であること。
+
+        不正な値はアップロード時に初めて弾かれ、そこまでの生成が
+        無駄になるため起動時に検証する。
+        """
+        allowed = {"public", "private", "unlisted"}
+        if value not in allowed:
+            raise ValueError(f"YOUTUBE_DEFAULT_PRIVACY は {sorted(allowed)} のいずれか: {value!r}")
+        return value
+
+    @field_validator("tiktok_default_privacy")
+    @classmethod
+    def _check_tiktok_privacy(cls, value: str) -> str:
+        """TikTok の公開設定が API の受け付ける値であること。"""
+        from src.uploaders.tiktok_uploader import PRIVACY_LEVELS
+
+        if value not in PRIVACY_LEVELS:
+            raise ValueError(
+                f"TIKTOK_DEFAULT_PRIVACY は {sorted(PRIVACY_LEVELS)} のいずれか: {value!r}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _check_blob_store_is_configured(self) -> Self:
+        """保存先が blob なのにアカウント URL が無い構成を弾く。
+
+        起動時に落とす。生成が終わった段階で初めて失敗すると、
+        画像6枚と音声・動画を作りきったあとに保存先が無いと分かることになり、
+        時間とクォータを最も無駄にする。
+        """
+        needs_blob = [
+            name
+            for name, value in (
+                ("ARTIFACT_STORE", self.artifact_store),
+                ("TOKEN_STORE", self.token_store),
+            )
+            if value == "blob"
+        ]
+        if needs_blob and not self.azure_storage_account_url:
+            raise ValueError(
+                f"{' / '.join(needs_blob)}=blob には AZURE_STORAGE_ACCOUNT_URL が必要です"
+                "（例: https://stnewsvideo.blob.core.windows.net）"
+            )
+        return self
+
+    @field_validator(
+        "azure_openai_endpoint", "azure_openai_image_endpoint", "azure_storage_account_url"
+    )
+    @classmethod
+    def _check_endpoint_looks_like_a_url(cls, value: str | None) -> str | None:
+        """エンドポイントが URL の形をしていること。
+
+        リソース名だけを入れる間違いが起きやすく、その場合の
+        エラーメッセージが分かりにくい。
+        """
+        if value is None or value == "":
+            # 画像生成用は任意。空文字は未指定として扱う
+            return None
+        if not value.startswith(("http://", "https://")):
+            raise ValueError(f"エンドポイントは http(s):// で始まる URL: {value!r}")
+        return value.rstrip("/")
+
+    # --- 呼び出し側の名前に合わせるプロパティ ---
+    # フィールド名は環境変数名に合わせている（google_tts_voice_ja）。
+    # 既存コードは意味に沿った名前（voice_name_ja）で参照しているので、
+    # ここで受ける。
+
+    @property
+    def image_endpoint(self) -> str:
+        """画像生成に使うエンドポイント。
+
+        専用リソースが設定されていればそれを、なければ台本生成と
+        同じものを返す。
+
+        Returns:
+            str: エンドポイント URL
+        """
+        return self.azure_openai_image_endpoint or self.azure_openai_endpoint
+
+    @property
+    def image_api_key(self) -> SecretStr:
+        """画像生成に使う API キー。
+
+        専用リソースが設定されていればそれを、なければ台本生成と
+        同じものを返す。
+
+        Returns:
+            SecretStr: API キー
+        """
+        return self.azure_openai_image_api_key or self.azure_openai_api_key
+
+    @property
+    def uses_dedicated_image_resource(self) -> bool:
+        """画像生成が台本生成と別リソースかどうか。
+
+        ログに出して、どちらの構成で動いているか分かるようにする。
+
+        Returns:
+            bool: 別リソースなら True
+        """
+        return self.azure_openai_image_endpoint is not None
+
+    @property
+    def schedule_run_at(self) -> "dt_time":
+        """定期実行の時刻を `datetime.time` で返す。
+
+        Returns:
+            dt_time: 実行時刻（検証済みなので必ず解釈できる）
+        """
+        from datetime import time as _time
+
+        hour, minute = (int(part) for part in self.schedule_time.split(":", 1))
+        return _time(hour=hour, minute=minute)
+
+    @property
+    def token_paths(self) -> dict[str, Path]:
+        """トークン保存先の 名前 -> ローカルパス。
+
+        `TOKEN_STORE=local` のときに使う。名前は
+        `src/storage/tokens.py` の定数と揃える必要がある
+        （blob 保存でも同じ名前が Blob 名になるので、
+        ローカルと blob を行き来しても同じ値を指す）。
+
+        Returns:
+            dict[str, Path]: 保存先の対応
+        """
+        return {
+            "youtube_token": Path(self.youtube_token_file),
+            "youtube_client_secrets": Path(self.youtube_client_secrets_file),
+            "tiktok_token": Path(self.tiktok_token_file),
+        }
+
+    @property
+    def voice_name_ja(self) -> str:
+        """日本語ナレーションのボイス名。"""
+        return self.azure_speech_voice_ja
+
+    @property
+    def voice_name_en(self) -> str:
+        """英語ナレーションのボイス名。"""
+        return self.azure_speech_voice_en
 
     @classmethod
     def from_env(cls) -> "Config":
         """環境変数から設定を読み込む。
 
         Returns:
-            Config: 設定オブジェクト
+            Config: 検証済みの設定
+
+        Raises:
+            pydantic.ValidationError: 必須項目の欠落や不正な値
         """
-        load_dotenv()
-
-        return cls(
-            azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
-            azure_openai_api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
-            azure_openai_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
-            google_credentials_path=os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
-            google_cloud_project=os.getenv("GOOGLE_CLOUD_PROJECT", ""),
-            google_cloud_location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
-            gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
-            voice_name_ja=os.getenv(
-                "GOOGLE_TTS_VOICE_JA", "ja-JP-Chirp3-HD-Zephyr"
-            ),
-            voice_name_en=os.getenv(
-                "GOOGLE_TTS_VOICE_EN", "en-US-Chirp3-HD-Zephyr"
-            ),
-            news_data_dir=Path(os.getenv("NEWS_DATA_DIR", "./data/news")),
-            news_fetch_limit=int(os.getenv("NEWS_FETCH_LIMIT", "10")),
-            ai_search_queries=cls._parse_ai_search_queries(os.getenv("AI_SEARCH_QUERIES", "")),
-            ai_news_limit_per_query=int(os.getenv("AI_NEWS_LIMIT_PER_QUERY", "5")),
-            web_host=os.getenv("WEB_HOST", "127.0.0.1"),
-            web_port=int(os.getenv("WEB_PORT", "8000")),
-            youtube_client_secrets_file=os.getenv(
-                "YOUTUBE_CLIENT_SECRETS_FILE", "client_secrets.json"
-            ),
-            youtube_token_file=os.getenv(
-                "YOUTUBE_TOKEN_FILE", "youtube_token.json"
-            ),
-            youtube_default_privacy=os.getenv(
-                "YOUTUBE_DEFAULT_PRIVACY", "public"
-            ),
-            # TikTok settings
-            tiktok_client_key=os.getenv("TIKTOK_CLIENT_KEY", ""),
-            tiktok_client_secret=os.getenv("TIKTOK_CLIENT_SECRET", ""),
-            tiktok_token_file=os.getenv("TIKTOK_TOKEN_FILE", "tiktok_token.json"),
-            tiktok_redirect_uri=os.getenv(
-                "TIKTOK_REDIRECT_URI", "http://127.0.0.1:8090/callback"
-            ),
-            tiktok_default_privacy=os.getenv("TIKTOK_DEFAULT_PRIVACY", "SELF_ONLY"),
-        )
-
-    def validate(self) -> List[str]:
-        """設定の検証。エラーメッセージのリストを返す。
-
-        Returns:
-            List[str]: エラーメッセージのリスト（空なら検証成功）
-        """
-        errors = []
-        if not self.azure_openai_endpoint:
-            errors.append("AZURE_OPENAI_ENDPOINT が設定されていません")
-        if not self.azure_openai_api_key:
-            errors.append("AZURE_OPENAI_API_KEY が設定されていません")
-        if not self.azure_openai_deployment:
-            errors.append("AZURE_OPENAI_DEPLOYMENT が設定されていません")
-        # Note: google_credentials_path is optional (uses ADC if not set)
-        if not self.google_cloud_project:
-            errors.append("GOOGLE_CLOUD_PROJECT が設定されていません")
-        if not self.gemini_api_key:
-            errors.append("GEMINI_API_KEY が設定されていません")
-        return errors
+        return cls()  # type: ignore[call-arg]  # pydantic-settings が env から埋める
 
     def is_tiktok_configured(self) -> bool:
-        """TikTok APIキーが設定されているかチェック。
+        """TikTok の資格情報が揃っているか。
 
         Returns:
-            bool: TikTokのclient_keyとclient_secretが設定されている場合True
+            bool: client_key と client_secret の両方が設定されていれば True
         """
-        return bool(self.tiktok_client_key and self.tiktok_client_secret)
+        return bool(
+            self.tiktok_client_key.get_secret_value()
+            and self.tiktok_client_secret.get_secret_value()
+        )
 
     def ensure_output_dirs(self) -> None:
         """出力ディレクトリを作成する。"""
-        subdirs = ["audio", "images", "videos", "scripts"]
-        for subdir in subdirs:
+        for subdir in ("audio", "images", "videos", "scripts"):
             (self.output_dir / subdir).mkdir(parents=True, exist_ok=True)
 
     def ensure_news_dirs(self) -> None:

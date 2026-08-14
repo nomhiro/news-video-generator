@@ -1,15 +1,14 @@
 """Google News RSS feed parser."""
 
 import asyncio
-from datetime import datetime
-from typing import List, Dict, Optional
 from email.utils import parsedate_to_datetime
+from typing import ClassVar
 
-import httpx
 import feedparser
+import httpx
 
 from src.models.news import NewsArticle, NewsCategory
-from src.utils.logger import log_step, log_error
+from src.utils.logger import log_error, log_step
 
 
 class GoogleNewsSource:
@@ -24,7 +23,7 @@ class GoogleNewsSource:
     # カテゴリをGoogle Newsのトピック名にマッピング
     # headlines/section/topic/ 形式を使用（リダイレクトで正しいトピックIDに解決される）
     # AI カテゴリは検索クエリを使用するため空文字列
-    CATEGORY_TOPICS: Dict[NewsCategory, str] = {
+    CATEGORY_TOPICS: ClassVar[dict[NewsCategory, str]] = {
         NewsCategory.AI: "",  # 検索クエリで取得
         NewsCategory.GENERAL: "",  # トップニュース
         NewsCategory.POLITICS: "POLITICS",
@@ -44,9 +43,7 @@ class GoogleNewsSource:
         """
         self.timeout = timeout
 
-    async def fetch_category(
-        self, category: NewsCategory, limit: int = 10
-    ) -> List[NewsArticle]:
+    async def fetch_category(self, category: NewsCategory, limit: int = 10) -> list[NewsArticle]:
         """指定カテゴリのニュース記事を取得する。
 
         Args:
@@ -88,7 +85,7 @@ class GoogleNewsSource:
 
     async def fetch_by_search(
         self, query: str, category: NewsCategory, limit: int = 10
-    ) -> List[NewsArticle]:
+    ) -> list[NewsArticle]:
         """検索クエリでニュース記事を取得する。
 
         Args:
@@ -100,6 +97,7 @@ class GoogleNewsSource:
             List[NewsArticle]: 取得した記事のリスト
         """
         from urllib.parse import quote
+
         encoded_query = quote(query)
         url = f"{self.BASE_URL}/search?q={encoded_query}&hl=ja&gl=JP&ceid=JP:ja"
 
@@ -126,8 +124,8 @@ class GoogleNewsSource:
             return []
 
     async def fetch_ai_news(
-        self, search_queries: List[str], limit_per_query: int = 5
-    ) -> List[NewsArticle]:
+        self, search_queries: list[str], limit_per_query: int = 5
+    ) -> list[NewsArticle]:
         """AI関連ニュースを複数の検索クエリから取得する。
 
         Args:
@@ -142,10 +140,7 @@ class GoogleNewsSource:
         # AIカテゴリを使用
         category = NewsCategory.AI
 
-        tasks = [
-            self.fetch_by_search(query, category, limit_per_query)
-            for query in search_queries
-        ]
+        tasks = [self.fetch_by_search(query, category, limit_per_query) for query in search_queries]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -154,7 +149,10 @@ class GoogleNewsSource:
         all_articles = []
 
         for result in results:
-            if isinstance(result, Exception):
+            # asyncio.gather(return_exceptions=True) は BaseException も返す。
+            # Exception だけを見ると CancelledError などが素通りして、
+            # 例外オブジェクトを反復しようとして TypeError になる。
+            if isinstance(result, BaseException):
                 log_error(f"Search failed: {result}")
                 continue
             for article in result:
@@ -167,7 +165,7 @@ class GoogleNewsSource:
 
     async def fetch_all_categories(
         self, limit_per_category: int = 10
-    ) -> Dict[NewsCategory, List[NewsArticle]]:
+    ) -> dict[NewsCategory, list[NewsArticle]]:
         """全カテゴリからニュースを並行取得する。
 
         Args:
@@ -181,17 +179,17 @@ class GoogleNewsSource:
         # AIカテゴリは検索クエリで取得するため除外
         categories_to_fetch = [cat for cat in NewsCategory if cat != NewsCategory.AI]
 
-        tasks = [
-            self.fetch_category(cat, limit_per_category)
-            for cat in categories_to_fetch
-        ]
+        tasks = [self.fetch_category(cat, limit_per_category) for cat in categories_to_fetch]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        articles_by_category: Dict[NewsCategory, List[NewsArticle]] = {}
+        articles_by_category: dict[NewsCategory, list[NewsArticle]] = {}
 
-        for category, result in zip(categories_to_fetch, results):
-            if isinstance(result, Exception):
+        # strict=True: asyncio.gather は tasks と同数の結果を返すはずなので、
+        # ずれたらカテゴリを黙って取りこぼすのではなく失敗させる
+        for category, result in zip(categories_to_fetch, results, strict=True):
+            # BaseException で判定する理由は fetch_ai_news と同じ
+            if isinstance(result, BaseException):
                 log_error(f"Failed to fetch {category.value}: {result}")
                 articles_by_category[category] = []
             else:
@@ -202,9 +200,7 @@ class GoogleNewsSource:
 
         return articles_by_category
 
-    def _parse_entry(
-        self, entry: Dict, category: NewsCategory
-    ) -> Optional[NewsArticle]:
+    def _parse_entry(self, entry: dict, category: NewsCategory) -> NewsArticle | None:
         """RSSエントリをNewsArticleに変換する。
 
         Args:
@@ -230,9 +226,12 @@ class GoogleNewsSource:
 
             # 公開日時をパース
             published_at = None
-            if "published" in entry:
+            # feedparser の entry は属性アクセスもできるが、型上は dict なので
+            # get() で取り出す（キーが無い場合は None のまま）
+            published_raw = entry.get("published")
+            if published_raw:
                 try:
-                    published_at = parsedate_to_datetime(entry.published)
+                    published_at = parsedate_to_datetime(published_raw)
                 except (TypeError, ValueError):
                     pass
 
@@ -241,6 +240,7 @@ class GoogleNewsSource:
             # HTMLタグを簡易的に除去
             if summary:
                 import re
+
                 summary = re.sub(r"<[^>]+>", "", summary)
 
             return NewsArticle(

@@ -1,160 +1,250 @@
 """FastAPI dependency injection setup."""
 
-from dataclasses import dataclass, field
-from typing import List, Optional
-from fastapi import FastAPI
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+
+from fastapi import Depends, FastAPI, Request
 
 from config import Config
+from src.jobs.planner import plan_daily_batch
+from src.jobs.runner import PipelineJobRunner
+from src.jobs.scheduler import DailyScheduler
+from src.jobs.worker import JobWorker
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
-from src.uploaders.youtube_uploader import YouTubeUploader
+from src.storage.artifacts import ArtifactStore, build_artifact_store
+from src.storage.db import create_db_engine, create_session_factory
+from src.storage.jobs import JobRepository
+from src.storage.schema import upgrade_to_head
+from src.storage.tokens import build_token_store
 from src.uploaders.tiktok_uploader import TikTokUploader
+from src.uploaders.youtube_uploader import YouTubeUploader
 
 
 @dataclass
-class GenerationState:
-    """動画生成の状態を管理するクラス。"""
-    is_running: bool = False
-    total_count: int = 0
-    completed_count: int = 0
-    current_article: Optional[str] = None
-    error_message: Optional[str] = None
-    completed_articles: List[str] = field(default_factory=list)
-    failed_articles: List[str] = field(default_factory=list)
+class AppContext:
+    """アプリの寿命に紐づく依存の集まり。
 
-    def start(self, total: int) -> None:
-        """生成を開始する。"""
-        self.is_running = True
-        self.total_count = total
-        self.completed_count = 0
-        self.current_article = None
-        self.error_message = None
-        self.completed_articles = []
-        self.failed_articles = []
+    以前はモジュールレベルの可変グローバルに入れていた。差し替えた理由:
 
-    def update(self, article_title: str) -> None:
-        """現在処理中の記事を更新する。"""
-        self.current_article = article_title
+    - テストで差し替えられなかった。`monkeypatch.setattr` でモジュール属性を
+      書き換える必要があり、FastAPI が用意している
+      `app.dependency_overrides` が使えなかった
+    - 起動前は全てが None という状態を型で表現するしかなく、
+      getter ごとに未初期化チェックが必要だった
+    - 複数のアプリインスタンスを同時に持てなかった（テストで実際に困る）
 
-    def complete_one(self, article_title: str, success: bool = True) -> None:
-        """1件の処理を完了する。"""
-        self.completed_count += 1
-        if success:
-            self.completed_articles.append(article_title)
-        else:
-            self.failed_articles.append(article_title)
+    今は `lifespan` で組み立てて `app.state` に置く。寿命がアプリと
+    一致し、テストは `dependency_overrides` で差し替えられる。
 
-    def finish(self, error: Optional[str] = None) -> None:
-        """生成を終了する。"""
-        self.is_running = False
-        self.current_article = None
-        self.error_message = error
+    Attributes:
+        config: アプリケーション設定
+        aggregator: ニュース取得・管理
+        pipeline: 動画生成パイプライン
+        artifact_store: 生成物の保存先（ローカル or Blob Storage）
+        jobs: ジョブ表（進捗の永続化）
+        worker: ジョブを実行するワーカー
+        scheduler: 定期実行（無効なら None）
+        youtube_uploader: YouTube アップローダ
+        tiktok_uploader: TikTok アップローダ
+    """
 
-    def get_status(self) -> str:
-        """現在のステータスを取得する。"""
-        if self.is_running:
-            return "running"
-        elif self.error_message:
-            return "error"
-        elif self.completed_count > 0:
-            return "success"
-        return "idle"
+    config: Config
+    aggregator: NewsAggregator
+    pipeline: Pipeline
+    artifact_store: ArtifactStore
+    jobs: JobRepository
+    worker: JobWorker
+    scheduler: DailyScheduler | None
+    youtube_uploader: YouTubeUploader
+    tiktok_uploader: TikTokUploader
+
+    @classmethod
+    def build(cls, config: Config) -> "AppContext":
+        """設定から依存を組み立てる。
+
+        Args:
+            config: アプリケーション設定
+
+        Returns:
+            AppContext: 組み立て済みの依存
+        """
+        config.ensure_news_dirs()
+        config.ensure_output_dirs()
+
+        # 保存先はパイプラインと Web で同じインスタンスを共有する。
+        # Blob の場合、クライアントは接続とトークンを内部でキャッシュするため
+        # 使い回した方が速い。
+        artifact_store = build_artifact_store(
+            config.artifact_store,
+            local_root=config.output_dir,
+            account_url=config.azure_storage_account_url,
+            container_name=config.azure_storage_container,
+        )
+
+        # OAuth トークンの保存先。ローカルはファイル、コンテナでは Blob。
+        # コンテナのファイルシステムは再起動で消えるため、ローカル固定だと
+        # 毎回ブラウザ認証が必要になり、そもそも完了できない。
+        token_store = build_token_store(
+            config.token_store,
+            local_paths=config.token_paths,
+            account_url=config.azure_storage_account_url,
+            container_name=config.azure_token_container,
+        )
+
+        # スキーマを先に当てる。テーブルが無い状態でワーカーが
+        # ポーリングを始めると、意味の分かりにくいエラーが出続ける。
+        upgrade_to_head(config.database_url, config.sqlite_journal_mode)
+        jobs = JobRepository(
+            create_session_factory(
+                create_db_engine(config.database_url, config.sqlite_journal_mode)
+            )
+        )
+
+        aggregator = NewsAggregator(config.news_data_dir)
+        pipeline = Pipeline(config, artifact_store=artifact_store)
+
+        return cls(
+            config=config,
+            aggregator=aggregator,
+            pipeline=pipeline,
+            artifact_store=artifact_store,
+            jobs=jobs,
+            worker=JobWorker(jobs, PipelineJobRunner(pipeline, aggregator)),
+            scheduler=_build_scheduler(config, aggregator, jobs),
+            youtube_uploader=YouTubeUploader(token_store=token_store),
+            tiktok_uploader=TikTokUploader(
+                client_key=config.tiktok_client_key.get_secret_value(),
+                client_secret=config.tiktok_client_secret.get_secret_value(),
+                token_store=token_store,
+                redirect_uri=config.tiktok_redirect_uri,
+            ),
+        )
 
 
-# Global instances (set by setup_dependencies)
-_config: Config = None
-_aggregator: NewsAggregator = None
-_pipeline: Pipeline = None
-_generation_state: GenerationState = GenerationState()
-_youtube_uploader: YouTubeUploader = None
-_tiktok_uploader: TikTokUploader = None
+def _build_scheduler(
+    config: Config, aggregator: NewsAggregator, jobs: JobRepository
+) -> DailyScheduler | None:
+    """定期実行を組み立てる（無効なら None）。
+
+    既定で無効にしている理由: ローカルで開発しているだけのときに、
+    毎朝ニュースを取得して動画を作り始めると課金が発生する。
+
+    Args:
+        config: アプリケーション設定
+        aggregator: ニュースストア
+        jobs: ジョブ表
+
+    Returns:
+        DailyScheduler | None: 有効なら組み立てたスケジューラ
+    """
+    if not config.schedule_enabled:
+        return None
+
+    async def task() -> object:
+        return await plan_daily_batch(
+            aggregator,
+            jobs,
+            formats=config.schedule_formats,
+            search_queries=config.ai_search_queries,
+            ai_limit_per_query=config.ai_news_limit_per_query,
+            articles_per_format=config.schedule_articles_per_format,
+        )
+
+    return DailyScheduler(
+        task,
+        run_at=config.schedule_run_at,
+        timezone=config.schedule_timezone,
+    )
 
 
-def setup_dependencies(app: FastAPI, config: Config) -> None:
-    """依存関係を設定する。
+def get_context(request: Request) -> AppContext:
+    """リクエストからアプリの依存を取り出す。
+
+    Args:
+        request: FastAPI リクエスト
+
+    Returns:
+        AppContext: lifespan が組み立てた依存
+
+    Raises:
+        RuntimeError: lifespan を通らずにアプリが動いている場合
+    """
+    context: AppContext | None = getattr(request.app.state, "context", None)
+    if context is None:
+        # TestClient を `with` 無しで使うと lifespan が走らない
+        raise RuntimeError(
+            "AppContext が未初期化です。lifespan が実行されていません"
+            "（TestClient は `with TestClient(app) as client:` で使う）"
+        )
+    return context
+
+
+# 個別の依存を取り出す関数。
+# ルート側は `Depends(get_aggregator)` のように書けるので、
+# 何に依存しているかがシグネチャから読める。
+
+
+def get_config(context: AppContext = Depends(get_context)) -> Config:
+    """設定を取得する。"""
+    return context.config
+
+
+def get_aggregator(context: AppContext = Depends(get_context)) -> NewsAggregator:
+    """NewsAggregatorを取得する。"""
+    return context.aggregator
+
+
+def get_pipeline(context: AppContext = Depends(get_context)) -> Pipeline:
+    """Pipelineを取得する。"""
+    return context.pipeline
+
+
+def get_artifact_store(context: AppContext = Depends(get_context)) -> ArtifactStore:
+    """生成物の保存先を取得する。"""
+    return context.artifact_store
+
+
+def get_jobs(context: AppContext = Depends(get_context)) -> JobRepository:
+    """ジョブ表を取得する。"""
+    return context.jobs
+
+
+def get_youtube_uploader(context: AppContext = Depends(get_context)) -> YouTubeUploader:
+    """YouTubeUploaderを取得する。"""
+    return context.youtube_uploader
+
+
+def get_tiktok_uploader(context: AppContext = Depends(get_context)) -> TikTokUploader:
+    """TikTokUploaderを取得する。"""
+    return context.tiktok_uploader
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """アプリの起動時に依存を組み立て、終了時に片付ける。
 
     Args:
         app: FastAPIアプリケーション
-        config: アプリケーション設定
+
+    Yields:
+        None
     """
-    global _config, _aggregator, _pipeline, _youtube_uploader, _tiktok_uploader
-
-    _config = config
-
-    # Ensure directories exist
-    config.ensure_news_dirs()
-    config.ensure_output_dirs()
-
-    # Initialize aggregator
-    _aggregator = NewsAggregator(config.news_data_dir)
-
-    # Initialize pipeline
-    _pipeline = Pipeline(config)
-
-    # Initialize YouTube uploader
-    _youtube_uploader = YouTubeUploader(
-        client_secrets_file=config.youtube_client_secrets_file,
-        token_file=config.youtube_token_file,
-    )
-
-    # Initialize TikTok uploader
-    _tiktok_uploader = TikTokUploader(
-        client_key=config.tiktok_client_key,
-        client_secret=config.tiktok_client_secret,
-        token_file=config.tiktok_token_file,
-        redirect_uri=config.tiktok_redirect_uri,
-    )
-
-
-def get_config() -> Config:
-    """設定を取得する。
-
-    Returns:
-        Config: アプリケーション設定
-    """
-    return _config
-
-
-def get_aggregator() -> NewsAggregator:
-    """NewsAggregatorを取得する。
-
-    Returns:
-        NewsAggregator: ニュース取得・管理インスタンス
-    """
-    return _aggregator
-
-
-def get_pipeline() -> Pipeline:
-    """Pipelineを取得する。
-
-    Returns:
-        Pipeline: 動画生成パイプラインインスタンス
-    """
-    return _pipeline
-
-
-def get_generation_state() -> GenerationState:
-    """GenerationStateを取得する。
-
-    Returns:
-        GenerationState: 動画生成状態インスタンス
-    """
-    return _generation_state
-
-
-def get_youtube_uploader() -> YouTubeUploader:
-    """YouTubeUploaderを取得する。
-
-    Returns:
-        YouTubeUploader: YouTubeアップローダーインスタンス
-    """
-    return _youtube_uploader
-
-
-def get_tiktok_uploader() -> TikTokUploader:
-    """TikTokUploaderを取得する。
-
-    Returns:
-        TikTokUploader: TikTokアップローダーインスタンス
-    """
-    return _tiktok_uploader
+    context = AppContext.build(Config.from_env())
+    app.state.context = context
+    # ワーカーはアプリの寿命に紐づく。リクエストごとの
+    # BackgroundTask ではなく、ここで1つ起動して使い回す。
+    context.worker.start()
+    if context.scheduler is not None:
+        context.scheduler.start()
+    try:
+        yield
+    finally:
+        if context.scheduler is not None:
+            context.scheduler.stop()
+        # 停止を待つ。待たずに落とすと、実行中のジョブが RUNNING のまま
+        # 残る（リースが切れれば回収されるが、無駄に15分待つことになる）。
+        context.worker.stop()
+        context.aggregator.close()
+        app.state.context = None

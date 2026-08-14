@@ -1,14 +1,23 @@
-"""Script generation using Azure OpenAI Responses API."""
+"""Script generation using Azure OpenAI Responses API with Structured Outputs."""
 
-import json
-import re
-import time
-from typing import Optional
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
+from pydantic import ValidationError
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
-from openai import OpenAI
-
-from src.models.script import Script
-from src.utils.logger import log_step, log_success, log_error
+from src.models.formats import FormatSpec, get_spec
+from src.models.script import Script, ScriptDraft
+from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
 class ScriptGenerationError(Exception):
@@ -18,15 +27,25 @@ class ScriptGenerationError(Exception):
 
 
 class ScriptGenerator:
-    """Azure OpenAI Responses APIを使用して台本を生成するクラス。
+    """Azure OpenAI Responses API (Structured Outputs) で台本を生成するクラス。
+
+    `Script` Pydantic モデルをそのまま出力スキーマとして渡すため、
+    モデルの出力は常にスキーマに適合する。JSON の抽出やパースは行わない。
 
     Attributes:
         client: OpenAI APIクライアント
         model: 使用するモデル（デプロイメント名）
     """
 
-    MAX_RETRIES = 3
-    BASE_DELAY = 1.0
+    # 通信エラー・レートリミット・5xx に対する試行回数
+    API_RETRIES = 4
+    # スキーマは適合しているが内容の整合性検証（配列長の一致、
+    # 分量の超過など）で弾かれた場合の再生成回数
+    VALIDATION_RETRIES = 3
+
+    # プロンプト内で分量の指示を差し込む位置。
+    # formats.py の仕様から生成するため、プロンプト側には値を書かない。
+    NARRATION_SPEC_TOKEN = "<<NARRATION_SPEC>>"
 
     SYSTEM_PROMPT_JA = """<role>
 あなたはYouTube ShortsやTikTok向けのニュース解説動画の台本ライターです。
@@ -47,9 +66,8 @@ class ScriptGenerator:
 </critical_constraints>
 
 <content_rules>
-- ナレーション(full_narration): 250〜300文字の自然な話し言葉
-- segment_narrations: full_narrationを6つに分割（連結するとfull_narrationと一致）
-- image_prompts: 必ず英語で記述（Gemini Image用）、各プロンプトに "cinematic, high quality" を含める
+- segment_narrations: <<NARRATION_SPEC>>
+- image_prompts: 必ず英語で記述（画像生成モデル用）、各プロンプトに "cinematic, high quality" を含める
 - text_overlays: 各画像に対応する短文（15-25文字）
 - title: 40文字程度（【】や！で注目を集める、数字や疑問形を活用）
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
@@ -66,7 +84,6 @@ class ScriptGenerator:
     "hook": "最初の3秒で視聴者を引き付けるフック",
     "main_points": ["ポイント1", "ポイント2", "ポイント3"],
     "conclusion": "締めの一言",
-    "full_narration": "完全なナレーション台本（250〜300文字、自然な話し言葉）",
     "segment_narrations": [
         "セグメント1のナレーション（空でないこと）",
         "セグメント2のナレーション（空でないこと）",
@@ -101,7 +118,6 @@ class ScriptGenerator:
 2. image_prompts が正確に6個あること
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
-5. segment_narrationsを連結するとfull_narrationと一致すること
 </verification>"""
 
     SYSTEM_PROMPT_LONG_JA = """<role>
@@ -123,8 +139,7 @@ class ScriptGenerator:
 </critical_constraints>
 
 <content_rules>
-- ナレーション(full_narration): 2000〜2500文字の自然な話し言葉
-- segment_narrations: full_narrationを10個に分割（各セグメント200-250文字程度、連結するとfull_narrationと一致）
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: 必ず英語で記述
   - 1枚目: サムネイル的（cinematic, high quality, eye-catching thumbnail style）
   - 2枚目以降: 解説資料風（infographic style, educational diagram, data visualization）
@@ -144,7 +159,6 @@ class ScriptGenerator:
     "hook": "最初の10秒で視聴者を引き付けるフック",
     "main_points": ["ポイント1", "ポイント2", "ポイント3", "ポイント4", "ポイント5", "ポイント6"],
     "conclusion": "締めの言葉（まとめと今後の展望）",
-    "full_narration": "完全なナレーション台本（2000〜2500文字、自然な話し言葉）",
     "segment_narrations": [
         "セグメント1のナレーション（空でないこと）",
         "セグメント2のナレーション（空でないこと）",
@@ -191,7 +205,6 @@ class ScriptGenerator:
 2. image_prompts が正確に10個あること
 3. text_overlays が正確に10個あること
 4. 全ての要素が空文字列でないこと
-5. segment_narrationsを連結するとfull_narrationと一致すること
 </verification>"""
 
     SYSTEM_PROMPT_EN = """<role>
@@ -213,8 +226,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 </critical_constraints>
 
 <content_rules>
-- Narration (full_narration): 120-150 words, natural spoken language
-- segment_narrations: Split full_narration into 6 parts (concatenation equals full_narration)
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: In English, include "cinematic, high quality" in each
 - text_overlays: Short text for each image (8-15 words)
 - title: Around 50 characters (use attention-grabbing words like SHOCKING, BREAKING)
@@ -232,7 +244,6 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
     "hook": "Opening hook to grab attention in 3 seconds",
     "main_points": ["Point 1", "Point 2", "Point 3"],
     "conclusion": "Short closing statement",
-    "full_narration": "Complete narration script (120-150 words, natural spoken language)",
     "segment_narrations": [
         "Segment 1 narration (not empty)",
         "Segment 2 narration (not empty)",
@@ -267,7 +278,6 @@ Before output, verify:
 2. image_prompts has exactly 6 elements
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
-5. Concatenating segment_narrations equals full_narration
 </verification>"""
 
     SYSTEM_PROMPT_LONG_EN = """<role>
@@ -289,8 +299,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 </critical_constraints>
 
 <content_rules>
-- Narration (full_narration): 750-900 words, natural spoken language
-- segment_narrations: Split full_narration into 10 parts (each segment ~75-90 words, concatenation equals full_narration)
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: In English
   - First image: Thumbnail-style (cinematic, high quality, eye-catching)
   - Second onwards: Educational style (infographic, educational diagram, data visualization)
@@ -310,7 +319,6 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
     "hook": "Opening hook to grab attention in 10 seconds",
     "main_points": ["Point 1", "Point 2", "Point 3", "Point 4", "Point 5", "Point 6"],
     "conclusion": "Closing statement (summary, future outlook)",
-    "full_narration": "Complete narration script (750-900 words, natural spoken language)",
     "segment_narrations": [
         "Segment 1 narration (not empty)",
         "Segment 2 narration (not empty)",
@@ -357,7 +365,6 @@ Before output, verify:
 2. image_prompts has exactly 10 elements
 3. text_overlays has exactly 10 elements
 4. No element is an empty string
-5. Concatenating segment_narrations equals full_narration
 </verification>"""
 
     SYSTEM_PROMPT_TIKTOK_JA = """<role>
@@ -380,9 +387,8 @@ TikTokの収益化には60秒以上の動画が必要です。
 </critical_constraints>
 
 <content_rules>
-- ナレーション(full_narration): 500〜650文字の自然な話し言葉（60〜90秒に相当）
-- segment_narrations: full_narrationを6つに分割（各セグメント80-110文字程度、連結するとfull_narrationと一致）
-- image_prompts: 必ず英語で記述（Gemini Image用）、各プロンプトに "cinematic, high quality" を含める
+- segment_narrations: <<NARRATION_SPEC>>
+- image_prompts: 必ず英語で記述（画像生成モデル用）、各プロンプトに "cinematic, high quality" を含める
 - text_overlays: 各画像に対応する短文（15-25文字）
 - title: 40文字程度（【】や！で注目を集める、数字や疑問形を活用）
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
@@ -399,7 +405,6 @@ TikTokの収益化には60秒以上の動画が必要です。
     "hook": "最初の5秒で視聴者を引き付けるフック",
     "main_points": ["ポイント1", "ポイント2", "ポイント3", "ポイント4"],
     "conclusion": "締めの一言（アクションを促す）",
-    "full_narration": "完全なナレーション台本（500〜650文字、自然な話し言葉）",
     "segment_narrations": [
         "セグメント1のナレーション（80-110文字、空でないこと）",
         "セグメント2のナレーション（80-110文字、空でないこと）",
@@ -434,8 +439,7 @@ TikTokの収益化には60秒以上の動画が必要です。
 2. image_prompts が正確に6個あること
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
-5. segment_narrationsを連結するとfull_narrationと一致すること
-6. full_narrationが500〜650文字の範囲内であること
+5. segment_narrations の合計が500〜650文字の範囲内であること
 </verification>"""
 
     SYSTEM_PROMPT_TIKTOK_EN = """<role>
@@ -458,8 +462,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 </critical_constraints>
 
 <content_rules>
-- Narration (full_narration): 250-350 words, natural spoken language (equals 60-90 seconds)
-- segment_narrations: Split full_narration into 6 parts (each segment ~40-60 words, concatenation equals full_narration)
+- segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: In English, include "cinematic, high quality" in each
 - text_overlays: Short text for each image (8-15 words)
 - title: Around 50 characters (use attention-grabbing words like SHOCKING, BREAKING)
@@ -477,7 +480,6 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
     "hook": "Opening hook to grab attention in 5 seconds",
     "main_points": ["Point 1", "Point 2", "Point 3", "Point 4"],
     "conclusion": "Short closing statement with call to action",
-    "full_narration": "Complete narration script (250-350 words, natural spoken language)",
     "segment_narrations": [
         "Segment 1 narration (40-60 words, not empty)",
         "Segment 2 narration (40-60 words, not empty)",
@@ -512,8 +514,7 @@ Before output, verify:
 2. image_prompts has exactly 6 elements
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
-5. Concatenating segment_narrations equals full_narration
-6. full_narration is within 250-350 words
+5. The segment_narrations total 250-350 words
 </verification>"""
 
     def __init__(self, endpoint: str, api_key: str, deployment: str):
@@ -535,7 +536,9 @@ Before output, verify:
         )
         self.model = deployment
 
-    def generate(self, news_topic: str, language: str = "ja", video_format: str = "short") -> Script:
+    def generate(
+        self, news_topic: str, language: str = "ja", video_format: str = "short"
+    ) -> Script:
         """ニューストピックから台本を生成する。
 
         Args:
@@ -549,44 +552,123 @@ Before output, verify:
         Raises:
             ScriptGenerationError: 台本生成に失敗した場合
         """
-        format_labels = {"long": "ロング", "tiktok": "TikTok", "short": "ショート"}
-        format_label = format_labels.get(video_format, "ショート")
-        log_step(f"台本を生成中... ({language}, {format_label})", "")
+        spec = get_spec(video_format)
+        budget = spec.char_budget(language)
+        log_step(f"台本を生成中... ({language}, {spec.label})", "")
 
         instructions = self._build_system_prompt(language, video_format)
 
-        for attempt in range(self.MAX_RETRIES):
+        # モデルの出力がスキーマに適合していても、内容が使えないことがある。
+        # 引き直しで直る種類の問題（配列長の不一致、空セグメント、
+        # 分量の超過）はここで再試行する。
+        last_problem: str | None = None
+        for attempt in range(self.VALIDATION_RETRIES):
+            remaining = self.VALIDATION_RETRIES - attempt - 1
             try:
-                # Use Responses API
-                response = self.client.responses.create(
-                    model=self.model,
-                    instructions=instructions,
-                    input=news_topic,
-                )
-
-                # Get response text using output_text helper
-                response_text = response.output_text
-                script = self._parse_response(response_text, language)
-                log_success(f"{language}台本を生成しました")
-                return script
-
-            except json.JSONDecodeError as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2**attempt)
-                    time.sleep(delay)
+                draft = self._request_script(instructions, news_topic)
+            except ValidationError as e:
+                last_problem = self._summarize_validation_error(e)
+                if remaining:
+                    log_warning(
+                        f"台本の検証に失敗（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
+                        f"再生成します: {last_problem}"
+                    )
                     continue
-                log_error(f"JSONパースエラー: {e}")
-                raise ScriptGenerationError(f"台本のJSONパースに失敗しました: {e}")
-
+                break
             except Exception as e:
-                if attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2**attempt)
-                    time.sleep(delay)
-                    continue
                 log_error(f"API呼び出しエラー: {e}")
-                raise ScriptGenerationError(f"台本生成に失敗しました: {e}")
+                raise ScriptGenerationError(f"台本生成に失敗しました: {e}") from e
 
-        raise ScriptGenerationError("最大リトライ回数を超えました")
+            # 分量の検査。プロンプトの文字数指示は守られないため
+            # （実測で47%超過）、ここで弾いて引き直す。
+            problem = draft.check_length_budget(language, budget)
+            if problem is not None:
+                last_problem = problem
+                if remaining:
+                    log_warning(
+                        f"分量が範囲外（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
+                        f"再生成します: {problem}"
+                    )
+                    continue
+                # 最終試行でも収まらなければ、生成を止めるより
+                # 長いまま進める方が実用的。警告だけ残す。
+                log_warning(f"分量が範囲外のまま採用します: {problem}")
+
+            # full_narration はセグメントの連結で導出される。
+            # estimated_duration はモデルの自己申告ではなく文字数から推定する。
+            script = draft.to_script(language)
+            log_success(
+                f"{language}台本を生成しました "
+                f"({len(script.segment_narrations)}セグメント, "
+                f"{len(script.full_narration)}文字, "
+                f"推定{script.estimated_duration}秒)"
+            )
+            return script
+
+        log_error(f"台本の検証に失敗: {last_problem}")
+        raise ScriptGenerationError(f"生成された台本が不正です: {last_problem}")
+
+    @retry(
+        retry=retry_if_exception_type(
+            (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
+        ),
+        stop=stop_after_attempt(API_RETRIES),
+        wait=wait_exponential(multiplier=2, min=2, max=60),
+        reraise=True,
+    )
+    def _request_script(self, instructions: str, news_topic: str) -> ScriptDraft:
+        """Responses API を Structured Outputs で呼び出して台本を得る。
+
+        `responses.parse` に Pydantic モデルを渡すと、SDK がモデルを
+        JSON スキーマへ変換して `text.format` に設定し、検証済みの
+        オブジェクトを `output_parsed` に返す。従来の
+        「正規表現で JSON を抜き出して json.loads する」経路が不要になり、
+        末尾カンマなどの些細な逸脱で失敗することがなくなる。
+
+        Args:
+            instructions: システムプロンプト
+            news_topic: ニューストピック
+
+        Returns:
+            ScriptDraft: 検証済みの台本の下書き
+
+        Raises:
+            ValidationError: スキーマ検証に失敗した場合
+            ScriptGenerationError: モデルが出力を拒否した場合
+        """
+        response = self.client.responses.parse(
+            model=self.model,
+            instructions=instructions,
+            input=news_topic,
+            text_format=ScriptDraft,
+        )
+
+        draft = response.output_parsed
+        if draft is None:
+            # 安全機構による拒否や打ち切りで parse できなかった場合
+            raise ScriptGenerationError(
+                f"モデルが台本を出力しませんでした "
+                f"(status={response.status!r}, incomplete={response.incomplete_details!r})"
+            )
+        return draft
+
+    @staticmethod
+    def _summarize_validation_error(error: ValidationError | None) -> str:
+        """ValidationError を1行のメッセージに要約する。
+
+        Args:
+            error: Pydantic の ValidationError（None 可）
+
+        Returns:
+            str: 人が読める要約
+        """
+        if error is None:
+            return "原因不明"
+        messages = []
+        for err in error.errors():
+            location = ".".join(str(p) for p in err["loc"]) or "(root)"
+            messages.append(f"{location}: {err['msg']}")
+        return " / ".join(messages)
 
     def _build_system_prompt(self, language: str, video_format: str = "short") -> str:
         """言語別・形式別のシステムプロンプトを構築する。
@@ -599,75 +681,51 @@ Before output, verify:
             str: システムプロンプト
         """
         if video_format == "long":
-            if language == "ja":
-                return self.SYSTEM_PROMPT_LONG_JA
-            return self.SYSTEM_PROMPT_LONG_EN
+            template = (
+                self.SYSTEM_PROMPT_LONG_JA if language == "ja" else self.SYSTEM_PROMPT_LONG_EN
+            )
         elif video_format == "tiktok":
-            if language == "ja":
-                return self.SYSTEM_PROMPT_TIKTOK_JA
-            return self.SYSTEM_PROMPT_TIKTOK_EN
+            template = (
+                self.SYSTEM_PROMPT_TIKTOK_JA if language == "ja" else self.SYSTEM_PROMPT_TIKTOK_EN
+            )
         else:  # "short"
-            if language == "ja":
-                return self.SYSTEM_PROMPT_JA
-            return self.SYSTEM_PROMPT_EN
+            template = self.SYSTEM_PROMPT_JA if language == "ja" else self.SYSTEM_PROMPT_EN
 
-    def _parse_response(self, response_text: str, language: str) -> Script:
-        """APIレスポンスをパースしてScriptオブジェクトを生成する。
+        # 分量の指示はプロンプトに埋め込まず、formats.py から生成する。
+        # ハードコードしていると仕様と指示がずれる（実際にずれていた）。
+        return template.replace(
+            self.NARRATION_SPEC_TOKEN,
+            self._narration_spec(language, get_spec(video_format)),
+        )
+
+    @staticmethod
+    def _narration_spec(language: str, spec: FormatSpec) -> str:
+        """`formats.py` の仕様から、分量の指示文を組み立てる。
 
         Args:
-            response_text: APIレスポンステキスト
             language: 言語コード
+            spec: 形式の仕様
 
         Returns:
-            Script: パースされた台本
-
-        Raises:
-            json.JSONDecodeError: JSONパースに失敗した場合
-            ScriptGenerationError: スクリプト検証に失敗した場合
+            str: プロンプトに差し込む1行
         """
-        # Try to extract JSON from response
-        json_match = re.search(r"\{[\s\S]*\}", response_text)
-        if json_match:
-            json_str = json_match.group()
-        else:
-            json_str = response_text
-
-        data = json.loads(json_str)
-        data["language"] = language
-
-        script = Script.from_dict(data)
-        self._validate_script(script)
-        return script
-
-    def _validate_script(self, script: Script) -> None:
-        """生成されたスクリプトを検証する。
-
-        Args:
-            script: 検証対象のスクリプト
-
-        Raises:
-            ScriptGenerationError: 検証に失敗した場合
-        """
-        # segment_narrationsの存在チェック
-        if not script.segment_narrations:
-            raise ScriptGenerationError("segment_narrationsが空です")
-
-        # 配列長の一致チェック
-        num_segments = len(script.segment_narrations)
-        num_images = len(script.image_prompts)
-        num_overlays = len(script.text_overlays)
-
-        if num_segments != num_images:
-            raise ScriptGenerationError(
-                f"配列長の不一致: segment_narrations={num_segments}, image_prompts={num_images}"
+        n = spec.segment_count
+        if language == "ja":
+            per_low, per_high = spec.chars_per_segment
+            total_low, total_high = spec.total_chars
+            return (
+                f"ナレーションを{n}個のセグメントに分けて書く。"
+                f"各セグメントは{per_low}〜{per_high}文字の自然な話し言葉"
+                f"（全体で{total_low}〜{total_high}文字）。"
+                f"{n}個すべてに内容を入れ、空のセグメントを作らない。"
+                f"全体で{total_high}文字を超えないこと（超えると尺が伸びすぎて再生成になる）"
             )
-
-        if num_segments != num_overlays:
-            raise ScriptGenerationError(
-                f"配列長の不一致: segment_narrations={num_segments}, text_overlays={num_overlays}"
-            )
-
-        # 各セグメントの空チェック
-        for i, narration in enumerate(script.segment_narrations):
-            if not narration or not narration.strip():
-                raise ScriptGenerationError(f"セグメント{i+1}のnarrationが空です")
+        per_low, per_high = spec.words_per_segment
+        total_low, total_high = spec.total_words
+        return (
+            f"Write the narration as {n} segments. "
+            f"Each segment is {per_low}-{per_high} words of natural spoken English "
+            f"({total_low}-{total_high} words total). "
+            f"Fill all {n}; never leave a segment empty. "
+            f"Do not exceed {total_high} words total — going over forces a regeneration"
+        )

@@ -1,0 +1,42 @@
+# Azure Developer CLI の設定。
+# スキーマ: https://github.com/Azure/azure-dev/blob/main/schemas/v1.0/azure.yaml.json
+#
+# `azd provision` はインフラ（AI Foundry / Speech / Storage）を、
+# `azd deploy` はイメージのビルドと Container Apps への反映を行う。
+#
+# ホスティングは `deployApp` パラメータで切り替える。既定は false で、
+# その状態では下の service 定義に対応する Container App が存在しないため
+# `azd deploy` は失敗する。有効化する手順:
+#   azd env set DEPLOY_APP true
+#   azd up
+name: news-video-generator
+metadata:
+  template: news-video-generator@0.1.0
+
+infra:
+  provider: bicep
+  path: infra
+  module: main
+
+services:
+  # Container App 側は 'azd-service-name: web' タグでこの service と対応する。
+  web:
+    project: .
+    language: docker
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+      context: .
+
+hooks:
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./infra/hooks/postprovision.ps1
+      continueOnError: false
+      interactive: false
+    posix:
+      shell: sh
+      run: ./infra/hooks/postprovision.sh
+      continueOnError: false
+      interactive: false

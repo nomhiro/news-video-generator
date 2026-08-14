@@ -16,9 +16,8 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from config import Config
+from src.web.dependencies import lifespan
 from src.web.routes import router
-from src.web.dependencies import setup_dependencies
 
 
 def create_app() -> FastAPI:
@@ -31,6 +30,9 @@ def create_app() -> FastAPI:
         title="News Video Generator",
         description="HTMX + Tailwind CSSを使用したニュース取得・動画生成システム",
         version="1.0.0",
+        # 依存の組み立ては lifespan が行い、app.state に置く。
+        # 設定の読み込みもここで起きるため、値が足りなければ起動時に落ちる。
+        lifespan=lifespan,
     )
 
     # Mount static files
@@ -41,48 +43,31 @@ def create_app() -> FastAPI:
     # Include routes
     app.include_router(router)
 
-    # Setup dependencies
-    config = Config.from_env()
-    setup_dependencies(app, config)
-
     return app
 
 
 def main():
     """メインエントリーポイント。"""
-    import sys
     import io
+    import sys
 
     # Fix Windows console encoding for emoji
     if sys.platform == "win32":
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(
-        description="News Video Generator Web Server"
-    )
+    parser = argparse.ArgumentParser(description="News Video Generator Web Server")
     parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="サーバーホストアドレス (default: 127.0.0.1)"
+        "--host", default="127.0.0.1", help="サーバーホストアドレス (default: 127.0.0.1)"
     )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="サーバーポート番号 (default: 8000)"
-    )
-    parser.add_argument(
-        "--reload",
-        action="store_true",
-        help="開発用自動リロード"
-    )
+    parser.add_argument("--port", type=int, default=8000, help="サーバーポート番号 (default: 8000)")
+    parser.add_argument("--reload", action="store_true", help="開発用自動リロード")
 
     args = parser.parse_args()
 
-    print(f"News Video Generator Web Server")
+    print("News Video Generator Web Server")
     print(f"   URL: http://{args.host}:{args.port}")
-    print(f"   Press Ctrl+C to stop")
+    print("   Press Ctrl+C to stop")
     print("")
 
     uvicorn.run(
