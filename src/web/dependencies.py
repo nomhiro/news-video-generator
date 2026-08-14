@@ -91,8 +91,12 @@ class AppContext:
 
         # スキーマを先に当てる。テーブルが無い状態でワーカーが
         # ポーリングを始めると、意味の分かりにくいエラーが出続ける。
-        upgrade_to_head(config.database_url)
-        jobs = JobRepository(create_session_factory(create_db_engine(config.database_url)))
+        upgrade_to_head(config.database_url, config.sqlite_journal_mode)
+        jobs = JobRepository(
+            create_session_factory(
+                create_db_engine(config.database_url, config.sqlite_journal_mode)
+            )
+        )
 
         aggregator = NewsAggregator(config.news_data_dir)
         pipeline = Pipeline(config, artifact_store=artifact_store)

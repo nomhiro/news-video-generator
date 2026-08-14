@@ -14,8 +14,13 @@
 SQLite の設定
 -------------
 `journal_mode=WAL` にしないと、書き込み中の読み取りが
-`database is locked` で失敗する。ワーカーが数分かかるジョブを実行しながら
+`database is locked` で失敗しやすい。ワーカーが数分かかるジョブを実行しながら
 `/status` が読む構成なので、これは避けられない衝突になる。
+
+ただし **Azure Files（SMB）の上では WAL が使えない**。WAL は共有メモリ
+（`-shm` の mmap）を要求し、SMB はそれを提供しないため
+`disk I/O error` になる。クラウドでファイル共有にマウントするときは
+`SQLITE_JOURNAL_MODE=DELETE` にする。
 
 `busy_timeout` は「ロックが取れなくても即座に諦めない」ための待ち時間。
 既定は 0 で、競合したら例外になる。
@@ -41,11 +46,14 @@ def _is_sqlite(url: str) -> bool:
     return url.startswith("sqlite")
 
 
-def create_db_engine(url: str) -> Engine:
+def create_db_engine(url: str, journal_mode: str = "WAL") -> Engine:
     """エンジンを作る。
 
     Args:
         url: SQLAlchemy の接続 URL（例: `sqlite:///./data/newsvideo.db`）
+        journal_mode: SQLite の journal_mode。
+            Azure Files（SMB）の上では WAL が使えないため DELETE を渡す
+            （WAL は共有メモリの mmap を要求し、SMB は提供しない）。
 
     Returns:
         Engine: 接続プール込みのエンジン
@@ -60,7 +68,7 @@ def create_db_engine(url: str) -> Engine:
     engine = create_engine(url, connect_args=connect_args, future=True)
 
     if _is_sqlite(url):
-        _apply_sqlite_pragmas(engine)
+        _apply_sqlite_pragmas(engine, journal_mode)
     return engine
 
 
@@ -77,7 +85,7 @@ def _ensure_parent_dir(url: str) -> None:
     Path(path_part).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
 
-def _apply_sqlite_pragmas(engine: Engine) -> None:
+def _apply_sqlite_pragmas(engine: Engine, journal_mode: str) -> None:
     """接続ごとに SQLite の設定を入れる。
 
     PRAGMA は接続単位の設定なので、プールが新しい接続を作るたびに
@@ -87,9 +95,9 @@ def _apply_sqlite_pragmas(engine: Engine) -> None:
     @event.listens_for(engine, "connect")
     def _set_pragmas(dbapi_connection: Any, _record: Any) -> None:
         cursor = dbapi_connection.cursor()
-        # 書き込み中でも読み取れるようにする。
-        # これが無いとワーカーの書き込み中に /status が失敗する。
-        cursor.execute("PRAGMA journal_mode=WAL")
+        # WAL なら書き込み中でも読み取れる（ワーカーの書き込み中に
+        # /status が失敗しない）。SMB 上では使えないので設定で切り替える。
+        cursor.execute(f"PRAGMA journal_mode={journal_mode}")
         cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
         # 外部キーは既定で無効。有効にしないと制約が単なる飾りになる。
         cursor.execute("PRAGMA foreign_keys=ON")

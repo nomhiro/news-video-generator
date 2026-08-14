@@ -72,11 +72,16 @@ COPY --chown=app:app migrations/ ./migrations/
 # 運用スクリプト（トークンの移送など）。
 COPY --chown=app:app scripts/ ./scripts/
 
-# 生成物とニュースデータの置き場所。
-# クラウドでは Blob Storage 等に移す前提だが、それまではコンテナ内に持つ。
+# 生成物・ニュースデータ・ジョブ表の置き場所。
+#
+# /app/state はジョブ表（SQLite）用。**Azure Files には置けない。**
+# SMB 上の SQLite は CREATE TABLE で固まり、起動が終わらない
+# （実測: マウント上だとリビジョンが Activating のまま、同じイメージで
+# ローカルディスクに向けると25秒で起動した）。
+# 共有にマウントするのは記事の JSON（/app/data）だけにする。
 RUN mkdir -p /app/output/audio /app/output/images /app/output/videos /app/output/scripts \
-             /app/data/news \
-    && chown -R app:app /app/output /app/data
+             /app/data/news /app/state \
+    && chown -R app:app /app/output /app/data /app/state
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

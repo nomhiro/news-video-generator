@@ -374,6 +374,50 @@ azd down           # 破棄（課金を止める）
 使わないときは `azd down` で破棄する（ストレージの生成物も消えるので、
 必要なものは先に取り出す）。
 
+### 実運用での構成（Container Apps）
+
+公開エンドポイントは **Entra ID 認証（EasyAuth）で閉じている**。
+無認証だと、URL を知っている者が `/generate` で課金を発生させ、
+`/youtube/upload` でチャンネルに動画を公開できてしまう。
+
+- アプリ登録は azd の管理外（Entra ID のオブジェクト）。`AUTH_CLIENT_ID` /
+  `AUTH_CLIENT_SECRET` / `AUTH_TENANT_ID` を `azd env set` で渡す。
+- **`enableIdTokenIssuance` を有効にする**。EasyAuth は
+  `response_type=code id_token`（ハイブリッドフロー）で要求するので、
+  無効のままだとサインインが `AADSTS700054` で失敗する。
+  `az ad app create` の既定は無効（一度踏んだ）。
+- 単一テナントのアプリ登録なので、`defaultAuthorizationPolicy.allowedPrincipals`
+  で自分の objectId だけに絞る。指定しないと**テナント内の全員**が入れる。
+- `tokenStore` は無効。有効にすると SAS URL を要求され、生成物用の
+  ストレージアカウントは共有キーを無効にしてあるので SAS を作れない。
+  ここでの認証は入口を閉じるためだけなので不要。
+
+**状態の置き場所は3つに分かれている。**
+
+| 何を | どこに | 理由 |
+|---|---|---|
+| 生成物（動画・画像・音声・台本） | Blob（`artifacts`） | 再起動で消えない。Entra ID 認証 |
+| OAuth トークン | Blob（`tokens`） | 同上。別コンテナに分離 |
+| 記事の選択状態（JSON） | Azure Files（`/app/data`） | リビジョン更新で選び直したくない |
+| ジョブ表（SQLite） | コンテナのローカル（`/app/state`） | **SMB 上では動かない**（下記） |
+
+- **SQLite を Azure Files に置くと起動しない。** `journal_mode` を DELETE に
+  してもテーブル作成で固まり、リビジョンが Activating のまま終わらない。
+  同じイメージで `DATABASE_URL` をローカルディスクに向けると25秒で起動する、
+  という切り分けまでやった。ジョブまで永続化するなら PostgreSQL に移す。
+  引き換えに、リビジョン更新で**実行待ちのジョブと履歴は消える**。
+- Azure Files のマウントは SMB でアカウントキーを要求するため、
+  **生成物とは別のストレージアカウント**にしている（生成物側は
+  `allowSharedKeyAccess: false` を維持したい）。キーが漏れても
+  記事の選択状態しか失わない。
+- **`azd provision` はコンテナイメージをプレースホルダに戻しうる。**
+  `containerImage` パラメータを `SERVICE_WEB_IMAGE_NAME` から受けるように
+  してある。戻ると quickstart イメージ（8080 待ち受け）のリビジョンが
+  作られ、プローブが通らず Activating のまま残る。
+- `az containerapp update --set-env-vars` で入れた値は、次の
+  `azd provision` で IaC の値に戻る（切り分け用の一時変更に使うのはよいが、
+  恒久的な設定は Bicep に書く）。
+
 ### コンテナで動かすときの前提
 
 ```bash

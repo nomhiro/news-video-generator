@@ -92,6 +92,29 @@ param imageApiKey string = ''
 @description('音声合成の API キー（deployApp のとき必須）')
 param speechApiKey string = ''
 
+// --- 公開エンドポイントの保護 ---
+//
+// アプリ登録は azd の管理外（Entra ID のオブジェクトで、リソースではない）。
+// 次のように作って azd env に入れる:
+//   az ad app create --display-name news-video-generator \
+//     --sign-in-audience AzureADMyOrg \
+//     --web-redirect-uris "https://<fqdn>/.auth/login/aad/callback"
+//   az ad app credential reset --id <objectId> --years 2
+
+@description('''動かすコンテナイメージ。既定はプレースホルダ。
+azd deploy 後は SERVICE_WEB_IMAGE_NAME から渡される。''')
+param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
+
+@description('Entra ID アプリ登録のクライアントID。空なら認証を設定しない')
+param authClientId string = ''
+
+@secure()
+@description('Entra ID アプリ登録のクライアントシークレット')
+param authClientSecret string = ''
+
+@description('テナントID。省略時は現在のテナント')
+param authTenantId string = ''
+
 // azd の慣習に合わせたタグ。azd がリソースを環境に紐付けるのに使う。
 var tags = {
   'azd-env-name': environmentName
@@ -167,6 +190,19 @@ module speech 'core/speech.bicep' = {
   }
 }
 
+// 実行時の状態（記事の選択状態・ジョブ表）を置くファイル共有。
+// 生成物の Blob とは別アカウントにする（理由は core/state-storage.bicep）。
+module stateStorage 'core/state-storage.bicep' = if (deployApp) {
+  name: 'state-storage'
+  scope: rg
+  params: {
+    location: location
+    tags: tags
+    // 'stst' (4) + ハイフンを除いた envSlug (最大7) + resourceToken (13) = 最大24
+    accountName: 'stst${take(replace(envSlug, '-', ''), 7)}${resourceToken}'
+  }
+}
+
 // 生成物の保存先。画像生成と同じリソースグループに置く
 // （生成物は動画1本ごとに数十MB。用途が近く、分ける理由がない）。
 module storage 'core/storage.bicep' = {
@@ -193,6 +229,7 @@ module appHosting 'core/app-hosting.bicep' = if (deployApp) {
     envSlug: envSlug
     resourceToken: resourceToken
     registryName: registryName
+    containerImage: containerImage
     artifactAccountUrl: storageAccountUrl
     artifactContainerName: artifactContainerName
     tokenContainerName: tokenContainerName
@@ -204,6 +241,16 @@ module appHosting 'core/app-hosting.bicep' = if (deployApp) {
     imageApiKey: imageApiKey
     speechRegion: speech.outputs.region
     speechApiKey: speechApiKey
+    authClientId: authClientId
+    authClientSecret: authClientSecret
+    authTenantId: empty(authTenantId) ? subscription().tenantId : authTenantId
+    // 単一テナントのアプリ登録なので、指定しないとテナント内の全員が
+    // サインインできる。自分（principalId）だけに絞る。
+    authAllowedPrincipalId: principalId
+    // キーは app-hosting 側で listKeys して取る（main から渡すと
+    // deployApp=false でも評価されてしまう）。
+    stateAccountName: deployApp ? stateStorage!.outputs.accountName : ''
+    stateShareName: deployApp ? stateStorage!.outputs.shareName : ''
   }
 }
 

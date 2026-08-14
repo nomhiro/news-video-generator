@@ -34,6 +34,18 @@
     },
     "speechApiKey": {
       "value": "${AZURE_SPEECH_API_KEY=}"
+    },
+    "containerImage": {
+      "value": "${SERVICE_WEB_IMAGE_NAME=mcr.microsoft.com/k8se/quickstart:latest}"
+    },
+    "authClientId": {
+      "value": "${AUTH_CLIENT_ID=}"
+    },
+    "authClientSecret": {
+      "value": "${AUTH_CLIENT_SECRET=}"
+    },
+    "authTenantId": {
+      "value": "${AUTH_TENANT_ID=}"
     }
   }
 }

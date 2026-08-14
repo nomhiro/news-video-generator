@@ -148,6 +148,21 @@ class Config(BaseSettings):
         description="SQLAlchemy の接続 URL",
     )
 
+    # SQLite の journal mode。
+    #
+    # 既定は WAL。書き込み中でも読めるので、ワーカーが書いている最中に
+    # /status が読む構成に合っている。
+    #
+    # ただし **Azure Files（SMB）の上では WAL が使えない**。WAL は
+    # 共有メモリ（-shm の mmap）を要求し、SMB はそれを提供しないため
+    # "disk I/O error" や "database is locked" になる。
+    # クラウドでファイル共有にマウントするときは DELETE にする
+    # （同時読み書きは弱くなるが、レプリカ1・ワーカー1なので実害は小さい）。
+    sqlite_journal_mode: Literal["WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY"] = Field(
+        default="WAL",
+        description="SQLite の journal_mode。Azure Files 上では DELETE",
+    )
+
     # --- ニュース取得 ---
     news_data_dir: Path = Field(default=Path("./data/news"))
     news_fetch_limit: int = Field(default=10, ge=1)

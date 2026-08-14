@@ -7,10 +7,11 @@
 // それでも既定を false にしているのは、払い出すと課金が始まるうえ、
 // クラウドで動かすには次の未解決事項が残っているため。
 //
-//   - DB が SQLite で、ファイルはコンテナのファイルシステム上にある。
-//     進捗はジョブ表（行）になったが、ファイルが共有されないので
-//     minReplicas/maxReplicas は 1 固定のまま。DATABASE_URL を
-//     PostgreSQL に向ければ外せる
+//   - ジョブ表は SQLite で、コンテナのローカルディスクにある。
+//     Azure Files には置けなかった（SMB 上の SQLite は CREATE TABLE で
+//     固まる。実測済み）。そのためリビジョン更新でジョブの履歴と
+//     実行待ちは消え、minReplicas/maxReplicas も 1 固定のまま。
+//     DATABASE_URL を PostgreSQL に向ければ両方とも解決する
 //   （OAuth トークンは Blob に置けるようになったが、初回の認証は
 //     ローカルで行い scripts/push_tokens.py で送る運用が必要）
 //
@@ -86,6 +87,52 @@ param speechRegion string
 @description('音声合成の API キー')
 param speechApiKey string
 
+// --- 公開エンドポイントの保護 ---
+//
+// ingress は external: true（インターネットに出る）。無認証で放置すると、
+// URL を知っている者が /generate で課金を発生させ、/youtube/upload で
+// チャンネルに動画を公開できてしまう（トークンは Blob にあり、
+// アプリはそれを使える）。Container Apps 組み込みの認証で塞ぐ。
+
+@description('Entra ID アプリ登録のクライアントID。空なら認証を設定しない')
+param authClientId string = ''
+
+@secure()
+@description('Entra ID アプリ登録のクライアントシークレット')
+param authClientSecret string = ''
+
+@description('テナントID。認証の発行者URLに使う')
+param authTenantId string = ''
+
+@description('''アクセスを許可する principal の objectId。
+アプリ登録は単一テナント（AzureADMyOrg）なので、指定しないと
+**テナント内の全員**がサインインできてしまう。個人用のツールなので
+自分だけに絞る。''')
+param authAllowedPrincipalId string = ''
+
+// --- 状態の永続化（Azure Files） ---
+
+@description('状態を置くファイル共有のストレージアカウント名。空ならマウントしない')
+param stateAccountName string = ''
+
+@description('ファイル共有名')
+param stateShareName string = 'data'
+
+@description('''コンテナ内のマウント先。
+ここに置くのは記事の JSON（NEWS_DATA_DIR）だけ。
+ジョブ表（SQLite）は SMB 上で動かないためローカルディスクに置く。''')
+param stateMountPath string = '/app/data'
+
+@description('''動かすコンテナイメージ。
+既定はプレースホルダで、初回の払い出し時だけ使う。
+`azd deploy` が実イメージに差し替え、その名前を azd env の
+SERVICE_WEB_IMAGE_NAME に記録する。main.parameters.json がそれを
+このパラメータに戻すので、**あとから azd provision してもイメージが
+プレースホルダに戻らない**。
+戻ると quickstart イメージ（8080 待ち受け）のリビジョンが作られ、
+プローブが通らず Activating のまま残る（一度踏んだ）。''')
+param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
+
 @description('''Container App に渡す CPU コア数。
 1.0 では ffmpeg のエンコードが 0.4x speed しか出ず、実測で ffmpeg が
 異常終了した（1080x1920 / preset=medium）。
@@ -142,6 +189,37 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
   }
 }
 
+// ファイル共有のアカウント。キーはここで取る。
+//
+// キーを main.bicep から渡さない理由: `deployApp ? listKeys(...) : ''` の
+// 形にすると ARM が両方の分岐を評価し、deployApp が false のときに
+// 存在しないリソースへの listKeys で "A referenced resource was not found"
+// になる（一度踏んだ）。条件付きモジュールの内側で取れば、その分岐が
+// 選ばれたときにしか評価されない。
+//
+// output にもしない。ARM の output はデプロイ履歴に平文で残る。
+resource stateStorage 'Microsoft.Storage/storageAccounts@2025-01-01' existing =
+  if (!empty(stateAccountName)) {
+    name: stateAccountName
+  }
+
+// Container Apps 環境に共有を登録する。Container App 側は
+// この名前（volumes[].storageName）で参照する。
+resource envStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' =
+  if (!empty(stateAccountName)) {
+    parent: containerAppsEnvironment
+    name: 'state'
+    properties: {
+      azureFile: {
+        accountName: stateAccountName
+        accountKey: stateStorage!.listKeys().keys[0].value
+        shareName: stateShareName
+        // 書き込む（記事の選択状態とジョブ表）
+        accessMode: 'ReadWrite'
+      }
+    }
+  }
+
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: 'id-${take(envSlug, 40)}-${resourceToken}'
   location: location
@@ -190,32 +268,48 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       ]
       // キーはここに入れ、env からは secretRef で参照する。
       // env に直接書くと `az containerapp show` の出力に平文で出る。
-      secrets: [
-        {
-          name: 'azure-openai-api-key'
-          value: scriptApiKey
-        }
-        {
-          name: 'azure-openai-image-api-key'
-          value: imageApiKey
-        }
-        {
-          name: 'azure-speech-api-key'
-          value: speechApiKey
-        }
-      ]
+      secrets: concat(
+        [
+          {
+            name: 'azure-openai-api-key'
+            value: scriptApiKey
+          }
+          {
+            name: 'azure-openai-image-api-key'
+            value: imageApiKey
+          }
+          {
+            name: 'azure-speech-api-key'
+            value: speechApiKey
+          }
+        ],
+        empty(authClientId)
+          ? []
+          : [
+              {
+                name: 'auth-client-secret'
+                value: authClientSecret
+              }
+            ]
+      )
     }
     template: {
       containers: [
         {
-          // 初回は azd が実イメージに差し替える。
-          // それまでは起動しないプレースホルダで構わない。
           name: 'web'
-          image: 'mcr.microsoft.com/k8se/quickstart:latest'
+          image: containerImage
           resources: {
             cpu: json(cpu)
             memory: memory
           }
+          volumeMounts: empty(stateAccountName)
+            ? []
+            : [
+                {
+                  volumeName: 'state'
+                  mountPath: stateMountPath
+                }
+              ]
           env: [
             // --- AI サービス ---
             {
@@ -283,15 +377,45 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               value: identity.properties.clientId
             }
             {
+              name: 'NEWS_DATA_DIR'
+              value: '${stateMountPath}/news'
+            }
+            {
+              // ジョブ表は**マウントの外**（コンテナのローカルディスク）に置く。
+              //
+              // Azure Files（SMB）の上の SQLite は使えなかった。journal_mode を
+              // DELETE にしても CREATE TABLE で固まり、リビジョンが
+              // Activating のまま起動しない（同じイメージでローカルディスクに
+              // 向けると25秒で起動する、という切り分けまで実測した）。
+              //
+              // 引き換えに、リビジョン更新や再起動でジョブの履歴と実行待ちは
+              // 消える。記事の選択状態（共有に置いた JSON）は残るので、
+              // 選び直しは要らない。ジョブまで永続化したいなら
+              // DATABASE_URL を PostgreSQL に向ける。
+              name: 'DATABASE_URL'
+              value: 'sqlite:////app/state/newsvideo.db'
+            }
+            {
               name: 'WEB_HOST'
               value: '0.0.0.0'
             }
           ]
         }
       ]
+      // 状態の置き場所。マウントしないと、リビジョン更新のたびに
+      // 記事の選択状態と実行中のジョブが消える。
+      volumes: empty(stateAccountName)
+        ? []
+        : [
+            {
+              name: 'state'
+              storageType: 'AzureFile'
+              storageName: envStorage!.name
+            }
+          ]
       scale: {
-        // 進捗はジョブ表に持つようになったが、その DB が
-        // コンテナ内の SQLite ファイルなのでレプリカ間で共有されない。
+        // 進捗はジョブ表に持つようになったが、その DB は
+        // コンテナのローカルディスク上の SQLite なので共有されない。
         // DATABASE_URL を共有 DB（PostgreSQL）に向けるまでは 1 に固定する。
         minReplicas: 1
         maxReplicas: 1
@@ -302,6 +426,67 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     acrPull
   ]
 }
+
+// Container Apps 組み込みの認証（EasyAuth）。
+// アプリのコードには一切手を入れず、ingress の手前で止める。
+resource auth 'Microsoft.App/containerApps/authConfigs@2024-03-01' =
+  if (!empty(authClientId)) {
+    parent: containerApp
+    name: 'current'
+    properties: {
+      platform: {
+        enabled: true
+      }
+      globalValidation: {
+        // 未認証のリクエストはログインへ飛ばす。
+        // 「認証は任意」にすると無認証で全ルートが叩けるままになる。
+        unauthenticatedClientAction: 'RedirectToLoginPage'
+        redirectToProvider: 'azureactivedirectory'
+      }
+      identityProviders: {
+        azureActiveDirectory: {
+          enabled: true
+          registration: {
+            clientId: authClientId
+            // 値そのものではなく、Container App の secrets の名前を指す
+            clientSecretSettingName: 'auth-client-secret'
+            openIdIssuer: 'https://login.microsoftonline.com/${authTenantId}/v2.0'
+          }
+          validation: {
+            allowedAudiences: [
+              'api://${authClientId}'
+            ]
+            defaultAuthorizationPolicy: empty(authAllowedPrincipalId)
+              ? null
+              : {
+                  // テナント内の全員ではなく、この objectId だけに許可する
+                  allowedPrincipals: {
+                    identities: [
+                      authAllowedPrincipalId
+                    ]
+                  }
+                }
+          }
+        }
+      }
+      login: {
+        // EasyAuth のトークンストアは無効にする。
+        //
+        // 有効にすると `SasUrlSettingName for BlobStorage must be set` で
+        // デプロイが失敗する（保存先の Blob に SAS URL を要求される）。
+        // 生成物用のストレージアカウントは共有キー認証を無効にしてあり
+        // SAS を作れないので、有効にするには別の置き場所が必要になる。
+        //
+        // そこまでする必要がない。ここでの認証は**入口を閉じる**ためだけで、
+        // 利用者のトークンでダウンストリームのAPIを呼ぶわけではない
+        // （YouTube のトークンはアプリ自身のもので、Blob の tokens
+        // コンテナに別途置いている）。セッションは認証クッキーで足りる。
+        tokenStore: {
+          enabled: false
+        }
+      }
+    }
+  }
 
 output registryLoginServer string = registry.properties.loginServer
 output registryName string = registry.name

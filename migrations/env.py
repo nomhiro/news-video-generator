@@ -63,11 +63,27 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _journal_mode() -> str:
+    """SQLite の journal_mode を決める。
+
+    アプリと同じ値にする必要がある。Azure Files（SMB）の上で WAL を
+    設定するとハングし、起動が終わらない（マイグレーションはアプリより
+    先に走るので、ここが WAL のままだと意味がない）。
+    """
+    injected = config.attributes.get("sqlite_journal_mode")
+    if injected:
+        return str(injected)
+
+    from config import Config
+
+    return Config.from_env().sqlite_journal_mode
+
+
 def run_migrations_online() -> None:
     """実際に接続して適用するモード。"""
     # アプリと同じ create_db_engine を使う。SQLite の PRAGMA（WAL 等）を
     # ここでも効かせたいため、素の engine_from_config は使わない。
-    engine = create_db_engine(_database_url())
+    engine = create_db_engine(_database_url(), _journal_mode())
 
     with engine.connect() as connection:
         context.configure(
