@@ -17,6 +17,26 @@ class VideoCompositionError(Exception):
     pass
 
 
+def _tail(text: str | None, limit: int = 2000) -> str:
+    """標準エラーの末尾だけを返す。
+
+    ffmpeg は進捗を1行ずつ stderr に出すため、全部残すと2万文字を超え、
+    UI に出したときに肝心のエラー行が埋もれる（実際に埋もれた）。
+
+    Args:
+        text: 標準エラー全体
+        limit: 残す文字数
+
+    Returns:
+        str: 末尾（切り詰めたことが分かる印を付ける）
+    """
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return f"...(前略 {len(text) - limit}文字)\n{text[-limit:]}"
+
+
 class VideoComposer:
     """FFmpegを使用して動画を合成するクラス。
 
@@ -29,6 +49,15 @@ class VideoComposer:
     AUDIO_BITRATE = "192k"
     CRF = 23
     PRESET = "medium"
+
+    # ffmpeg を諦めるまでの時間。
+    #
+    # エンコードは実時間より遅い。Container Apps の 1 vCPU では
+    # 1080x1920 / preset=medium が実測 0.4x speed だった。
+    # 以前の 300秒では、長尺（5分）を作ろうとすると必ずタイムアウトする。
+    # 長く取ると本当にハングしたときの発覚が遅れるが、ジョブのリース
+    # （15分・heartbeat で延長）が別に見張っている。
+    FFMPEG_TIMEOUT_SEC = 1800
 
     # テキストオーバーレイ設定
     TEXT_FONT_SIZE = 64  # 幅1080pxに収まるサイズ
@@ -545,21 +574,27 @@ class VideoComposer:
                 encoding="utf-8",
                 errors="replace",
                 check=True,
-                timeout=300,
+                timeout=self.FFMPEG_TIMEOUT_SEC,
             )
         except subprocess.CalledProcessError as e:
             # Cleanup temp files before raising
             for text_file in text_files:
                 text_file.unlink(missing_ok=True)
+            # 終了コードを必ず残す。負の値はシグナルで殺されたことを意味し
+            # （-9 なら OOM killer の可能性が高い）、stderr の内容だけでは
+            # 「エンコードの失敗」と区別できない。実際にコンテナ上で困った。
             raise VideoCompositionError(
-                f"FFmpegの実行に失敗しました:\nstdout: {e.stdout}\nstderr: {e.stderr}"
+                f"FFmpegの実行に失敗しました (終了コード {e.returncode}):\n"
+                f"stdout: {_tail(e.stdout)}\nstderr: {_tail(e.stderr)}"
             ) from e
         except subprocess.TimeoutExpired as e:
             # Cleanup temp files before raising
             for text_file in text_files:
                 text_file.unlink(missing_ok=True)
             # TimeoutExpired はタイムアウト値と部分出力を持つので連結して残す
-            raise VideoCompositionError("FFmpegの実行がタイムアウトしました") from e
+            raise VideoCompositionError(
+                f"FFmpegの実行が {self.FFMPEG_TIMEOUT_SEC}秒でタイムアウトしました"
+            ) from e
 
         # Cleanup text overlay temp files on success
         for text_file in text_files:

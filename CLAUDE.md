@@ -334,6 +334,46 @@ Starlette の `BackgroundTask` は非同期関数をイベントループ上で�
 後者は TestClient では書けない（TestClient はバックグラウンドタスクを
 リクエスト処理内で完了させてしまい、この状況を再現できない）。
 
+### クラウド（Container Apps）で動かす
+
+```bash
+azd env set DEPLOY_APP true
+azd provision      # インフラ（ACR / Container Apps 環境 / Container App）
+azd deploy         # イメージのビルド・push・リビジョン更新
+azd down           # 破棄（課金を止める）
+```
+
+`azd deploy` には Docker が動いている必要がある（イメージをローカルで
+ビルドして ACR に push する）。
+
+実際に踏んだ落とし穴。
+
+- **`migrations/` と `alembic.ini` をイメージに入れる。** 起動時に
+  `alembic upgrade head` を走らせているので、無いと
+  `CommandError: Path doesn't exist: /app/migrations` で**起動に失敗する**。
+  ローカルには常にあるため、コンテナに載せたときだけ露見した。
+  `tests/test_container_image.py` が Dockerfile の COPY を検査している。
+- **初回の `azd provision` は MSI の伝播レースで失敗することがある。**
+  `IdentityDoesNotExist ... No managed service identities are associated with
+  resource .../containerApps/...` が出たら、そのまま再実行すれば通る。
+  ユーザー割り当て ID の作成直後に Container App がそれを参照するため。
+- **`AZURE_CONTAINER_REGISTRY_ENDPOINT` を output に出す。** 無いと
+  `azd deploy` が push 先を決められず
+  `could not determine container registry endpoint` で止まる。
+- **1 vCPU では ffmpeg が異常終了した。** 1080x1920 / preset=medium の
+  エンコードが 0.4x speed しか出ず、終了コード付きで落ちた。2 vCPU / 4Gi に
+  上げて完走している。consumption プロファイルは CPU:メモリ = 1:2 の
+  組み合わせしか受け付けない。
+- **キーは `@secure()` パラメータ → Container App の secrets → env の
+  `secretRef`** で渡す。env に直接書くと `az containerapp show` に平文で出る。
+  `@secure()` は ARM のデプロイ履歴にも残らない。
+- 台本生成の Azure OpenAI は azd の管理外（別プロジェクトの既存リソース）
+  なので、`azd env set AZURE_OPENAI_ENDPOINT/...` で値を渡す必要がある。
+
+**minReplicas = 1 なので、動かしている間は常に課金される。**
+使わないときは `azd down` で破棄する（ストレージの生成物も消えるので、
+必要なものは先に取り出す）。
+
 ### コンテナで動かすときの前提
 
 ```bash

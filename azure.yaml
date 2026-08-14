@@ -1,13 +1,14 @@
 # Azure Developer CLI の設定。
 # スキーマ: https://github.com/Azure/azure-dev/blob/main/schemas/v1.0/azure.yaml.json
 #
-# このアプリはローカル実行のツールなので、今は `azd provision` で
-# インフラ（AI Foundry と gpt-image-2 デプロイ）だけを管理する。
+# `azd provision` はインフラ（AI Foundry / Speech / Storage）を、
+# `azd deploy` はイメージのビルドと Container Apps への反映を行う。
 #
-# 将来 Azure 上で動かすためのホスティング定義も infra/ に書いてあるが、
-# `deployApp` パラメータで既定無効にしている。Dockerfile を実機で
-# 検証できていない状態で Container Apps を払い出すと、動かないリソースに
-# 課金が発生するため。検証後に `azd env set DEPLOY_APP true` で有効化する。
+# ホスティングは `deployApp` パラメータで切り替える。既定は false で、
+# その状態では下の service 定義に対応する Container App が存在しないため
+# `azd deploy` は失敗する。有効化する手順:
+#   azd env set DEPLOY_APP true
+#   azd up
 name: news-video-generator
 metadata:
   template: news-video-generator@0.1.0
@@ -16,6 +17,16 @@ infra:
   provider: bicep
   path: infra
   module: main
+
+services:
+  # Container App 側は 'azd-service-name: web' タグでこの service と対応する。
+  web:
+    project: .
+    language: docker
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+      context: .
 
 hooks:
   postprovision:

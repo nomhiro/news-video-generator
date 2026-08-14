@@ -19,6 +19,21 @@
     },
     "deployApp": {
       "value": "${DEPLOY_APP=false}"
+    },
+    "scriptEndpoint": {
+      "value": "${AZURE_OPENAI_ENDPOINT=}"
+    },
+    "scriptDeployment": {
+      "value": "${AZURE_OPENAI_DEPLOYMENT=gpt-5.1}"
+    },
+    "scriptApiKey": {
+      "value": "${AZURE_OPENAI_API_KEY=}"
+    },
+    "imageApiKey": {
+      "value": "${AZURE_OPENAI_IMAGE_API_KEY=}"
+    },
+    "speechApiKey": {
+      "value": "${AZURE_SPEECH_API_KEY=}"
     }
   }
 }

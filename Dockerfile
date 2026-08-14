@@ -61,6 +61,17 @@ COPY --chown=app:app src/ ./src/
 COPY --chown=app:app templates/ ./templates/
 COPY --chown=app:app static/ ./static/
 
+# DB マイグレーション。
+# 起動時に `alembic upgrade head` を走らせる（src/storage/schema.py）ので、
+# **これが無いと起動に失敗する**。実際に踏んだ:
+#   alembic.util.exc.CommandError: Path doesn't exist: /app/migrations
+# ローカルでは常に存在するため、コンテナに載せたときだけ露見する。
+COPY --chown=app:app alembic.ini ./
+COPY --chown=app:app migrations/ ./migrations/
+
+# 運用スクリプト（トークンの移送など）。
+COPY --chown=app:app scripts/ ./scripts/
+
 # 生成物とニュースデータの置き場所。
 # クラウドでは Blob Storage 等に移す前提だが、それまではコンテナ内に持つ。
 RUN mkdir -p /app/output/audio /app/output/images /app/output/videos /app/output/scripts \

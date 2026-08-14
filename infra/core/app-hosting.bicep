@@ -52,12 +52,50 @@ param artifactContainerName string = 'artifacts'
 @description('OAuth トークンを置く Blob コンテナ名')
 param tokenContainerName string = 'tokens'
 
-@description('Container App に渡す CPU コア数')
-param cpu string = '1.0'
+// --- アプリが必要とする設定 ---
+//
+// キーは @secure() で受け、Container App の secrets に入れて
+// secretRef で参照する。@secure() のパラメータは ARM のデプロイ履歴に
+// 記録されないので、平文が残る経路が無い。
+// （出力に混ぜると履歴に残る。だから output にはしない。）
+
+@description('台本生成の Azure OpenAI エンドポイント')
+param scriptEndpoint string
+
+@description('台本生成モデルのデプロイ名')
+param scriptDeployment string
+
+@secure()
+@description('台本生成の API キー')
+param scriptApiKey string
+
+@description('画像生成のエンドポイント（台本生成と別リソース）')
+param imageEndpoint string
+
+@description('画像生成モデルのデプロイ名')
+param imageDeployment string
+
+@secure()
+@description('画像生成の API キー')
+param imageApiKey string
+
+@description('音声合成のリージョン')
+param speechRegion string
+
+@secure()
+@description('音声合成の API キー')
+param speechApiKey string
+
+@description('''Container App に渡す CPU コア数。
+1.0 では ffmpeg のエンコードが 0.4x speed しか出ず、実測で ffmpeg が
+異常終了した（1080x1920 / preset=medium）。
+consumption プロファイルは CPU:メモリ = 1:2 の組み合わせしか受け付けない
+（0.25/0.5Gi, 0.5/1Gi, 1/2Gi, 2/4Gi, 4/8Gi）。''')
+param cpu string = '2.0'
 
 @description('''Container App に渡すメモリ。
-ffmpeg のエンコードと画像の同時保持があるため 2Gi を下限にしている。''')
-param memory string = '2Gi'
+ffmpeg のエンコードと画像の同時保持があるため、CPU の2倍を確保する。''')
+param memory string = '4Gi'
 
 // ログ。Container Apps 環境は Log Analytics を要求する。
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -150,6 +188,22 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           identity: identity.id
         }
       ]
+      // キーはここに入れ、env からは secretRef で参照する。
+      // env に直接書くと `az containerapp show` の出力に平文で出る。
+      secrets: [
+        {
+          name: 'azure-openai-api-key'
+          value: scriptApiKey
+        }
+        {
+          name: 'azure-openai-image-api-key'
+          value: imageApiKey
+        }
+        {
+          name: 'azure-speech-api-key'
+          value: speechApiKey
+        }
+      ]
     }
     template: {
       containers: [
@@ -162,9 +216,43 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json(cpu)
             memory: memory
           }
-          // 生成物の保存先。キーではなくマネージド ID で認証するため、
-          // シークレットは含まれない（AZURE_CLIENT_ID は公開情報）。
           env: [
+            // --- AI サービス ---
+            {
+              name: 'AZURE_OPENAI_ENDPOINT'
+              value: scriptEndpoint
+            }
+            {
+              name: 'AZURE_OPENAI_API_KEY'
+              secretRef: 'azure-openai-api-key'
+            }
+            {
+              name: 'AZURE_OPENAI_DEPLOYMENT'
+              value: scriptDeployment
+            }
+            {
+              name: 'AZURE_OPENAI_IMAGE_ENDPOINT'
+              value: imageEndpoint
+            }
+            {
+              name: 'AZURE_OPENAI_IMAGE_API_KEY'
+              secretRef: 'azure-openai-image-api-key'
+            }
+            {
+              name: 'AZURE_OPENAI_IMAGE_DEPLOYMENT'
+              value: imageDeployment
+            }
+            {
+              name: 'AZURE_SPEECH_API_KEY'
+              secretRef: 'azure-speech-api-key'
+            }
+            {
+              name: 'AZURE_SPEECH_REGION'
+              value: speechRegion
+            }
+            // --- 生成物とトークンの保存先 ---
+            // こちらはマネージド ID で認証するのでシークレットが無い
+            // （AZURE_CLIENT_ID は公開情報）。
             {
               name: 'ARTIFACT_STORE'
               value: empty(artifactAccountUrl) ? 'local' : 'blob'

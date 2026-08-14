@@ -66,6 +66,32 @@ param deployApp bool = false
 @description('リソースへのデータ面アクセスを与える principal（自分の objectId）。省略時は RBAC を割り当てない')
 param principalId string = ''
 
+// --- アプリを動かすための設定（deployApp のときだけ使う） ---
+//
+// 台本生成の Azure OpenAI は azd の管理外（別プロジェクトの既存リソース）
+// なので、値を渡してもらう必要がある。画像生成と音声合成のキーは
+// postprovision フックが azd env に入れたものを受け取る。
+//
+// キーは @secure()。ARM のデプロイ履歴に平文で残らない。
+
+@description('台本生成の Azure OpenAI エンドポイント（deployApp のとき必須）')
+param scriptEndpoint string = ''
+
+@description('台本生成モデルのデプロイ名')
+param scriptDeployment string = 'gpt-5.1'
+
+@secure()
+@description('台本生成の API キー（deployApp のとき必須）')
+param scriptApiKey string = ''
+
+@secure()
+@description('画像生成の API キー（deployApp のとき必須）')
+param imageApiKey string = ''
+
+@secure()
+@description('音声合成の API キー（deployApp のとき必須）')
+param speechApiKey string = ''
+
 // azd の慣習に合わせたタグ。azd がリソースを環境に紐付けるのに使う。
 var tags = {
   'azd-env-name': environmentName
@@ -170,6 +196,14 @@ module appHosting 'core/app-hosting.bicep' = if (deployApp) {
     artifactAccountUrl: storageAccountUrl
     artifactContainerName: artifactContainerName
     tokenContainerName: tokenContainerName
+    scriptEndpoint: scriptEndpoint
+    scriptDeployment: scriptDeployment
+    scriptApiKey: scriptApiKey
+    imageEndpoint: aiFoundry.outputs.endpoint
+    imageDeployment: aiFoundry.outputs.imageDeploymentName
+    imageApiKey: imageApiKey
+    speechRegion: speech.outputs.region
+    speechApiKey: speechApiKey
   }
 }
 
@@ -196,3 +230,13 @@ output AZURE_SPEECH_ACCOUNT_NAME string = speech.outputs.accountName
 output AZURE_SPEECH_REGION string = speech.outputs.region
 
 output APP_HOSTING_DEPLOYED bool = deployApp
+
+// azd deploy がイメージの push 先を知るために読む値。
+// 出力していないと "could not determine container registry endpoint" で失敗する。
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = deployApp
+  ? appHosting!.outputs.registryLoginServer
+  : ''
+output AZURE_CONTAINER_APP_NAME string = deployApp ? appHosting!.outputs.containerAppName : ''
+output SERVICE_WEB_ENDPOINT_URL string = deployApp
+  ? 'https://${appHosting!.outputs.containerAppFqdn}'
+  : ''
