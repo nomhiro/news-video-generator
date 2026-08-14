@@ -592,8 +592,22 @@ class VideoComposer:
             except VideoCompositionError as e:
                 log_error(f"テキストオーバーレイをスキップ: {e}")
 
-        # Build FFmpeg command
-        cmd = [
+        # --- 2段構えにする理由 ---
+        #
+        # 以前は「画像 + 音声 → 出力」を1回の ffmpeg で行っていた。これが
+        # 長尺（1920x1080 / 341秒）でメモリを食い潰し、OOM killer に
+        # 殺されていた（終了コード -9）。
+        #
+        # ローカルで 2 vCPU / 4Gi の制限を与えて再現したところ、
+        # エンコード速度は 1.04x 出ているのに **出力サイズが
+        # 数百フレームぶん変化しない**まま、子プロセスのピーク RSS が
+        # 4,077MB に達して落ちた。マクサーが書き出さずに映像パケットを
+        # 溜め込んでいる（stderr の "buffers queued in out_#0:0" と一致）。
+        #
+        # そこで、映像だけを作る第1段と、音声を混ぜる第2段に分ける。
+        # 第2段は `-c copy` で再エンコードしないため、溜め込む対象が無い。
+        silent_path = output_path.with_name(f"{output_path.stem}_silent.mp4")
+        video_cmd = [
             "ffmpeg",
             "-y",
             "-f",
@@ -602,8 +616,8 @@ class VideoComposer:
             "0",
             "-i",
             str(filelist_path),
-            "-i",
-            str(audio_path),
+            # 音声はこの段では扱わない
+            "-an",
             "-vf",
             video_filter,
             "-c:v",
@@ -612,15 +626,14 @@ class VideoComposer:
             self.PRESET,
             "-crf",
             str(self.CRF),
-            "-c:a",
-            self.AUDIO_CODEC,
-            "-b:a",
-            self.AUDIO_BITRATE,
-            "-shortest",
             "-pix_fmt",
             "yuv420p",
             "-r",
             str(self.FRAME_RATE),
+            # 映像の長さは音声に合わせる。concat の最後の画像は
+            # 尺を持たないため、指定しないと1フレームで終わる。
+            "-t",
+            f"{audio_duration:.3f}",
             # スレッド数を割り当て CPU 数に合わせる。
             #
             # 既定（0 = 自動）だと ffmpeg はホストのコア数だけスレッドを
@@ -630,15 +643,34 @@ class VideoComposer:
             # （実測: 長尺 1920x1080 / 307秒 が 終了コード -9 で落ちた）。
             "-threads",
             str(_available_cpus()),
+            str(silent_path),
+        ]
+
+        # 第2段: 音声を混ぜるだけ。映像は再エンコードしない。
+        mux_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(silent_path),
+            "-i",
+            str(audio_path),
+            "-c:v",
+            "copy",
+            "-c:a",
+            self.AUDIO_CODEC,
+            "-b:a",
+            self.AUDIO_BITRATE,
+            "-shortest",
             str(output_path),
         ]
 
         try:
             log_step(f"FFmpegフィルター: {video_filter[:200]}...", "🔧")
             log_step(f"FFmpegスレッド数: {_available_cpus()}", "🧵")
+            log_step("映像を作成中（音声なし）...", "🎞️")
             # check=True なので失敗時は例外になる。戻り値は使わない。
             subprocess.run(
-                cmd,
+                video_cmd,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -646,10 +678,22 @@ class VideoComposer:
                 check=True,
                 timeout=self.FFMPEG_TIMEOUT_SEC,
             )
+            log_step("音声を多重化中（映像は再エンコードしない）...", "🔉")
+            subprocess.run(
+                mux_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+                timeout=self.FFMPEG_TIMEOUT_SEC,
+            )
+            silent_path.unlink(missing_ok=True)
         except subprocess.CalledProcessError as e:
             # Cleanup temp files before raising
             for text_file in text_files:
                 text_file.unlink(missing_ok=True)
+            silent_path.unlink(missing_ok=True)
             # 終了コードを必ず残す。負の値はシグナルで殺されたことを意味し
             # （-9 なら OOM killer の可能性が高い）、stderr の内容だけでは
             # 「エンコードの失敗」と区別できない。実際にコンテナ上で困った。
@@ -661,6 +705,7 @@ class VideoComposer:
             # Cleanup temp files before raising
             for text_file in text_files:
                 text_file.unlink(missing_ok=True)
+            silent_path.unlink(missing_ok=True)
             # TimeoutExpired はタイムアウト値と部分出力を持つので連結して残す
             raise VideoCompositionError(
                 f"FFmpegの実行が {self.FFMPEG_TIMEOUT_SEC}秒でタイムアウトしました"
