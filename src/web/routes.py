@@ -860,20 +860,6 @@ def _slot_sort_key(slot: dict[str, object]) -> datetime:
     return at
 
 
-def _today_jobs(jobs: JobRepository, start: datetime, end: datetime) -> list[GenerationJob]:
-    """今日投入された動画ジョブを返す。
-
-    `JobRepository` は日付で絞る専用のクエリを持たない（既存の用途が
-    「直近バッチ」だけだったため）。ここでは直近バッチから引いて
-    日付でフィルタする最小限の実装にとどめる。専用クエリが必要になったら
-    計測タスクで足す。
-    """
-    batch_id = jobs.latest_batch_id()
-    if batch_id is None:
-        return []
-    return [j for j in jobs.list_batch(batch_id) if start <= j.created_at < end]
-
-
 @router.get("/x/band", response_class=HTMLResponse)
 async def x_band(
     request: Request,
@@ -897,7 +883,12 @@ async def x_band(
         for post in posts.list_upcoming(limit=40)
         + posts.list_posted_between(day_start_utc, day_end_utc)
     ]
-    job_slots = [_to_job_slot(job, zone) for job in _today_jobs(jobs, day_start_utc, day_end_utc)]
+    # `latest_batch_id()` + `list_batch()` は直近1バッチしか見ない。
+    # 同じ日に複数バッチが走ると早い方の動画が帯から消え、進行中の
+    # クォータ衝突が見えなくなる。投入時刻の範囲で直接絞る。
+    job_slots = [
+        _to_job_slot(job, zone) for job in jobs.list_jobs_between(day_start_utc, day_end_utc)
+    ]
 
     return templates.TemplateResponse(
         request,

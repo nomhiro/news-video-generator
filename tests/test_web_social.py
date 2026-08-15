@@ -15,6 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from src.models.job import GenerationJob, JobStatus
 from src.models.social import PostKind, PostStatus, SocialPost
 from src.web import routes
 from src.web.dependencies import (
@@ -24,6 +25,32 @@ from src.web.dependencies import (
     get_token_store,
     get_x_switch,
 )
+
+
+def _job(
+    job_id: int,
+    batch_id: str,
+    status: JobStatus,
+    created_at: datetime,
+    article_title: str = "動画記事",
+) -> GenerationJob:
+    return GenerationJob(
+        id=job_id,
+        batch_id=batch_id,
+        article_id=f"a-{job_id}",
+        article_title=article_title,
+        video_format="short",
+        language="ja",
+        status=status,
+        attempts=1,
+        error_message=None,
+        video_key=None,
+        created_at=created_at,
+        started_at=created_at,
+        finished_at=None,
+        worker_id="w",
+        lease_expires_at=None,
+    )
 
 
 def _post(
@@ -99,13 +126,18 @@ class FakeSwitch:
 
 
 class FakeJobs:
-    """帯には今日の動画ジョブも並ぶが、この画面テストでは空でよい。"""
+    """`JobRepository` の読み取り面だけを差し替える。
 
-    def latest_batch_id(self) -> str | None:
-        return None
+    帯は `list_jobs_between` で当日の全ジョブを取る（`latest_batch_id` +
+    `list_batch` には依存しない）。同日に複数バッチが走っても、
+    早いバッチのジョブが見えなくなってはいけない。
+    """
 
-    def list_batch(self, batch_id: str) -> list[object]:
-        return []
+    def __init__(self, jobs: list[GenerationJob] | None = None) -> None:
+        self._jobs = jobs or []
+
+    def list_jobs_between(self, start: datetime, end: datetime) -> list[GenerationJob]:
+        return [j for j in self._jobs if start <= j.created_at < end]
 
 
 class FakeConfig:
@@ -229,3 +261,37 @@ def test_取り消すと結果が取り消しましたになる(
     assert response.status_code == 200
     assert "取り消しました" in response.text
     assert fake_posts.failed == [(1, "取り消しました")]
+
+
+def test_帯には早いバッチの動画も含めて今日の全ジョブが出る(
+    fake_posts: FakeSocialPosts, fake_switch: FakeSwitch
+) -> None:
+    """`latest_batch_id()` + `list_batch()` では直近1バッチしか見えない。
+
+    同じ日に2バッチ走ったとき、早いバッチの動画が帯から消えると、
+    「いま画像生成クォータを取り合っている」ことが画面から分からなくなる。
+    2バッチぶんのジョブを渡し、両方が帯に出ることを確かめる。
+    """
+    # 現在時刻の近傍に固定する（日付境界をまたぐと today のフィルタで
+    # 落ちてテストが不安定になるため、ずらす量は小さくする）。
+    now = datetime.now(UTC)
+    older_batch = _job(
+        1, "batch-old", JobStatus.SUCCEEDED, now - timedelta(minutes=30), "早いバッチの記事"
+    )
+    newer_batch = _job(
+        2, "batch-new", JobStatus.RUNNING, now - timedelta(minutes=5), "新しいバッチの記事"
+    )
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_posts] = lambda: fake_posts
+    app.dependency_overrides[get_x_switch] = lambda: fake_switch
+    app.dependency_overrides[get_config] = lambda: FakeConfig()
+    app.dependency_overrides[get_jobs] = lambda: FakeJobs([older_batch, newer_batch])
+    app.dependency_overrides[get_token_store] = lambda: FakeTokenStore()
+
+    with TestClient(app) as client:
+        body = client.get("/x/band").text
+
+    assert "早いバッチの記事" in body
+    assert "新しいバッチの記事" in body

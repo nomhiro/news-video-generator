@@ -341,6 +341,58 @@ def test_batch_progress_from_empty_jobs() -> None:
 
 
 # --------------------------------------------------------------------------
+# 期間での取得（画面の帯用）
+# --------------------------------------------------------------------------
+
+
+def test_list_jobs_between_finds_a_job_inside_the_window(repository: JobRepository) -> None:
+    """範囲内に投入されたジョブが返ること。"""
+    repository.enqueue_batch(ARTICLES[:1], video_format="short")
+    job = repository.get(1)
+    assert job is not None
+
+    start = job.created_at - timedelta(minutes=1)
+    end = job.created_at + timedelta(minutes=1)
+
+    found = repository.list_jobs_between(start, end)
+    assert [j.article_id for j in found] == ["a-1"]
+
+
+def test_list_jobs_between_excludes_a_job_outside_the_window(repository: JobRepository) -> None:
+    """範囲外のジョブは返らないこと。"""
+    repository.enqueue_batch(ARTICLES[:1], video_format="short")
+    job = repository.get(1)
+    assert job is not None
+
+    # 範囲を投入時刻より後にずらす
+    start = job.created_at + timedelta(hours=1)
+    end = job.created_at + timedelta(hours=2)
+
+    assert repository.list_jobs_between(start, end) == []
+
+
+def test_list_jobs_between_spans_multiple_batches(repository: JobRepository) -> None:
+    """複数バッチに分かれていても、範囲内なら全部返ること。
+
+    `latest_batch_id()` + `list_batch()` は直近1バッチしか見ないため、
+    同じ日に2バッチ走ると早い方が見えなくなる（帯が実際の状況と
+    ずれる原因になっていた）。
+    """
+    repository.enqueue_batch([ARTICLES[0]], video_format="short")
+    repository.enqueue_batch([ARTICLES[1]], video_format="short")
+
+    first = repository.get(1)
+    second = repository.get(2)
+    assert first is not None and second is not None
+
+    start = min(first.created_at, second.created_at) - timedelta(minutes=1)
+    end = max(first.created_at, second.created_at) + timedelta(minutes=1)
+
+    found = {j.article_id for j in repository.list_jobs_between(start, end)}
+    assert found == {"a-1", "a-2"}
+
+
+# --------------------------------------------------------------------------
 # ワーカーのループ
 # --------------------------------------------------------------------------
 

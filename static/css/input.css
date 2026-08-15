@@ -39,7 +39,21 @@
     font-variant-numeric: tabular-nums;
 }
 
-/* 「いま」の線。動くのはここだけ */
+/*
+ * 「いま」の線。動くのはここだけ。
+ *
+ * この画面は「見ている間に何が出るか」を確認するためのもので、
+ * 静止した画面と最新の画面が見た目上区別できない。ポーリングごとに
+ * 線が滑って動くこと自体が「これは今のデータだ」という唯一の signal
+ * になる。位置が瞬間的に飛ぶだけでは気付きにくいので transition を
+ * 明示する（速すぎるとジャンプに見え、遅すぎると次のポーリングに
+ * 追いつかず不自然に見えるため60秒周期のポーリングに対して十分遅い
+ * 値にしている）。
+ */
+.now-marker {
+    transition: left 1.2s ease-in-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
     .now-marker {
         transition: none;

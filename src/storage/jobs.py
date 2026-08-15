@@ -400,6 +400,30 @@ class JobRepository:
             ).first()
             return found is not None
 
+    def list_jobs_between(self, start: datetime, end: datetime) -> list[GenerationJob]:
+        """期間内に投入されたジョブを、投入時刻の範囲で直接返す。
+
+        `latest_batch_id()` + `list_batch()` は「直近1バッチ」しか返さない。
+        同じ日に複数バッチが走ると、早いバッチの動画が見えなくなる。
+        画面の時間軸は「今日ちょうど走っているものすべて」を見せる必要が
+        あるため、バッチではなく `created_at` で直接絞る。
+        `SocialPostRepository.list_posted_between` と同じ形にしている。
+
+        Args:
+            start: 期間の開始（UTC aware）
+            end: 期間の終わり（UTC aware、含まない）
+
+        Returns:
+            list[GenerationJob]: 投入時刻順のジョブ
+        """
+        with session_scope(self._sessions) as session:
+            records = session.scalars(
+                select(JobRecord)
+                .where(JobRecord.created_at >= start, JobRecord.created_at < end)
+                .order_by(JobRecord.created_at, JobRecord.id)
+            ).all()
+            return [_to_domain(r) for r in records]
+
     def count_by_status(self) -> dict[JobStatus, int]:
         """状態ごとの件数。運用時の確認用。"""
         with session_scope(self._sessions) as session:

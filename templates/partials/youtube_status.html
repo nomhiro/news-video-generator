@@ -1,27 +1,26 @@
 <!-- YouTube認証状態 -->
 {% if is_authenticated %}
-<div class="flex items-center gap-2 text-green-600">
-    <span class="text-lg">✅</span>
+<div class="flex items-center gap-2 text-teal">
     <span class="text-sm font-medium">YouTube連携済み</span>
 </div>
 {% if auth_message %}
-<p class="text-xs text-green-500 mt-1">{{ auth_message }}</p>
+<p class="text-xs text-teal mt-1">{{ auth_message }}</p>
 {% endif %}
 {% else %}
 <div class="flex items-center gap-2">
-    <span class="text-lg">🔓</span>
-    <span class="text-sm text-gray-500">YouTube未連携</span>
+    <span class="text-sm text-ink/50">YouTube未連携</span>
 </div>
 {% if auth_message %}
-<p class="text-xs text-red-500 mt-1">{{ auth_message }}</p>
+<p class="text-xs text-vermilion mt-1">{{ auth_message }}</p>
 {% endif %}
 <button
     hx-post="/youtube/auth"
     hx-target="#youtube-status"
     hx-swap="innerHTML"
     hx-indicator="#youtube-auth-indicator"
-    class="mt-2 bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-medium
-           hover:bg-red-700 transition-colors flex items-center gap-2"
+    class="mt-2 px-4 py-2 rounded border border-ink/20 text-sm font-medium
+           hover:bg-ink/5 transition-colors flex items-center gap-2
+           focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal"
 >
     <span id="youtube-auth-indicator" class="htmx-indicator">
         <svg class="w-4 h-4 spinner" fill="none" viewBox="0 0 24 24">
