@@ -166,7 +166,16 @@ uv run pytest -m live                           # 実APIを叩く（課金あり
 ```
 
 `pytest` は既定で `slow` と `live` を除外するため、外部サービスも ffmpeg も不要で走る。
-CI（`.github/workflows/ci.yml`）もこの既定で動く。
+
+lint / 型 / テストは **push 前にローカルで走る**（`.githooks/pre-push`）。
+clone した直後は効かないので、一度だけ有効化する。
+
+```bash
+git config core.hooksPath .githooks
+```
+
+GitHub Actions は CD だけに使う（`.github/workflows/deploy.yml`）。
+`main` へのマージで Container Apps に反映される。
 
 ### CSS
 
@@ -180,7 +189,7 @@ npm run build:css
 `static/css/app.css` は生成物だがコミットしてある。**アプリの実行に Node は不要**。
 CDN を使わない理由は [`CLAUDE.md`](CLAUDE.md) に書いてある。
 
-CI には週次の cron ジョブがあり、使用中の AI モデルが廃止予定に近づくと失敗する。
+使用中の AI モデルが廃止予定に近づくと `tests/test_model_registry.py` が失敗する。
 使用モデルは `src/model_registry.py` に集約されている。
 
 プロジェクト固有の注意点（デプロイ名とモデル名の違い、画像の生成解像度が

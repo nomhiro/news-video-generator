@@ -1,0 +1,45 @@
+#!/bin/sh
+# push 前のチェック。GitHub Actions は CD だけに使うため、lint / 型 / テストは
+# ここが唯一の自動実行経路になっている（Issue #15）。
+#
+# 有効化（clone した直後は効かない）:
+#     git config core.hooksPath .githooks
+#
+# Claude Code の hook（.claude/hooks/）はセッション内しか効かないので、
+# `git push` からの経路を塞ぐには git 側にも置く必要がある。
+#
+# これは門番ではない。`--no-verify` で飛ばせるし、PR に対しては何も走らない。
+set -e
+
+# slow テストは ffmpeg が無いと pytest.skip で静かに飛ぶ
+# （tests/test_video_compose_slow.py の ffmpeg_available フィクスチャ）。
+# hook の PATH は push を起動したプロセス（IDE や GUI クライアント）から
+# 継承されるので、ターミナルでは通って GUI では skip という差が出る。
+# 「走ったつもりで skip されていた」を防ぐため、先にここで落とす。
+command -v ffmpeg >/dev/null 2>&1 || {
+	echo "pre-push: ffmpeg が PATH にありません（-m slow が静かに skip されます）" >&2
+	exit 1
+}
+command -v ffprobe >/dev/null 2>&1 || {
+	echo "pre-push: ffprobe が PATH にありません（-m slow が静かに skip されます）" >&2
+	exit 1
+}
+
+# ロックファイルの更新漏れを検出する。pyproject.toml を触って uv.lock を
+# 更新していないと落ちる。
+#
+# `uv sync --frozen` ではなく `uv lock --check` にしている。sync は .venv を
+# 書き換えるため、Windows で開発サーバ（uv run web_app.py）を上げたまま push すると
+# `Access is denied (os error 5)` で push できなくなる。checkout も剪定も要らず、
+# 見たいのは「lock が pyproject と一致しているか」だけ。
+# .venv 自体は後続の `uv run` が lock に合わせて同期する。
+uv lock --check
+
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+
+# 既定の addopts は slow / live を除外する。コマンドラインの -m が addopts の -m を
+# 上書きするので、ここでは slow（実 ffmpeg）を含めて live だけを外す。
+# live は実 API を叩いて課金が発生するため push 前には走らせない。
+uv run pytest -m "not live"

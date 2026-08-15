@@ -5,7 +5,9 @@
 動作していなかった。使用中のモデルが停止済みだったのに、誰も
 気付く仕組みがなかった。
 
-`test_no_active_model_needs_attention` が本体で、CI の週次実行でも走る。
+`test_no_active_model_needs_attention` が本体。日付の経過だけで失敗しうる唯一の
+テストで、走る契機は push 前の hook（.githooks/pre-push）だけになっている
+（Actions を CD 専用にしたときに週次 cron を外した。Issue #15）。
 """
 
 from datetime import date, timedelta

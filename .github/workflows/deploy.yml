@@ -1,0 +1,105 @@
+name: Deploy
+
+# Actions はこの1本だけ。lint / 型 / テストはローカルの pre-push
+# （.githooks/pre-push）に寄せてある（Issue #15）。
+on:
+  push:
+    branches: ["main"]
+    # イメージに入らないもの（.dockerignore で除外している）は再デプロイしない。
+    # デプロイごとにコンテナが再起動し、ジョブ表（コンテナローカルの SQLite）が
+    # 消えるうえ、生成中なら途中で殺されるため、無駄な再起動を避ける。
+    paths-ignore:
+      - "**.md"
+      - "tests/**"
+      - "infra/**"
+      - ".claude/**"
+      - ".githooks/**"
+  # main 以外のブランチから実行すると OIDC の subject が変わり、login が失敗する。
+  workflow_dispatch:
+
+permissions:
+  id-token: write # Azure への OIDC。長期シークレットをリポジトリに置かないため
+  contents: read
+  packages: write # GHCR への push
+
+# 途中で切ると Container App が Activating のまま残るので、キャンセルはしない。
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # 生存確認のポーリングが詰まったときに既定の6時間回り続けないようにする。
+    timeout-minutes: 30
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+      APP: ${{ vars.AZURE_CONTAINER_APP_NAME }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve names
+        id: names
+        run: |
+          # レジストリは GHCR。イメージ名はリポジトリから決まるので設定は要らない。
+          tag="gh-${GITHUB_SHA::7}"
+          # 再実行（Re-run jobs）では run_number が変わらない。suffix が既存の
+          # リビジョンと衝突すると ACA に拒否されるので run_attempt も混ぜる。
+          suffix="gh${{ github.run_number }}-${{ github.run_attempt }}"
+          {
+            echo "image=ghcr.io/${{ github.repository }}:$tag"
+            echo "suffix=$suffix"
+            echo "revision=$APP--$suffix"
+          } >> "$GITHUB_OUTPUT"
+
+      # ランナー上の docker でビルドする。レジストリ側のビルド（ACR Tasks など）は
+      # 使えない。Dockerfile が `RUN --mount=type=cache` を使っており、これは
+      # BuildKit 専用構文で、quick build には BuildKit を有効にする口が無い。
+      #
+      # GITHUB_TOKEN はこの実行だけの短命なトークンで、長期シークレットではない。
+      - name: Build and push the image to GHCR
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+          docker build --tag "${{ steps.names.outputs.image }}" .
+          docker push "${{ steps.names.outputs.image }}"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # az containerapp は拡張機能。ランナーに入っていないと動的インストールの
+      # 確認プロンプトに当たって落ちるので、明示的に入れる。
+      - name: Install the containerapp extension
+        run: az extension add --name containerapp --upgrade --only-show-errors
+
+      # azd は呼ばない。azd provision は containerImage を
+      # main.parameters.json の既定（mcr.microsoft.com/k8se/quickstart:latest、
+      # 8080 待ち受け）に戻しうる。プローブが通らず Activating のまま残る
+      # （CLAUDE.md に記録済みの実害）。
+      #
+      # GHCR のパッケージは public なので pull 用の資格情報は渡さない。
+      #
+      # --no-wait にして待ちは次のステップに任せる。az の LRO ポーリングは
+      # サブスクリプションスコープの containerappOperationStatuses を読むため、
+      # 権限をリソース／リソースグループに絞ると失敗しうる。
+      - name: Update the container app
+        run: |
+          az containerapp update \
+            --name "$APP" --resource-group "$RG" \
+            --image "${{ steps.names.outputs.image }}" \
+            --revision-suffix "${{ steps.names.outputs.suffix }}" \
+            --no-wait \
+            --output none
+
+      - name: Wait for the new revision to take traffic
+        run: |
+          ./.github/scripts/wait_for_revision.sh \
+            "${{ steps.names.outputs.revision }}" \
+            "${{ steps.names.outputs.image }}"
