@@ -14,10 +14,19 @@ from src.social.card_visual import CardVisual
 class FakeNews:
     def __init__(self, articles: list[NewsArticle]) -> None:
         self._articles = articles
+        # 計画が記事を消費済みにしないことを確かめるために記録する。
+        # `SupportsArticlePicking` はこのメソッドを要求しないが、実物
+        # （`NewsAggregator`）は持っているので、うっかり呼ばれても
+        # 型検査では気付けない。
+        self.consumed: list[tuple[str, str]] = []
 
     def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
         assert channel == CHANNEL_X
         return self._articles[:needed]
+
+    def mark_consumed(self, article_id: str, channel: str) -> bool:
+        self.consumed.append((article_id, channel))
+        return True
 
 
 class FakePosts:
@@ -162,6 +171,22 @@ def test_記事ごとに時刻順で積む() -> None:
     assert len(plan.group_ids) == 4
     scheduled = [next(iter(times.values())) for _, times in posts.enqueued]
     assert scheduled == sorted(scheduled)
+
+
+def test_積んだ時点では記事を消費済みにしない() -> None:
+    """消費済みにするのは投稿できた後（`PostWorker.on_posted`）だけ。
+
+    積んだ時点で書くと、出せなかった記事（予定が遅れて見送られた・
+    送信が失敗した）を**二度と使えなくなる**。消費記録は Azure Files 上の
+    JSON でデプロイでも消えないため、間違って書くと手で直すしかない。
+    """
+    news = FakeNews([_article(s) for s in "abcd"])
+    posts = FakePosts()
+
+    plan = _plan(news, posts, FakeGenerator())
+
+    assert plan.enqueued is True  # 積んではいる
+    assert news.consumed == []
 
 
 def test_スイッチが無効なら何も積まない() -> None:

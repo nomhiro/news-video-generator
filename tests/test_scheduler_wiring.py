@@ -23,6 +23,7 @@ import pytest
 import src.web.dependencies as dependencies
 from config import Config
 from src.jobs.post_planner import DailyPostPlan
+from src.models.news import CHANNEL_X, NewsArticle, NewsCategory
 from src.social.card_visual import CardVisualGenerator
 from tests.test_config import REQUIRED_VALUES
 
@@ -87,6 +88,37 @@ def test_定期実行はplan_daily_postsに画像カードの5点セットを渡
         assert captured_kwargs["artifacts"] is context.artifact_store
         assert captured_kwargs["jobs"] is context.jobs
         assert captured_kwargs["output_dir"] == context.config.output_dir / "cards"
+    finally:
+        context.aggregator.close()
+
+
+def test_投稿ワーカーの_on_posted_が記事ストアに繋がっている(tmp_path: Path) -> None:
+    """`on_posted=` の配線を消してもテストが緑のままだった（I4）。
+
+    `post_due_once` 側のコールバック呼び出しは
+    `tests/test_post_worker.py` が見張っているが、それは
+    「渡されたものを呼ぶ」ことしか確認していない。`AppContext.build` が
+    渡すのを忘れると、記事は永久に未消費のまま**全記事が毎日再投稿される**。
+    ここでは実際のコールバックを呼んで、記事ストアに書かれることを見る。
+    """
+    context = dependencies.AppContext.build(_config(tmp_path))
+    try:
+        article = NewsArticle(
+            id=NewsArticle.generate_id("https://example.com/a"),
+            title="記事",
+            url="https://example.com/a",
+            source="Example",
+            category=NewsCategory.AI,
+        )
+        context.aggregator._save_category(NewsCategory.AI, [article])
+
+        callback = context.post_worker._on_posted
+        assert callback is not None, "on_posted が PostWorker に渡っていない"
+        callback(article.id)
+
+        reloaded = context.aggregator.get_article_by_id(article.id)
+        assert reloaded is not None
+        assert reloaded.is_consumed_by(CHANNEL_X) is True
     finally:
         context.aggregator.close()
 

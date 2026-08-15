@@ -114,6 +114,74 @@ def test_予定時刻を過ぎた投稿を出す(repository: SocialPostRepositor
     assert repository.list_upcoming() == []
 
 
+def test_投稿できたら_記事を1回だけ消費済みにする(repository: SocialPostRepository) -> None:
+    """`on_posted` を誰もテストしていなかった（I4）。
+
+    `post_due_once` の呼び出し2行、あるいは `dependencies.py` の
+    `on_posted=` 引数を消してもテストは全部緑のまま通り、その間
+    **記事が消費済みにならないので全記事が毎日再投稿される**。
+    消費記録は「もう出した」の権威（Azure Files 上の JSON）で、
+    ジョブ表と違ってデプロイでも消えない場所に置いてある。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _enqueue(repository, now)
+    consumed: list[str] = []
+
+    post_due_once(
+        repository,
+        FakeClient(),
+        EnabledSwitch(),
+        now=now,
+        on_posted=consumed.append,
+    )
+
+    # 2回呼ぶと消費時刻が上書きされるだけだが、「1回だけ」を明示する
+    assert consumed == ["a1"]
+
+
+def test_送信結果が不明なら_記事を消費済みにしない(repository: SocialPostRepository) -> None:
+    """届いたか分からない行で消費済みにすると、出ていない記事を二度と使えない。
+
+    NEEDS_REVIEW は人が見て「出し直す」か「捨てる」を選ぶ状態なので、
+    記事は未消費のまま残さなければならない。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _enqueue(repository, now)
+    consumed: list[str] = []
+
+    post_due_once(
+        repository,
+        FakeClient(fail_with=XSendUncertainError("timeout")),
+        EnabledSwitch(),
+        now=now,
+        on_posted=consumed.append,
+    )
+
+    assert consumed == []
+
+
+def test_送信前に失敗したら_記事を消費済みにしない(repository: SocialPostRepository) -> None:
+    """`mark_failed` の経路（画像カードのメディアアップロード失敗など）。
+
+    投稿は1文字も出ていないので、記事は次の機会に使えなければならない。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _enqueue(repository, now)
+    consumed: list[str] = []
+
+    post_due_once(
+        repository,
+        FakeClient(fail_with=RuntimeError("メディアのアップロードに失敗しました")),
+        EnabledSwitch(),
+        now=now,
+        on_posted=consumed.append,
+    )
+
+    assert consumed == []
+    # 行は FAILED（NEEDS_REVIEW ではない）
+    assert repository.list_recent_failed(now - timedelta(hours=1))[0].attempts == 1
+
+
 def test_スイッチが無効なら_出さない(repository: SocialPostRepository) -> None:
     """暴走時に止める手段。行は残して、有効にしたら出せるようにする。"""
     now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
