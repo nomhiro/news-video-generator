@@ -27,6 +27,7 @@ from openai import (
     OpenAI,
     RateLimitError,
 )
+from pydantic import BaseModel
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -70,6 +71,28 @@ class PostGenerationError(Exception):
 
 class GroundingError(PostGenerationError):
     """記事本文に根拠の無い数値が含まれていた。"""
+
+
+class _SinglePayload(BaseModel):
+    """SINGLE / CARD / PROMO の出力スキーマ。
+
+    Structured Outputs にこのモデルをそのまま渡すことで、
+    `practical_use` / `why_now` をモデルが省略できなくなる
+    （JSON モードではキー自体を返さない選択肢が残ってしまい、
+    「プロンプトでお願いする」の域を出ない）。
+    """
+
+    body: str
+    practical_use: str
+    why_now: str
+
+
+class _ThreadPayload(BaseModel):
+    """THREAD の出力スキーマ。本文が複数件になる点だけが単発と異なる。"""
+
+    posts: list[str]
+    practical_use: str
+    why_now: str
 
 
 # 各プロンプトが必ず含む禁則事項。定数化して4種類に重複させない。
@@ -270,21 +293,24 @@ class PostGenerator:
         """
         system_prompt = self._build_system_prompt(kind)
         user_prompt = self._build_user_prompt(article, caption)
+        schema = _ThreadPayload if kind is PostKind.THREAD else _SinglePayload
         # グラウンディングの照合対象はタイトル＋本文。見出しだけにある数値も
         # 根拠として認める（記事に実在する情報なので捏造ではない）。
         source_text = article.title + article.content
 
         last_error: PostGenerationError | None = None
         for _attempt in range(VALIDATION_ATTEMPTS):
-            raw = self._complete(system_prompt, user_prompt)
+            raw = self._complete(system_prompt, user_prompt, schema)
             try:
                 bodies, insights = self._parse_payload(kind, raw)
                 for body in bodies:
                     self._validate(body, insights, kind, source_text)
+                posts = self._assemble(article, kind, bodies, hashtags)
+                self._validate_final_length(posts)
             except PostGenerationError as e:
                 last_error = e
                 continue
-            return self._assemble(article, kind, bodies, hashtags)
+            return posts
 
         assert last_error is not None  # ループを抜けるのは例外時のみ
         raise last_error
@@ -329,35 +355,48 @@ class PostGenerator:
         wait=wait_exponential(multiplier=2, min=2, max=60),
         reraise=True,
     )
-    def _complete(self, system_prompt: str, user_prompt: str) -> str:
-        """1回の補完を呼び、応答の生の JSON 文字列を返す。
+    def _complete(self, system_prompt: str, user_prompt: str, schema: type[BaseModel]) -> str:
+        """1回の補完を Structured Outputs で呼び、JSON 文字列を返す。
 
-        テストが `PostGenerator._complete` を差し替えて検証だけを見るため、
-        この名前・このシグネチャで単一のメソッドとして切り出している
-        （他の処理を混ぜない）。
+        `response_format={"type": "json_object"}`（JSON モード）は使わない。
+        JSON モードはパースできる JSON であることしか保証せず、スキーマの
+        強制が無いため `practical_use` / `why_now` をモデルが省略できてしまう。
+        それでは「必須フィールドで独自解説を強制する」という設計の前提が崩れ、
+        プロンプトでお願いするのと変わらなくなる（ScriptGenerator が
+        `responses.parse` を使う理由と同じ）。
+
+        **戻り値を文字列にしているのはテストの都合。** `_complete` は
+        テストが差し替える差し込み点で、`_parse_payload` が JSON 文字列を
+        受け取る形を前提にしている。ここを Pydantic オブジェクトのまま
+        返す方が自然に見えるが、そうすると呼び出し側のテストが
+        `json.dumps(payload)` を返す差し替えと噛み合わなくなる。
+        「簡潔にする」つもりでオブジェクトを返す変更をすると
+        `tests/test_post_generator.py` が壊れるので、変えないこと。
 
         Args:
             system_prompt: システムプロンプト
             user_prompt: ユーザープロンプト
+            schema: 出力スキーマ（`_SinglePayload` または `_ThreadPayload`）
 
         Returns:
-            str: モデルが返した JSON 文字列
+            str: 検証済みオブジェクトを JSON 文字列化したもの
 
         Raises:
-            PostGenerationError: モデルが応答本文を返さなかった場合
+            PostGenerationError: モデルが出力を拒否した場合
         """
-        response = self.client.chat.completions.create(
+        response = self.client.responses.parse(
             model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
+            instructions=system_prompt,
+            input=user_prompt,
+            text_format=schema,
         )
-        content = response.choices[0].message.content
-        if not content:
-            raise PostGenerationError("モデルが応答を返しませんでした")
-        return content
+        parsed = response.output_parsed
+        if parsed is None:
+            raise PostGenerationError(
+                f"モデルが投稿を出力しませんでした "
+                f"(status={response.status!r}, incomplete={response.incomplete_details!r})"
+            )
+        return parsed.model_dump_json()
 
     @staticmethod
     def _parse_payload(kind: PostKind, raw: str) -> tuple[list[str], dict[str, str]]:
@@ -474,3 +513,33 @@ class PostGenerator:
                 )
             )
         return posts
+
+    @staticmethod
+    def _validate_final_length(posts: list[NewPost]) -> None:
+        """出典・ハッシュタグ付加後の最終本文が上限を超えていないか検証する。
+
+        `_validate` は生成された本文だけを見る（出典・ハッシュタグを
+        付ける前）。予算（`BUDGETS`）はその余地を残すように設計しているが、
+        出典名が長い・ハッシュタグが多いといった組み合わせでは、本文が
+        予算内でも最終的に280を超えることがある。ここで検出しないと、
+        キューには「健全」に見える行が積まれ、投稿予定時刻になって
+        初めて X API に拒否される。
+
+        切り詰めては直さない。出典表記を削れば帰属表示が消え、本文を
+        途中で削れば文の断片ができる（このプロジェクトが台本で
+        既に「断片は不可」と決めている）。どちらも安全ではないので、
+        検出したら引き直す。
+
+        Args:
+            posts: `_assemble` が組み立てた投稿
+
+        Raises:
+            PostGenerationError: いずれかの投稿が上限を超えている場合
+        """
+        for post in posts:
+            weighted = post.weighted_length
+            if weighted > X_MAX_WEIGHTED_LENGTH:
+                raise PostGenerationError(
+                    f"出典・ハッシュタグを含めた最終本文が weighted length の"
+                    f"上限を超えています（{weighted}/{X_MAX_WEIGHTED_LENGTH}）"
+                )

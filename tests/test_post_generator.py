@@ -141,6 +141,42 @@ def test_スレッドは_投稿ごとに_position_が付く(
     assert "出典" not in posts[1].body
 
 
+def test_出典とハッシュタグを足すと上限を超えるなら_PostGenerationError(
+    generator: PostGenerator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本文だけなら予算内でも、出典名が長く・タグが多いと280を超えうる。
+
+    キューに「健全」に見える行を積んでしまい、投稿予定時刻になって
+    初めて X API に拒否される事故を防ぐ。切り詰めては直さない
+    （出典や文の断片を作ることになるため）ので、引き直しの対象にする。
+    """
+    long_source_article = NewsArticle(
+        id="a2",
+        title="OpenAI が推論コストを40%削減",
+        url="https://example.com/openai",
+        source="グローバル・テクノロジー・ニュース・メディア",
+        category=NewsCategory.AI,
+        content="OpenAI は新しいキャッシュ方式で推論コストを 40% 削減したと発表した。"
+        "開発者は同じ入力を繰り返す用途で恩恵を受ける。",
+    )
+    _reply(
+        generator,
+        monkeypatch,
+        {
+            "body": "OpenAI がキャッシュ方式で推論コストを40%削減。" + "あ" * 90,
+            "practical_use": "同じ入力を繰り返すバッチ処理を持つ開発者が、推論費用をそのまま下げられる。",
+            "why_now": "推論需要が急増し、コスト構造が事業継続の制約として表面化してきたため。",
+        },
+    )
+
+    with pytest.raises(PostGenerationError):
+        generator.generate(
+            long_source_article,
+            PostKind.SINGLE,
+            hashtags=["#人工知能ニュース", "#生成AIウォッチ", "#テクノロジー最前線"],
+        )
+
+
 def test_全ての型に予算が定義されている():
     """型を足したときに予算の定義漏れを防ぐ。"""
     assert set(BUDGETS) == set(PostKind)
