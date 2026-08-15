@@ -1,11 +1,11 @@
 """投稿ワーカーの挙動。実際の X は叩かない。"""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from src.jobs.post_worker import post_due_once
+from src.jobs.post_worker import PostWorker, post_due_once
 from src.models.social import NewPost, PostKind, PostStatus
 from src.social.x_client import XSendUncertainError
 from src.storage.db import create_db_engine, create_session_factory
@@ -166,3 +166,29 @@ def test_画像カードは_メディアを先に上げる(
     post_due_once(repository, client, EnabledSwitch(), now=now, fetch_image=lambda key: image)
 
     assert client.uploaded == [image]
+
+
+def test_遅れすぎた投稿はワーカーの1周で見送られる(repository: SocialPostRepository) -> None:
+    """止まっていたあと復帰した瞬間の連投を防ぐ。
+
+    `claim_due` は予定時刻が最古のものから取るだけで、遅れの大きさを
+    見ない。掃く（discard_stale）のを worker 側の責務にしているので、
+    ここでは `PostWorker._run_one`（スレッドを起動しない1周ぶん）が
+    掃いてから出すことを検証する。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    old = now - timedelta(hours=3)
+    _enqueue(repository, old)
+    client = FakeClient()
+    worker = PostWorker(
+        repository,
+        client_factory=lambda: client,
+        switch=EnabledSwitch(),
+        max_post_delay_minutes=60,
+    )
+
+    posted = worker._run_one()
+
+    assert posted is False  # 掃いただけで、出すものは無かった
+    assert client.posted == []
+    assert repository.list_upcoming() == []  # SCHEDULED のまま残っていない

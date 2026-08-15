@@ -121,6 +121,7 @@ class PostWorker:
         poll_interval: float = POLL_INTERVAL_SEC,
         fetch_image: Callable[[str], Path] | None = None,
         on_posted: Callable[[str], None] | None = None,
+        max_post_delay_minutes: int | None = None,
     ):
         """初期化する。
 
@@ -133,6 +134,12 @@ class PostWorker:
             poll_interval: キューが空のときの待ち時間（秒）
             fetch_image: 画像キー -> ローカルパス（画像カードのとき必要）
             on_posted: 投稿できたときに article_id を渡す（消費記録の更新用）
+            max_post_delay_minutes: これ以上遅れた予定は出さずに捨てる。
+                **遅れた投稿を後から出し直さない**ための値。省略時は
+                掃かない（テストで discard_stale の影響を受けたくない
+                呼び出しのため）。デプロイやプロセス停止で数時間止まった後、
+                復帰した瞬間に古い投稿を連投すると、閲覧者にはスパムに見える
+                （4件が一斉に出るのはニュースとしての新鮮さも失っている）
         """
         self._repository = repository
         self._client_factory = client_factory
@@ -140,6 +147,7 @@ class PostWorker:
         self._poll_interval = poll_interval
         self._fetch_image = fetch_image
         self._on_posted = on_posted
+        self._max_post_delay_minutes = max_post_delay_minutes
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -187,15 +195,7 @@ class PostWorker:
         """停止要求が来るまで投稿を出し続ける。"""
         while not self._stop.is_set():
             try:
-                client = self._client_factory()
-                posted = post_due_once(
-                    self._repository,
-                    client,
-                    self._switch,
-                    fetch_image=self._fetch_image,
-                    on_posted=self._on_posted,
-                )
-                if not posted:
+                if not self._run_one():
                     self._stop.wait(self._poll_interval)
             except Exception as e:
                 # ループ自体は絶対に落とさない。落とすとキューに残った
@@ -204,3 +204,31 @@ class PostWorker:
                 self._stop.wait(self._poll_interval)
 
         log_step("投稿ワーカーを停止しました", "🐦")
+
+    def _run_one(self) -> bool:
+        """1回分のループ本体（掃く→出す）。
+
+        テストがスレッドを起動せずに1周ぶんだけ検証できるように、
+        `_loop` から切り出している。
+
+        Returns:
+            bool: 投稿を試みたら True
+        """
+        # claim_due は予定時刻順に最古を取るだけで、遅れの大きさを
+        # 見ない。出す前に掃かないと、数時間止まっていた後の復帰時に
+        # 一番古い（＝一番遅れた）投稿から連投してしまう。
+        if self._max_post_delay_minutes is not None:
+            discarded = self._repository.discard_stale(
+                datetime.now(UTC), self._max_post_delay_minutes
+            )
+            if discarded:
+                log_error(f"予定時刻から遅れすぎた投稿 {discarded}件を見送りました")
+
+        client = self._client_factory()
+        return post_due_once(
+            self._repository,
+            client,
+            self._switch,
+            fetch_image=self._fetch_image,
+            on_posted=self._on_posted,
+        )

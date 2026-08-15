@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+import httpx
+
 from src.storage.tokens import X_TOKEN, TokenStore, read_json, write_json
 from src.utils.logger import log_error
 
@@ -28,6 +30,7 @@ from src.utils.logger import log_error
 REFRESH_MARGIN_SECONDS = 120
 
 AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
+TOKEN_URL = "https://api.x.com/2/oauth2/token"
 SCOPES = ("tweet.read", "tweet.write", "users.read", "media.write", "offline.access")
 
 
@@ -66,6 +69,53 @@ class TokenExchange(Protocol):
     def refresh(self, refresh_token: str) -> dict[str, Any]:
         """refresh token を使って新しいトークン一式を得る。"""
         ...
+
+
+class HttpTokenExchange:
+    """httpx による `TokenExchange` の実装。
+
+    client_secret を持つ機密クライアントとして登録しているため、
+    Basic 認証（client_id:client_secret）を使う。PKCE の
+    `code_verifier` は認可コードの交換にしか使わず、更新には不要。
+    """
+
+    def __init__(self, client_id: str, client_secret: str, timeout: float = 30.0):
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._timeout = timeout
+
+    def refresh(self, refresh_token: str) -> dict[str, Any]:
+        """`TOKEN_URL` に refresh_token グラントで問い合わせる。
+
+        Args:
+            refresh_token: 直前に発行された refresh token（単回使用）
+
+        Returns:
+            dict[str, Any]: 応答 JSON（access_token / refresh_token /
+                expires_in を含む）。呼び出し元（`ensure_fresh`）が
+                欠損や型の不正を検証する
+
+        Raises:
+            XTokenExpiredError: 通信または応答の解釈に失敗した
+        """
+        try:
+            response = httpx.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": self._client_id,
+                },
+                auth=(self._client_id, self._client_secret),
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (httpx.HTTPError, ValueError) as e:
+            raise XTokenExpiredError(f"トークン更新の通信に失敗しました: {e}") from e
+        if not isinstance(data, dict):
+            raise XTokenExpiredError(f"トークン更新の応答が不正です: {data!r}")
+        return data
 
 
 def load_credentials(store: TokenStore) -> XCredentials | None:

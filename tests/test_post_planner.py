@@ -1,6 +1,7 @@
 """1日ぶんの投稿計画。"""
 
 from datetime import UTC, datetime
+from typing import Any
 
 from src.jobs.post_planner import plan_daily_posts
 from src.models.news import CHANNEL_X, NewsArticle, NewsCategory
@@ -65,7 +66,7 @@ TIMES = ["08:00", "12:30", "19:00", "21:30"]
 
 
 def _plan(news, posts, generator, **overrides):
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "times": TIMES,
         "posts_per_day": 4,
         "hashtags": ["#AI"],

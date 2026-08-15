@@ -264,6 +264,11 @@ class Config(BaseSettings):
     # （無関係なタグはスパム判定を受ける）。
     x_hashtags: CommaSeparated = Field(default=["#AI", "#生成AI"])
 
+    # 自動投稿スイッチの実体。ジョブ表（SQLite）と違い Azure Files を想定する
+    # （リビジョン更新で消えると、画面で有効にした翌日に黙って投稿が止まる）。
+    # 記事の選択状態（news_data_dir）と同じボリュームに置く。
+    x_posting_switch_path: Path = Field(default=Path("./data/x_posting.json"))
+
     @field_validator("ai_search_queries", mode="before")
     @classmethod
     def _parse_ai_search_queries(cls, value: object) -> object:
