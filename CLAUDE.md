@@ -389,7 +389,7 @@ Starlette の `BackgroundTask` は非同期関数をイベントループ上で�
 
 ```bash
 azd env set DEPLOY_APP true
-azd provision      # インフラ（ACR / Container Apps 環境 / Container App）
+azd provision      # インフラ（Container Apps 環境 / Container App / AI リソース）
 azd down           # 破棄（課金を止める）
 ```
 
@@ -412,11 +412,10 @@ azd down           # 破棄（課金を止める）
   `IdentityDoesNotExist ... No managed service identities are associated with
   resource .../containerApps/...` が出たら、そのまま再実行すれば通る。
   ユーザー割り当て ID の作成直後に Container App がそれを参照するため。
-- **`AZURE_CONTAINER_REGISTRY_ENDPOINT` を output に出す。** 無いと
-  `azd deploy` が push 先を決められず
-  `could not determine container registry endpoint` で止まる。
-  （`azd deploy` は使わなくなり、レジストリも GHCR に移したので、この output も
-  ACR ごと消す予定。後述の「アプリの反映は `main` へのマージで起きる」を参照）
+- **`AZURE_CONTAINER_REGISTRY_ENDPOINT` を output に出す**必要が以前はあった
+  （無いと `azd deploy` が push 先を決められず
+  `could not determine container registry endpoint` で止まった）。
+  `azd deploy` を使わなくなり、レジストリも GHCR に移したので削除した。
 - **1 vCPU では ffmpeg が異常終了した。** 1080x1920 / preset=medium の
   エンコードが 0.4x speed しか出ず、終了コード付きで落ちた。2 vCPU / 4Gi に
   上げてショートは完走している（長尺はまだ OOM する。上の負債を参照）。
@@ -583,11 +582,11 @@ tenant level resource provider` という原因の分からないエラーにな
 - **GHCR の新規パッケージが private で作られたら、一度だけ手で public に切り替える**
   （Packages → Package settings → Change visibility）。private のままだと ACA が
   pull できず、リビジョンが Activating のまま残る。
-- **ACR（`crnewsvideoimgmimujd6zyifm6`）はまだインフラに残っている。** GHCR からの
-  デプロイが動くことを確認したうえで、`infra/core/app-hosting.bicep` の ACR /
-  AcrPull ロール割当 / `registries` と `main.bicep` の
-  `AZURE_CONTAINER_REGISTRY_ENDPOINT` 出力を消して `azd provision` する。
-  **先に消すと切り戻し先（稼働中のイメージ）が無くなる**ので、順序を守る。
+- **テンプレートからリソースを消しても `azd provision` では削除されない。**
+  ARM の incremental デプロイは「テンプレートに無いもの」を消さない。
+  ACR を bicep から外したときも what-if は
+  `Skip : Container Registry` と出るだけで、実体は残って課金も続いた。
+  止めるには `az acr delete` を明示的に打つ必要がある（実際にそうした）。
 
 ### チェックは pre-push に寄せている
 
