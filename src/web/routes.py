@@ -955,6 +955,32 @@ async def x_queue(
     )
 
 
+def _x_status_context(
+    posts: SocialPostRepository,
+    switch: PostingSwitch,
+    config: Config,
+    tokens: TokenStore,
+) -> dict[str, object]:
+    """ヘッダーと本文パネルが共有する状態。
+
+    2つのテンプレートで同じ値を使うので、組み立てを1箇所に置く。
+    ずれると「ヘッダーは稼働中、パネルは停止中」という、非常停止の
+    スイッチとして最悪の見え方になる。
+    """
+    now = datetime.now(UTC)
+    plain, with_link = posts.monthly_post_counts(now.year, now.month)
+    spent = estimate_month_cost(
+        plain, with_link, config.x_cost_per_post_usd, config.x_cost_per_post_with_link_usd
+    )
+    return {
+        "enabled": switch.is_enabled(),
+        # 「概算」と明示する。実際の課金は X 側の集計なので一致を保証できない
+        "spent_usd": spent,
+        "budget_usd": config.x_monthly_budget_usd,
+        "authenticated": load_credentials(tokens) is not None,
+    }
+
+
 @router.get("/x/status", response_class=HTMLResponse)
 async def x_status(
     request: Request,
@@ -963,29 +989,43 @@ async def x_status(
     config: Config = Depends(get_config),
     tokens: TokenStore = Depends(get_token_store),
 ) -> HTMLResponse:
-    """自動投稿の状態、概算コスト、認証の有無。
+    """自動投稿の状態、概算コスト、認証の有無（本文パネル）。
 
     未認証のときは、画面から完結する再認証フローを出さない。X の
     PKCE フローはブラウザのリダイレクトを要求し、コンテナの中では
     完結できない（YouTube を localhost にリダイレクトできないのと
     同じ理由）。代わりに、ローカルで認証してから
     `scripts.push_tokens` で送る手順を案内する。
+
+    **ヘッダーは `/x/status/header` を使う（このパネルを入れない）。**
+    以前はヘッダーと本文の両方がこのパネルを読み込み、パネル自身も
+    `id="x-status"` を持っていたため、id が文書内に2つ存在した。
+    htmx は最初の一致にしか入れ替えを行わないので、スイッチを切り替えても
+    本文パネルは古い状態を映したまま残った（非常停止のスイッチが
+    「効いていないように見える」のが最悪）。
     """
-    now = datetime.now(UTC)
-    plain, with_link = posts.monthly_post_counts(now.year, now.month)
-    spent = estimate_month_cost(
-        plain, with_link, config.x_cost_per_post_usd, config.x_cost_per_post_with_link_usd
-    )
     return templates.TemplateResponse(
-        request,
-        "partials/x_status.html",
-        {
-            "enabled": switch.is_enabled(),
-            # 「概算」と明示する。実際の課金は X 側の集計なので一致を保証できない
-            "spent_usd": spent,
-            "budget_usd": config.x_monthly_budget_usd,
-            "authenticated": load_credentials(tokens) is not None,
-        },
+        request, "partials/x_status.html", _x_status_context(posts, switch, config, tokens)
+    )
+
+
+@router.get("/x/status/header", response_class=HTMLResponse)
+async def x_status_header(
+    request: Request,
+    posts: SocialPostRepository = Depends(get_posts),
+    switch: PostingSwitch = Depends(get_x_switch),
+    config: Config = Depends(get_config),
+    tokens: TokenStore = Depends(get_token_store),
+) -> HTMLResponse:
+    """ヘッダーに出す状態の点と概算コストだけ。
+
+    設計のワイヤーフレームに合わせている。ヘッダーは一日中見えている
+    ものなので、操作（停止ボタン）と手順の説明（再認証の案内）は
+    本文パネルに置き、ここは「いま動いているか」「いくら使ったか」の
+    2点だけにする。
+    """
+    return templates.TemplateResponse(
+        request, "partials/x_status_header.html", _x_status_context(posts, switch, config, tokens)
     )
 
 

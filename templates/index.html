@@ -9,7 +9,10 @@
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
     <!-- 投稿キュー（左） -->
     <div class="space-y-4">
-        <div id="x-status"
+        {# 置き場所の id はここが持つ。読み込むフラグメントは id を持たない
+           （同じ id が文書内に2つできると htmx は最初の一致だけを
+           入れ替える）。 #}
+        <div id="x-status-panel"
              hx-get="/x/status"
              hx-trigger="load"
              hx-swap="innerHTML">

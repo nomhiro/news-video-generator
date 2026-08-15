@@ -35,8 +35,16 @@
             </div>
 
             <div class="flex items-center gap-3">
+                {#
+                  ヘッダーは状態の点と概算コストだけ（/x/status/header）。
+                  本文パネル（/x/status）を入れないこと。両方が同じ
+                  フラグメントを読み込んでいた頃、パネル側が持つ
+                  id="x-status" が文書内に2つ存在し、htmx が最初の一致しか
+                  入れ替えなかったため、停止スイッチを押しても本文の表示が
+                  古いまま残った。
+                #}
                 <div id="header-x-status"
-                     hx-get="/x/status"
+                     hx-get="/x/status/header"
                      hx-trigger="load, every 60s"
                      hx-swap="innerHTML"
                      class="text-xs">

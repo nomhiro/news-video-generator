@@ -282,6 +282,48 @@ def test_概算コストに概算と明示する(client: TestClient, fake_posts:
     assert "概算" in response.text
 
 
+def test_ヘッダーは状態と概算コストだけを出す(client: TestClient) -> None:
+    """ヘッダーは一日中見えている場所なので、操作と手順の説明を置かない。
+
+    停止ボタンと再認証の案内は本文パネルに置く（設計のワイヤーフレーム）。
+    """
+    response = client.get("/x/status/header")
+
+    body = response.text
+    assert "自動投稿" in body
+    assert "概算" in body
+    # 操作と手順はヘッダーには無い
+    assert "/x/enabled" not in body
+    assert "push_tokens" not in body
+
+
+def test_状態パネルは_id_を持たない(client: TestClient) -> None:
+    """同じ id が文書内に2つあると、htmx は最初の一致だけを入れ替える。
+
+    以前はパネル自身が id="x-status" を持ち、本文の呼び出し側にも同じ
+    id があった。そのためスイッチを切り替えても本文パネルが古い状態を
+    映したまま残った（非常停止のスイッチで最悪の見え方）。
+    id は呼び出し側のコンテナ（#x-status-panel）だけが持つ。
+    """
+    panel = client.get("/x/status").text
+
+    assert 'id="x-status"' not in panel
+    assert 'id="x-status-panel"' not in panel
+
+
+def test_スイッチの切り替えは_ヘッダーも一緒に更新する(client: TestClient) -> None:
+    """パネルだけが変わってヘッダーが古いままだと「効いていない」ように見える。
+
+    ヘッダーは60秒ポーリングなので、放置すると最大1分ずれる。
+    out-of-band swap で同じ応答の中でヘッダーも書き換える。
+    """
+    response = client.post("/x/enabled", data={"enabled": "true"})
+
+    assert 'id="header-x-status"' in response.text
+    assert 'hx-swap-oob="innerHTML"' in response.text
+    assert "稼働中" in response.text
+
+
 def test_未認証なら再認証の手順を案内する(client: TestClient) -> None:
     """画面から OAuth を完結させる経路は無い。ローカル認証とスクリプトの案内を出す。"""
     response = client.get("/x/status")
