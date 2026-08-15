@@ -93,8 +93,9 @@ class NewsArticle:
     def video_generated(self) -> bool:
         """動画を作り終えているか。
 
-        `consumed` に一般化する前のフィールド名。テンプレートと
-        `planner._pick_candidates` が参照しているため property で受ける。
+        `consumed` に一般化する前のフィールド名。いまの読み手は
+        `templates/partials/news_list.html`（記事プールの「動画」の丸）と
+        `to_dict`（切り戻し用に旧キーを書き出す）の2つ。
         書き込みは `mark_consumed` を使う（権威を1箇所に保つ）。
         """
         return self.is_consumed_by(CHANNEL_VIDEO)
@@ -138,6 +139,31 @@ class NewsArticle:
         if self.published_at:
             data["published_at"] = self.published_at.isoformat()
         data["fetched_at"] = self.fetched_at.isoformat()
+
+        # 旧フィールドも書く。**切り戻しのための1リリース限りの措置。**
+        #
+        # CLAUDE.md が定めた切り戻し手順は「前のイメージタグで
+        # `az containerapp update --image`」。旧コードの `from_dict` は
+        # `cls(**data)` なので、旧 `NewsArticle` に無いキーを渡されると
+        # `TypeError` になる。`_load_category` は JSONDecodeError /
+        # KeyError / OSError しか捕まえないため、記事一覧・動画の計画・
+        # 投稿の計画がまとめて落ちる。
+        #
+        # 新しい `from_dict` は `video_generated` を pop するので、
+        # 出しても往復は壊れない（`consumed` が権威で、こちらは派生値）。
+        #
+        # **ただしこれだけでは切り戻しは成立しない。** `consumed` 自体も
+        # 旧 `__init__` にとって未知のキーなので、旧コードは
+        # `unexpected keyword argument 'consumed'` で落ちる（実測済み）。
+        # 完全に安全にするには、未知のキーを無視する `from_dict` を
+        # **先に** main へ入れて1回デプロイし、そのあとで X 運用の変更を
+        # 載せる、という2段のデプロイが必要。ここで出しているのは
+        # 「動画の消費記録だけは失わせない」ぶんの担保。
+        #
+        # **消すのは意図的な判断として行う。** 「もう使っていないフィールド」
+        # として掃除すると、その時点で切り戻し経路がさらに壊れる。
+        # 旧イメージを使わないと決めた時点で消す。
+        data["video_generated"] = self.video_generated
         return data
 
     @classmethod

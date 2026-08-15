@@ -195,8 +195,23 @@ def test_mark_consumed_は_他のチャネルを消さない():
     assert article.is_consumed_by(CHANNEL_X) is True
 
 
-def test_to_dict_は_video_generated_を_出力しない():
-    """出力に旧フィールドを残すと、権威が2つになって食い違う。"""
+def test_to_dict_は_切り戻しのために_video_generated_も出す():
+    """旧イメージへの切り戻しで記事が読めなくなるのを防ぐ（1リリース限り）。
+
+    このテストは以前「`video_generated` を出力しない」ことを主張していた。
+    権威を1つに保つという意図は正しかったが、**切り戻しを壊す**という
+    見落としがあった。CLAUDE.md の切り戻し手順は前のイメージタグへの
+    差し替えで、旧コードの `from_dict` は `cls(**data)` なので `consumed`
+    を受け取ると `TypeError` になる。`_load_category` は
+    JSONDecodeError / KeyError / OSError しか捕まえないため、記事一覧と
+    2つの計画がまとめて落ちる。
+
+    権威が2つになる心配は無い: `video_generated` は `consumed` から
+    導出した派生値で、新しい `from_dict` は読み込み時に pop する。
+
+    注意: これだけでは切り戻しは成立しない。`consumed` 自体も旧
+    `__init__` には未知のキーなので落ちる（`to_dict` のコメント参照）。
+    """
     article = NewsArticle(
         id="x", title="t", url="https://example.com/d", source="s", category=NewsCategory.AI
     )
@@ -204,8 +219,21 @@ def test_to_dict_は_video_generated_を_出力しない():
 
     data = article.to_dict()
 
-    assert "video_generated" not in data
+    assert data["video_generated"] is True
     assert data["consumed"] == article.consumed
+
+
+def test_to_dict_の_video_generated_は_consumed_から導かれる():
+    """未消費なら False。定数を書いているのではないことの確認。"""
+    article = NewsArticle(
+        id="y", title="t", url="https://example.com/f", source="s", category=NewsCategory.AI
+    )
+
+    assert article.to_dict()["video_generated"] is False
+
+    article.mark_consumed(CHANNEL_X)  # X だけ消費しても動画は False
+
+    assert article.to_dict()["video_generated"] is False
 
 
 def test_from_dict_は_to_dict_の_出力を_復元できる():
