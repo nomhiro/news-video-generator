@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from fastapi import Depends, FastAPI, Request
 
 from config import Config
+from src.generators.image_generator import ImageGenerator
 from src.jobs.planner import plan_daily_batch
 from src.jobs.post_planner import plan_daily_posts
 from src.jobs.post_worker import PostWorker
@@ -17,6 +18,7 @@ from src.jobs.worker import JobWorker
 from src.models.news import CHANNEL_X
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
+from src.social.card_visual import CardVisualGenerator
 from src.social.post_generator import PostGenerator
 from src.social.switch import PostingSwitch
 from src.social.x_auth import HttpTokenExchange, XTokenExpiredError, ensure_fresh, load_credentials
@@ -136,6 +138,15 @@ class AppContext:
             config.azure_openai_deployment,
         )
 
+        # 画像カードの視覚指示は台本生成と同じ Azure OpenAI リソース・
+        # デプロイを使う（`post_generator` と同じ判断。画像そのものは
+        # 別リソースなので `pipeline.image_generator` を使い分けている）。
+        card_generator = CardVisualGenerator(
+            config.azure_openai_endpoint,
+            config.azure_openai_api_key.get_secret_value(),
+            config.azure_openai_deployment,
+        )
+
         # スイッチの実体は Azure Files 上を想定するファイル
         # （ジョブ表の SQLite と違い、リビジョン更新で消えない場所）。
         # X_POSTING_ENABLED はファイルが無いときの初期値でしかない。
@@ -160,7 +171,20 @@ class AppContext:
             artifact_store=artifact_store,
             jobs=jobs,
             worker=JobWorker(jobs, PipelineJobRunner(pipeline, aggregator)),
-            scheduler=_build_scheduler(config, aggregator, jobs, posts, post_generator, x_switch),
+            scheduler=_build_scheduler(
+                config,
+                aggregator,
+                jobs,
+                posts,
+                post_generator,
+                x_switch,
+                card_generator=card_generator,
+                # `Pipeline` が既に画像生成用の Azure クライアントを持っている。
+                # 同じ `gpt-image-2` デプロイ（クォータはリージョン単位で
+                # 上限4）を叩くだけの2つ目のクライアントを作らない。
+                image_generator=pipeline.image_generator,
+                artifacts=artifact_store,
+            ),
             youtube_uploader=YouTubeUploader(token_store=token_store),
             tiktok_uploader=TikTokUploader(
                 client_key=config.tiktok_client_key.get_secret_value(),
@@ -222,6 +246,9 @@ def _build_scheduler(
     posts: SocialPostRepository,
     post_generator: PostGenerator,
     x_switch: PostingSwitch,
+    card_generator: CardVisualGenerator,
+    image_generator: ImageGenerator,
+    artifacts: ArtifactStore,
 ) -> DailyScheduler | None:
     """定期実行を組み立てる（無効なら None）。
 
@@ -236,12 +263,19 @@ def _build_scheduler(
     Args:
         config: アプリケーション設定
         aggregator: ニュースストア
-        jobs: ジョブ表
+        jobs: ジョブ表。`plan_daily_posts` に渡し、動画生成が実行中の間は
+            画像カードを作らせない（`gpt-image-2` のクォータをリージョン
+            単位で動画パイプラインと共有しているため）
         posts: 投稿表
         post_generator: 投稿の下書き生成器
         x_switch: 自動投稿の有効/無効。`plan_daily_posts` に渡し、
             無効なら下書きの生成そのものを止める（送信ステップだけを
             止めるものではない。理由は `plan_daily_posts` の docstring）
+        card_generator: 画像カードの視覚指示生成器
+        image_generator: 画像カードの画像生成器。`Pipeline` が持つものを
+            再利用する（同じクォータ上限を持つ2つ目のクライアントを
+            作らないため）
+        artifacts: 生成した画像カードの保存先
 
     Returns:
         DailyScheduler | None: 有効なら組み立てたスケジューラ
@@ -275,6 +309,14 @@ def _build_scheduler(
                 unit_with_link_usd=config.x_cost_per_post_with_link_usd,
                 now=datetime.now(UTC),
                 timezone=config.schedule_timezone,
+                card_generator=card_generator,
+                image_generator=image_generator,
+                artifacts=artifacts,
+                jobs=jobs,
+                # 動画パイプラインと同じ output_dir 配下に作る（生成は必ず
+                # ローカルで行う、という既存の方針と揃える）。保存先だけが
+                # `artifacts` で差し替わる。
+                output_dir=config.output_dir / "cards",
             )
         except Exception as e:
             log_error(f"X 投稿の計画に失敗しました（次回は予定どおり走ります）: {e}")
