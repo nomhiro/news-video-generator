@@ -43,12 +43,13 @@ jobs:
         id: names
         run: |
           # レジストリは GHCR。イメージ名はリポジトリから決まるので設定は要らない。
+          # 末尾の /web は azure.yaml のサービス名に合わせている。
           tag="gh-${GITHUB_SHA::7}"
           # 再実行（Re-run jobs）では run_number が変わらない。suffix が既存の
           # リビジョンと衝突すると ACA に拒否されるので run_attempt も混ぜる。
           suffix="gh${{ github.run_number }}-${{ github.run_attempt }}"
           {
-            echo "image=ghcr.io/${{ github.repository }}:$tag"
+            echo "image=ghcr.io/${{ github.repository }}/web:$tag"
             echo "suffix=$suffix"
             echo "revision=$APP--$suffix"
           } >> "$GITHUB_OUTPUT"

@@ -468,7 +468,7 @@ Container Apps Jobs を使わない理由は、ジョブ表がコンテナのロ
 
 `.github/workflows/deploy.yml` が `main` への push で走る。Actions に置くのは
 **この1本だけ**（lint / 型 / テストは後述の pre-push）。ランナーでイメージを
-ビルドして **GHCR**（`ghcr.io/nomhiro/news-video-generator`）に push し、
+ビルドして **GHCR**（`ghcr.io/nomhiro/news-video-generator/web`）に push し、
 `az containerapp update` でリビジョンを差し替え、新リビジョンがトラフィックを
 受けるまで待つ。
 
@@ -570,9 +570,19 @@ tenant level resource provider` という原因の分からないエラーにな
 - **切り戻しはリビジョンではなくイメージタグで行う。** リビジョンは1件しか
   残らないため `az containerapp revision activate` に頼れない。GHCR にタグ
   （`gh-<短縮sha>`）が残るので、前のタグで `az containerapp update --image` を打つ。
-- **GHCR の新規パッケージは既定で private。** 初回の push のあとに一度だけ手で
-  public に切り替える（Packages → Package settings → Change visibility）。
-  private のままだと ACA が pull できず、リビジョンが Activating のまま残る。
+- **最初のイメージをローカルから push してはいけない。** GHCR のパッケージと
+  リポジトリの紐付けは**パッケージ作成時にしか行われない**。ローカルの docker から
+  先に push すると `repository: null` の未紐付けパッケージができ、以降 Actions の
+  `GITHUB_TOKEN` は `denied: permission_denied: write_package` で push できなくなる
+  （`packages: write` は「そのリポジトリに紐付いたパッケージ」にしか効かない）。
+  一度踏んだ。イメージに `org.opencontainers.image.source` ラベルを入れても
+  **後から紐付き直さない**し、紐付けを直す REST API も無い（`PATCH` は 404、
+  可視性の変更も UI 専用、削除は `delete:packages` スコープが必要）。
+  復旧はパッケージを消して Actions に作らせ直すか、別の名前にして作り直すしかない。
+  **パッケージは必ず Actions の初回実行で作らせる。**
+- **GHCR の新規パッケージが private で作られたら、一度だけ手で public に切り替える**
+  （Packages → Package settings → Change visibility）。private のままだと ACA が
+  pull できず、リビジョンが Activating のまま残る。
 - **ACR（`crnewsvideoimgmimujd6zyifm6`）はまだインフラに残っている。** GHCR からの
   デプロイが動くことを確認したうえで、`infra/core/app-hosting.bicep` の ACR /
   AcrPull ロール割当 / `registries` と `main.bicep` の
