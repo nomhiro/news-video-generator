@@ -24,7 +24,14 @@ X_MAX_WEIGHTED_LENGTH = 280
 # t.co で短縮された URL の固定カウント。実際の長さは関係ない。
 URL_WEIGHTED_LENGTH = 23
 
-_URL_PATTERN = re.compile(r"https?://\S+")
+# 「URL を含むか」の唯一の定義。公開しているのは `weighted_length` と
+# `PostGenerator._assemble` の `has_link` 判定が同じ定義を共有する必要が
+# あるため。`has_link` はコスト単価（$0.015 と $0.20、13倍差）を選ぶ
+# フラグなので、ここで数えた URL と `has_link` が指す URL がずれると、
+# 文字数の予算計算と実際の課金階層が食い違う（"http" という文字列だけを
+# 含み `://` を欠くボディが、リンク無しとして課金される "https://..." と
+# 同じにカウントされてしまう、等）。
+URL_PATTERN = re.compile(r"https?://\S+")
 
 
 def weighted_length(text: str) -> int:
@@ -42,8 +49,8 @@ def weighted_length(text: str) -> int:
     Returns:
         int: weighted length
     """
-    without_urls = _URL_PATTERN.sub("", text)
-    url_count = len(_URL_PATTERN.findall(text))
+    without_urls = URL_PATTERN.sub("", text)
+    url_count = len(URL_PATTERN.findall(text))
 
     total = url_count * URL_WEIGHTED_LENGTH
     for char in without_urls:

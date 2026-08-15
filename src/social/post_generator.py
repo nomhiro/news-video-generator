@@ -36,7 +36,13 @@ from tenacity import (
 )
 
 from src.models.news import NewsArticle
-from src.models.social import X_MAX_WEIGHTED_LENGTH, NewPost, PostKind, weighted_length
+from src.models.social import (
+    URL_PATTERN,
+    X_MAX_WEIGHTED_LENGTH,
+    NewPost,
+    PostKind,
+    weighted_length,
+)
 from src.social.grounding import ungrounded_numbers
 
 # 型ごとの本文の字数予算（日本語の文字数、下限と上限）。
@@ -296,7 +302,11 @@ class PostGenerator:
         schema = _ThreadPayload if kind is PostKind.THREAD else _SinglePayload
         # グラウンディングの照合対象はタイトル＋本文。見出しだけにある数値も
         # 根拠として認める（記事に実在する情報なので捏造ではない）。
-        source_text = article.title + article.content
+        # **区切りを挟む。** 単純連結だと、タイトル末尾の数字と本文冒頭の
+        # 数字が1つのトークンに融合しうる。グラウンディングは捏造対策の
+        # 最後の防衛線なので、実在しない数値が「融合した数字」として
+        # 根拠ありと誤判定される事故を防ぐ。
+        source_text = f"{article.title}\n{article.content}"
 
         last_error: PostGenerationError | None = None
         for _attempt in range(VALIDATION_ATTEMPTS):
@@ -508,7 +518,14 @@ class PostGenerator:
                     article_title=article.title,
                     kind=kind,
                     body=final_body,
-                    has_link="http" in final_body,
+                    # `weighted_length`（src/models/social.py）と同じ
+                    # `URL_PATTERN` を使う。`has_link` はコスト単価
+                    # （$0.015 と $0.20、13倍差）を選ぶフラグなので、
+                    # ここでの「リンクを含む」の定義が weighted_length の
+                    # 定義とずれると、文字数の予算計算と実際の課金階層が
+                    # 食い違う。単純な "http" in ... の部分文字列検査では、
+                    # "://" を欠く裸の "http" がリンク扱いされてしまう。
+                    has_link=URL_PATTERN.search(final_body) is not None,
                     position=position,
                 )
             )

@@ -141,6 +141,52 @@ def test_スレッドは_投稿ごとに_position_が付く(
     assert "出典" not in posts[1].body
 
 
+def test_httpだけを含み_を欠く本文は_has_link_がFalse(
+    generator: PostGenerator, article: NewsArticle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """has_link と weighted_length は同じ URL_PATTERN を共有しなければならない。
+
+    has_link はコスト単価（$0.015 と $0.20、13倍差）を選ぶフラグ。
+    weighted_length が数えない「裸の http」を has_link が数えると、
+    リンク無し扱いで課金されるべき投稿がリンクありの単価になる
+    （このケースは逆方向: 単純な部分文字列検査だとリンクあり判定に
+    なってしまうが、weighted_length は URL として数えない）。
+    """
+    _reply(
+        generator,
+        monkeypatch,
+        {
+            "body": "OpenAIがキャッシュ方式で推論コストを40%削減。詳細はhttp参照。" + "あ" * 70,
+            "practical_use": "同じ入力を繰り返すバッチ処理を持つ開発者が、推論費用をそのまま下げられる。",
+            "why_now": "推論需要が急増し、コスト構造が事業継続の制約として表面化してきたため。",
+        },
+    )
+
+    posts = generator.generate(article, PostKind.SINGLE, hashtags=[])
+
+    assert posts[0].has_link is False
+
+
+def test_実在するURLを含む本文は_has_link_がTrue(
+    generator: PostGenerator, article: NewsArticle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`https://...` の形を持つ本文は has_link=True になること。"""
+    _reply(
+        generator,
+        monkeypatch,
+        {
+            "body": "OpenAIがキャッシュ方式で推論コストを40%削減。"
+            "詳細はhttps://example.com/details を参照。" + "あ" * 43,
+            "practical_use": "同じ入力を繰り返すバッチ処理を持つ開発者が、推論費用をそのまま下げられる。",
+            "why_now": "推論需要が急増し、コスト構造が事業継続の制約として表面化してきたため。",
+        },
+    )
+
+    posts = generator.generate(article, PostKind.SINGLE, hashtags=[])
+
+    assert posts[0].has_link is True
+
+
 def test_出典とハッシュタグを足すと上限を超えるなら_PostGenerationError(
     generator: PostGenerator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
