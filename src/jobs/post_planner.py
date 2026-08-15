@@ -142,8 +142,11 @@ def plan_daily_posts(
     #
     # つまりスイッチは送信ステップだけでなく計画ステップも止める。
     if not enabled:
-        log_step("自動投稿が無効です。下書きは作成しません", "⏭️")
-        return DailyPostPlan(group_ids=[], skipped_reason="自動投稿が無効です（スイッチ off）")
+        log_step("自動投稿が無効なため、下書きを作成していません", "⏭️")
+        return DailyPostPlan(
+            group_ids=[],
+            skipped_reason="自動投稿が無効（スイッチ off）なため、下書きを作成していません",
+        )
 
     # 上限を超えていたら積まない。
     #
