@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.models.social import NewPost, PostKind, PostStatus
+from src.models.social import InvalidPostTransition, NewPost, PostKind, PostStatus
 from src.storage.db import create_db_engine, create_session_factory
 from src.storage.schema import upgrade_to_head
 from src.storage.social import SocialPostRepository
@@ -89,6 +89,47 @@ def test_discard_stale_は_遅れすぎた行を捨てる(repository: SocialPost
     assert discarded == 1
     claimed = repository.claim_due(now)
     assert claimed is not None
+    assert repository.claim_due(now) is None
+
+
+def test_cancel_は_送信中の行を拒否する(repository: SocialPostRepository) -> None:
+    """`POSTING -> FAILED` は遷移表では許されているので、状態を見ないと通る。
+
+    通してしまうと、投稿は X に出たのに行は FAILED、ワーカーの
+    `mark_posted` は例外、記事は未消費 —— 翌日もう一度公開される。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    repository.enqueue([_post()], {0: now})
+    claimed = repository.claim_due(now)
+    assert claimed is not None
+
+    with pytest.raises(InvalidPostTransition):
+        repository.cancel(claimed.id, "取り消しました")
+
+    # 行は POSTING のまま。ワーカーは mark_posted まで進める
+    repository.mark_posted(claimed.id, tweet_id="tw1", posted_at=now)
+
+
+def test_cancel_は_送信済みの行を拒否する(repository: SocialPostRepository) -> None:
+    """キューは最大30秒古い値を映すので、既に出た行のボタンが押されうる。"""
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    repository.enqueue([_post()], {0: now})
+    claimed = repository.claim_due(now)
+    assert claimed is not None
+    repository.mark_posted(claimed.id, tweet_id="tw1", posted_at=now)
+
+    with pytest.raises(InvalidPostTransition):
+        repository.cancel(claimed.id, "取り消しました")
+
+
+def test_cancel_は_予約済みの行を落とす(repository: SocialPostRepository) -> None:
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    repository.enqueue([_post()], {0: now})
+    scheduled = repository.list_upcoming(limit=1)[0]
+
+    repository.cancel(scheduled.id, "取り消しました")
+
+    assert repository.list_upcoming() == []
     assert repository.claim_due(now) is None
 
 

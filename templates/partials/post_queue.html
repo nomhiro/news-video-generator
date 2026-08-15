@@ -55,6 +55,10 @@
                     <span class="tnum">{{ post.weighted_length }}/{{ max_weighted }}</span>
                 </div>
                 <p class="text-sm text-ink whitespace-pre-wrap">{{ post.body }}</p>
+                {# 送信中（POSTING）には取り消しボタンを出さない。押せると、
+                   投稿は X に出たのに行が FAILED になり、記事が消費済みに
+                   ならず翌日もう一度公開される。 #}
+                {% if post.status in cancellable %}
                 <form hx-post="/x/posts/{{ post.id }}/cancel" hx-target="#post-queue" hx-swap="outerHTML"
                       class="mt-2">
                     <button type="submit"
@@ -63,6 +67,9 @@
                         取り消す
                     </button>
                 </form>
+                {% else %}
+                <p class="mt-2 text-xs text-ink/50">送信中のため取り消せません</p>
+                {% endif %}
             </article>
             {% endfor %}
         </div>

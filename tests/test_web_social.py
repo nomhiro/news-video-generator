@@ -16,7 +16,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.models.job import GenerationJob, JobStatus
-from src.models.social import PostKind, PostStatus, SocialPost
+from src.models.social import (
+    CANCELLABLE_STATUSES,
+    InvalidPostTransition,
+    PostKind,
+    PostStatus,
+    SocialPost,
+    check_post_transition,
+)
 from src.web import routes
 from src.web.dependencies import (
     get_config,
@@ -86,9 +93,18 @@ def _post(
 class FakeSocialPosts:
     """`SocialPostRepository` の読み取り面だけを差し替える。"""
 
-    def __init__(self, upcoming: list[SocialPost], needs_review: list[SocialPost]) -> None:
+    def __init__(
+        self,
+        upcoming: list[SocialPost],
+        needs_review: list[SocialPost],
+        settled: list[SocialPost] | None = None,
+    ) -> None:
         self._upcoming = upcoming
         self._needs_review = needs_review
+        # 一覧には出ないが id では引ける行（POSTED / FAILED）。
+        # キューは最大30秒古い値を映すため、既に出た行の取り消しボタンが
+        # 押されうる。その経路を再現するために持つ。
+        self._settled = settled or []
         self.failed: list[tuple[int, str]] = []
 
     def list_upcoming(self, limit: int = 20) -> list[SocialPost]:
@@ -107,7 +123,24 @@ class FakeSocialPosts:
     def monthly_post_counts(self, year: int, month: int) -> tuple[int, int]:
         return (3, 1)
 
-    def mark_failed(self, post_id: int, reason: str) -> None:
+    def cancel(self, post_id: int, reason: str) -> None:
+        """**本物と同じ規律で拒否する。**
+
+        以前このフェイクは状態を見ずに記録するだけで、決して例外を
+        投げなかった。そのため「送信中の行を取り消せてしまう」という
+        二重投稿の経路がテストを素通りした（フェイクが本物より甘いと、
+        テストは実装の安全性を何も保証しない）。判定は本物と同じ
+        `CANCELLABLE_STATUSES` / `check_post_transition` を使う。
+        """
+        found = next(
+            (p for p in self._upcoming + self._needs_review + self._settled if p.id == post_id),
+            None,
+        )
+        if found is None:
+            return
+        if found.status not in CANCELLABLE_STATUSES:
+            raise InvalidPostTransition(f"{found.status} の投稿は取り消せません")
+        check_post_transition(found.status, PostStatus.FAILED)
         self.failed.append((post_id, reason))
         # キューから消えることをテストで確かめるため、以後は空にする
         self._upcoming = [p for p in self._upcoming if p.id != post_id]
@@ -261,6 +294,57 @@ def test_取り消すと結果が取り消しましたになる(
     assert response.status_code == 200
     assert "取り消しました" in response.text
     assert fake_posts.failed == [(1, "取り消しました")]
+
+
+def _client_for(posts: FakeSocialPosts, switch: FakeSwitch) -> TestClient:
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_posts] = lambda: posts
+    app.dependency_overrides[get_x_switch] = lambda: switch
+    app.dependency_overrides[get_config] = lambda: FakeConfig()
+    app.dependency_overrides[get_jobs] = lambda: FakeJobs()
+    app.dependency_overrides[get_token_store] = lambda: FakeTokenStore()
+    return TestClient(app)
+
+
+def test_送信中の投稿は取り消せない(fake_switch: FakeSwitch) -> None:
+    """取り消せると二重投稿になる。
+
+    `POSTING -> FAILED` は遷移表では許されているので、状態を見ずに
+    落とすと成功してしまう。その後ワーカーが `mark_posted` を呼んで
+    `FAILED -> POSTED` で例外になり、`on_posted` が走らないので記事が
+    消費済みにならない。**投稿は X に出たまま、翌日もう一度公開される。**
+    """
+    now = datetime.now(UTC)
+    posting = _post(3, PostStatus.POSTING, "いま送信中の本文です。", scheduled_at=now)
+    posts = FakeSocialPosts([posting], [])
+
+    with _client_for(posts, fake_switch) as client:
+        response = client.post("/x/posts/3/cancel")
+
+    assert response.status_code == 200
+    assert posts.failed == []  # 落ちていない
+    assert "取り消せませんでした" in response.text
+    # ボタン自体も出さない
+    assert "送信中のため取り消せません" in response.text
+
+
+def test_送信済みの投稿を取り消しても500にならない(fake_switch: FakeSwitch) -> None:
+    """キューは最大30秒古い値を映すので、既に出た行のボタンが押されうる。
+
+    500 を返すと htmx は何も入れ替えず、運用者には「押しても無反応な
+    ボタン」に見える。キューを返して理由を伝える。
+    """
+    now = datetime.now(UTC)
+    posted = _post(4, PostStatus.POSTED, "もう出た本文です。", scheduled_at=now, posted_at=now)
+    posts = FakeSocialPosts([], [], settled=[posted])
+
+    with _client_for(posts, fake_switch) as client:
+        response = client.post("/x/posts/4/cancel")
+
+    assert response.status_code == 200
+    assert posts.failed == []
+    assert "取り消せませんでした" in response.text
 
 
 def test_帯には早いバッチの動画も含めて今日の全ジョブが出る(

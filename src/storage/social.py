@@ -20,6 +20,8 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.models.social import (
+    CANCELLABLE_STATUSES,
+    InvalidPostTransition,
     NewPost,
     PostKind,
     PostStatus,
@@ -175,6 +177,35 @@ class SocialPostRepository:
     def mark_failed(self, post_id: int, reason: str) -> None:
         """送信前に失敗したと記録する（再実行できる）。"""
         self._transition(post_id, PostStatus.FAILED, error_message=reason)
+
+    def cancel(self, post_id: int, reason: str) -> None:
+        """画面からの取り消し。**送信中・送信済みは拒否する。**
+
+        `mark_failed` と分けている理由: `POSTING -> FAILED` は遷移表では
+        許可されている（送信前に失敗が確定した場合のため）。そのため
+        `mark_failed` をそのまま画面に繋ぐと、送信中の行を取り消せてしまい、
+        投稿は X に出たのに行は FAILED、記事は未消費のまま残って
+        **翌日もう一度公開される**。許可の判断は遷移表では表現できない
+        （同じ遷移が、誰が起こしたかで許否が変わる）ので、
+        `CANCELLABLE_STATUSES` を別に持って先に検査する。
+
+        Args:
+            post_id: 対象の投稿
+            reason: 画面に出す理由
+
+        Raises:
+            InvalidPostTransition: 取り消せない状態だった
+        """
+        with session_scope(self._sessions) as session:
+            record = session.get(SocialPostRecord, post_id)
+            if record is None:
+                return
+            current = PostStatus(record.status)
+            if current not in CANCELLABLE_STATUSES:
+                raise InvalidPostTransition(f"{current} の投稿は取り消せません")
+            check_post_transition(current, PostStatus.FAILED)
+            record.status = PostStatus.FAILED
+            record.error_message = reason
 
     def mark_needs_review(self, post_id: int, reason: str) -> None:
         """人が見るまで触らない状態にする。"""

@@ -116,6 +116,25 @@ _ALLOWED_TRANSITIONS: dict[PostStatus, frozenset[PostStatus]] = {
 
 TERMINAL_STATUSES = frozenset({PostStatus.POSTED, PostStatus.FAILED})
 
+# 画面の「取り消す」で落とせる状態。
+#
+# **POSTING を含めないのが要点。** `POSTING -> FAILED` は上の遷移表では
+# 許可されているが（API を呼ぶ前に失敗が確定した場合のため）、送信中の行を
+# 画面から取り消すと最悪の結果になる:
+#
+# 1. 取り消しが成功して行は FAILED になる
+# 2. ワーカーは送信を終えて `mark_posted` を呼ぶが `FAILED -> POSTED` は
+#    許可されておらず InvalidPostTransition になる
+# 3. その例外はループの汎用ハンドラに落ち、`on_posted` が走らない
+# 4. 記事が消費済みにならないので翌日また下書きされ、**同じ内容が
+#    2回公開される**（X API に冪等キーが無いので取り返せない）
+#
+# POSTED も含めない。キューは最大30秒古い値を映すので、既に出た行の
+# ボタンが押されうる。押しても「もう出ています」と伝えるのが正しい。
+CANCELLABLE_STATUSES = frozenset(
+    {PostStatus.DRAFTED, PostStatus.SCHEDULED, PostStatus.NEEDS_REVIEW}
+)
+
 
 class InvalidPostTransition(Exception):
     """許可されていない状態遷移。"""

@@ -12,7 +12,13 @@ from fastapi.templating import Jinja2Templates
 from config import Config
 from src.models.job import BatchProgress, GenerationJob, JobStatus
 from src.models.news import NewsCategory
-from src.models.social import X_MAX_WEIGHTED_LENGTH, PostStatus, SocialPost
+from src.models.social import (
+    CANCELLABLE_STATUSES,
+    X_MAX_WEIGHTED_LENGTH,
+    InvalidPostTransition,
+    PostStatus,
+    SocialPost,
+)
 from src.news.aggregator import NewsAggregator
 from src.social.cost import estimate_month_cost
 from src.social.switch import PostingSwitch
@@ -925,6 +931,11 @@ async def x_queue(
             "upcoming": posts.list_upcoming(limit=20),
             "max_weighted": X_MAX_WEIGHTED_LENGTH,
             "message": message,
+            # `list_upcoming` は POSTING（送信中）も含める。送信中の行に
+            # 取り消しボタンを出すと、押した結果が二重投稿になりうるので
+            # 状態で出し分ける（拒否はサーバー側にもあるが、押せない
+            # ボタンを見せない方が運用者を迷わせない）。
+            "cancellable": CANCELLABLE_STATUSES,
         },
     )
 
@@ -990,6 +1001,19 @@ async def x_cancel_post(
     """予約を取り消す。
 
     操作名を通す。ボタンが「取り消す」なら結果の文言も「取り消しました」。
+
+    **状態を見ずに落とさない。** 送信中（POSTING）の行を取り消せると、
+    投稿は X に出たのに行は FAILED になり、ワーカーの `mark_posted` が
+    `FAILED -> POSTED` で例外になって記事が消費済みにならず、翌日
+    同じ内容がもう一度公開される。送信済み（POSTED）も、キューが最大
+    30秒古い値を映すぶん押されうる。どちらも例外を画面に出さず
+    （500 だと htmx が何も入れ替えず、押しても無反応に見える）、
+    キューを返して理由を伝える。
     """
-    posts.mark_failed(post_id, "取り消しました")
+    try:
+        posts.cancel(post_id, "取り消しました")
+    except InvalidPostTransition:
+        return await x_queue(
+            request, posts, message="送信中または送信済みのため取り消せませんでした"
+        )
     return await x_queue(request, posts, message="取り消しました")
