@@ -105,7 +105,52 @@ def test_結果は日次ファイルとして保存先に書く(
 
     assert "metrics/x/2026-08-15.json" in store.published
     saved = json.loads(store.published["metrics/x/2026-08-15.json"])
-    assert saved["metrics"]["day1"]["impression_count"] == 100
+    assert saved["records"][0]["metrics"]["impression_count"] == 100
+
+
+def test_レコードは_それ自体で解釈できる(repository: SocialPostRepository, tmp_path: Path) -> None:
+    """平坦な `tweet_id -> metrics` だと、あとから読めない。
+
+    24時間後の値と7日後の値が同じ形で同じ辞書に入るため、どちらの測定かは
+    `posted_at` と突き合わせないと分からない。その `posted_at` は SQLite に
+    しか無く**デプロイごとに消える**ので、Blob に蓄積する意味が1回の
+    マージで失われていた。1レコードに投稿の識別と時刻を持たせる。
+    """
+    posted_at = NOW - timedelta(hours=24)
+    _posted(repository, "day1", posted_at)
+    _posted(repository, "week1", NOW - timedelta(days=7))
+    store = FakeStore()
+
+    collect_metrics(repository, FakeMetricsClient(), store, tmp_path, now=NOW)
+
+    saved = json.loads(store.published["metrics/x/2026-08-15.json"])
+    by_id = {r["tweet_id"]: r for r in saved["records"]}
+    assert by_id["day1"]["offset_hours"] == 24
+    assert by_id["week1"]["offset_hours"] == 168
+    assert by_id["day1"]["posted_at"] == posted_at.isoformat()
+    assert by_id["day1"]["kind"] == "single"
+    assert by_id["day1"]["article_title"] == "記事"
+    assert by_id["day1"]["metrics"]["like_count"] == 3
+
+
+def test_応答に無い投稿もレコードとして残す(
+    repository: SocialPostRepository, tmp_path: Path
+) -> None:
+    """落とすと「測ろうとして取れなかった」ことが記録から消える。"""
+
+    class EmptyClient:
+        def fetch_metrics(self, tweet_ids: list[str]) -> dict[str, dict[str, int]]:
+            return {}
+
+    _posted(repository, "gone", NOW - timedelta(hours=24))
+    store = FakeStore()
+
+    measured = collect_metrics(repository, EmptyClient(), store, tmp_path, now=NOW)
+
+    assert measured == 0  # 取れたものは無い
+    saved = json.loads(store.published["metrics/x/2026-08-15.json"])
+    assert saved["records"][0]["tweet_id"] == "gone"
+    assert saved["records"][0]["metrics"] == {}
 
 
 def test_対象が無ければ何も書かない(repository: SocialPostRepository, tmp_path: Path) -> None:

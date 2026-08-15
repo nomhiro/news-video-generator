@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from src.models.social import SocialPost
 from src.storage.social import SocialPostRepository
 from src.utils.logger import log_step, log_success
 
@@ -63,6 +64,11 @@ def collect_metrics(
 ) -> int:
     """対象の投稿の指標を取り、日次ファイルとして保存する。
 
+    ファイルは `{"measured_at": ..., "records": [...]}` の形。1レコードが
+    1測定で、`tweet_id` / `offset_hours`（24 か 168）/ `posted_at` /
+    `kind` / `article_title` / `metrics` を持つ。**平坦な
+    `tweet_id -> metrics` にしないこと**（理由は下のコメント）。
+
     Args:
         repository: 投稿表
         client: 指標を取れるクライアント
@@ -71,28 +77,63 @@ def collect_metrics(
         now: 現在時刻（UTC aware）
 
     Returns:
-        int: 測った件数
+        int: 実際に指標が取れたレコードの件数（応答に無かったものは
+            レコードとして残すが、この数には入れない）
     """
     moment = now or datetime.now(UTC)
 
-    tweet_ids: list[str] = []
+    # (何時間後の計測か, 対象の投稿)。**どの offset の測定値かを行に持たせる。**
+    #
+    # 以前は日次ファイルに `tweet_id -> metrics` の平坦な辞書を書いていた。
+    # 24時間後の値と7日後の値が同じ形で同じ辞書に入るため、ある行が
+    # どちらの測定なのかは `posted_at` と突き合わせないと分からない。
+    # その `posted_at` は SQLite にしか無く、**デプロイごとに消える**。
+    # Blob に書いていた理由（蓄積して人が読む）が1回のマージで無くなる。
+    targets: list[tuple[int, SocialPost]] = []
+    seen: set[tuple[str, int]] = set()
     for offset in MEASUREMENT_OFFSETS:
+        offset_hours = round(offset.total_seconds() / 3600)
         target = moment - offset
         for post in repository.list_posted_between(target - WINDOW, target + WINDOW):
-            if post.tweet_id and post.tweet_id not in tweet_ids:
-                tweet_ids.append(post.tweet_id)
+            if post.tweet_id is None:
+                continue
+            marker = (post.tweet_id, offset_hours)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            targets.append((offset_hours, post))
 
-    if not tweet_ids:
+    if not targets:
         # 空のファイルを毎日置くと Blob にごみが積もる
         return 0
 
+    # 問い合わせは tweet_id 単位で重複を排す（同じ投稿を2つの offset で
+    # 測る状況は今の窓幅では起きないが、起きたときに課金を二重に払わない）。
+    tweet_ids = list(dict.fromkeys(tid for tid, _ in seen))
     log_step(f"{len(tweet_ids)}件の投稿の指標を取得します", "📈")
     metrics: dict[str, dict[str, int]] = {}
     for start in range(0, len(tweet_ids), BATCH_SIZE):
         metrics.update(client.fetch_metrics(tweet_ids[start : start + BATCH_SIZE]))
 
+    # 1測定 = 1レコード。あとから読む人が SQLite に頼らずに解釈できるよう、
+    # 投稿の識別（tweet_id / article_title / kind）と時刻（posted_at）を
+    # レコード自身に持たせる。すべて既に読み込んでいる行から取れる。
+    records: list[dict[str, object]] = [
+        {
+            "tweet_id": post.tweet_id,
+            "offset_hours": offset_hours,
+            "posted_at": post.posted_at.isoformat() if post.posted_at is not None else None,
+            "kind": str(post.kind),
+            "article_title": post.article_title,
+            # 応答に無い（削除された等）投稿も空で残す。落とすと
+            # 「測ろうとして取れなかった」ことが記録から消える。
+            "metrics": metrics.get(post.tweet_id or "", {}),
+        }
+        for offset_hours, post in targets
+    ]
+
     key = f"metrics/x/{moment:%Y-%m-%d}.json"
-    payload = {"measured_at": moment.isoformat(), "metrics": metrics}
+    payload = {"measured_at": moment.isoformat(), "records": records}
 
     work_dir.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(dir=work_dir, suffix=".json")
@@ -104,5 +145,6 @@ def collect_metrics(
     finally:
         temp_path.unlink(missing_ok=True)
 
-    log_success(f"指標を保存しました（{key}、{len(metrics)}件）")
-    return len(metrics)
+    measured = sum(1 for record in records if record["metrics"])
+    log_success(f"指標を保存しました（{key}、{len(records)}レコード / 取得 {measured}件）")
+    return measured
