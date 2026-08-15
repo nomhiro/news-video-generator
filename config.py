@@ -233,6 +233,37 @@ class Config(BaseSettings):
     tiktok_redirect_uri: str = Field(default="http://127.0.0.1:8090/callback")
     tiktok_default_privacy: str = Field(default="SELF_ONLY")
 
+    # --- X（旧 Twitter）投稿 ---
+    #
+    # 既定は無効。完全自動投稿なので、開発中に勝手に公開されると
+    # 取り返しがつかない。有効化は画面から行う（下記のスイッチ）。
+    x_posting_enabled: bool = Field(default=False)
+
+    x_client_id: str = Field(default="")
+    x_client_secret: SecretStr = Field(default=SecretStr(""))
+    x_token_file: str = Field(default="x_token.json")
+    x_redirect_uri: str = Field(default="http://127.0.0.1:8091/callback")
+
+    # 投稿時刻（SCHEDULE_TIMEZONE のローカル時刻、HH:MM）。
+    x_post_times: CommaSeparated = Field(default=["08:00", "12:30", "19:00", "21:30"])
+
+    # 1日のテーマ数（宣伝投稿は含まない）。
+    x_posts_per_day: int = Field(default=4, ge=1, le=20)
+
+    # 予定時刻からこれ以上遅れた投稿は捨てる。
+    # 止まっていたあと復帰した瞬間の連投を防ぐ。
+    x_max_post_delay_minutes: int = Field(default=60, ge=1)
+
+    # 概算コストの上限（USD/月）と単価。
+    # 単価を設定に出しているのは、X の料金改定に追随するため。
+    x_monthly_budget_usd: float = Field(default=20.0, gt=0)
+    x_cost_per_post_usd: float = Field(default=0.015, ge=0)
+    x_cost_per_post_with_link_usd: float = Field(default=0.20, ge=0)
+
+    # 固定のハッシュタグ。モデルに作らせない
+    # （無関係なタグはスパム判定を受ける）。
+    x_hashtags: CommaSeparated = Field(default=["#AI", "#生成AI"])
+
     @field_validator("ai_search_queries", mode="before")
     @classmethod
     def _parse_ai_search_queries(cls, value: object) -> object:
@@ -310,6 +341,34 @@ class Config(BaseSettings):
             ZoneInfo(value)
         except (ZoneInfoNotFoundError, ValueError) as e:
             raise ValueError(f"SCHEDULE_TIMEZONE が不正です: {value!r}") from e
+        return value
+
+    @field_validator("x_post_times", "x_hashtags", mode="before")
+    @classmethod
+    def _parse_x_comma_separated(cls, value: object) -> object:
+        """カンマ区切りの文字列をリストに変換する。
+
+        `schedule_formats` と同じ理由（pydantic は list を JSON として
+        解釈しようとするため、素直な書き方を通すにはここで変換する）。
+        """
+        if isinstance(value, str):
+            return [v.strip() for v in value.split(",") if v.strip()]
+        return value
+
+    @field_validator("x_post_times")
+    @classmethod
+    def _check_x_post_times(cls, value: list[str]) -> list[str]:
+        """各要素が HH:MM として解釈できること。
+
+        `schedule_time` と同じ理由: 解釈できない値だとスケジューラの
+        起動時に落ちる。設定を読む時点で弾いた方が原因が分かりやすい。
+        """
+        for item in value:
+            try:
+                hour, minute = (int(part) for part in item.split(":", 1))
+                dt_time(hour=hour, minute=minute)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"X_POST_TIMES は HH:MM の形式で指定してください: {item!r}") from e
         return value
 
     @field_validator("youtube_default_privacy")
@@ -445,6 +504,7 @@ class Config(BaseSettings):
             "youtube_token": Path(self.youtube_token_file),
             "youtube_client_secrets": Path(self.youtube_client_secrets_file),
             "tiktok_token": Path(self.tiktok_token_file),
+            "x_token": Path(self.x_token_file),
         }
 
     @property
