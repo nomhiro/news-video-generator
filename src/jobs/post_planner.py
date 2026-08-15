@@ -86,7 +86,12 @@ class SupportsCardImageGeneration(Protocol):
     """`ImageGenerator` の必要な部分だけ。"""
 
     def generate_batch(
-        self, prompts: list[str], output_dir: Path, *, size: str | None = None
+        self,
+        prompts: list[str],
+        output_dir: Path,
+        *,
+        size: str | None = None,
+        enhance: bool = True,
     ) -> list[Path]:
         """プロンプトから画像を生成する。"""
         ...
@@ -296,7 +301,14 @@ def _build_card_image(
     try:
         visual = card_generator.generate(article)
         prompt = build_card_prompt(visual)
-        paths = image_generator.generate_batch([prompt], output_dir, size=CARD_IMAGE_SIZE)
+        # enhance=False: `CARD_STYLE_PROMPT` は medium / palette / composition /
+        # constraints を自分で書き切った完結済みの指示を持つ。
+        # `_enhance_prompt` は動画用の1行シーン記述を飾るためのもので、
+        # 重ねると矛盾した指示が混ざる（縦長構図 vs 1024x1024、「ラベルの
+        # 文字を描け」vs「テキストは描くな」）。
+        paths = image_generator.generate_batch(
+            [prompt], output_dir, size=CARD_IMAGE_SIZE, enhance=False
+        )
         # キーに group_id は使えない（group_id は NewPost 構築後に
         # SocialPostRepository.enqueue が振るため）。article_id は URL の
         # 16文字ハッシュで安定しているので、同じ記事の再ドラフトはキーを

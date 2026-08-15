@@ -67,6 +67,18 @@ def test_ラベルが英大文字でなければ弾く():
         _visual(labels=["キャッシュ"])
 
 
+def test_ラベルが小文字の英字だと弾く():
+    """`isascii()` だけでは通ってしまう境界。
+
+    日本語ラベル（`キャッシュ`）は `isascii()` で落ちる、5個ラベルは
+    `max_length` で落ちる。どちらも `label != label.upper()` の分岐を
+    経由しないため、この条件を消してもテストは全部通ったままになる
+    （実際には小文字のラベルが画像にそのまま描かれてしまう）。
+    """
+    with pytest.raises(ValueError):
+        _visual(labels=["cache"])
+
+
 def test_ラベルは4個まで():
     with pytest.raises(ValueError):
         _visual(labels=["A", "B", "C", "D", "E"])

@@ -93,14 +93,19 @@ class FakeCardImageGenerator:
 
     def __init__(self, error: Exception | None = None) -> None:
         self._error = error
-        self.calls: list[tuple[list[str], Path, str | None]] = []
+        self.calls: list[tuple[list[str], Path, str | None, bool]] = []
 
     def generate_batch(
-        self, prompts: list[str], output_dir: Path, *, size: str | None = None
+        self,
+        prompts: list[str],
+        output_dir: Path,
+        *,
+        size: str | None = None,
+        enhance: bool = True,
     ) -> list[Path]:
         if self._error:
             raise self._error
-        self.calls.append((prompts, output_dir, size))
+        self.calls.append((prompts, output_dir, size, enhance))
         output_dir.mkdir(parents=True, exist_ok=True)
         path = output_dir / "card.png"
         path.write_bytes(b"fake-png")
@@ -259,6 +264,9 @@ def test_カードは画像を生成してキーを添付する(tmp_path: Path) 
     assert len(image_generator.calls) == 1
     generated_path = image_generator.calls[0][1] / "card.png"
     assert artifacts.published == [(generated_path, "social/cards/d.png")]
+    # CARD_STYLE_PROMPT は完結済みの指示なので、動画用の装飾
+    # （_enhance_prompt）を重ねない（Finding 1 の再発防止）。
+    assert image_generator.calls[0][3] is False
     # キャプションが下書き生成に渡っていること
     assert generator.captions[-1] == "同じ入力を使い回すことで推論コストが下がる。"
 
