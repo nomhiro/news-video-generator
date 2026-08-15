@@ -539,6 +539,12 @@ Azure 側のロールは2つだけ。レジストリが GHCR なので ACR へ�
 | `Reader` | リソースグループ | アプリとリビジョンの状態を引くため。キーは読めない |
 | `Contributor` | Container App | `Container Apps Contributor` は `Microsoft.App/containerApps/*/write`（サブリソース）しか持たず、アプリ本体への `write` を持たないので使えない |
 
+**Git Bash から `az role assignment create` を打つときは `MSYS_NO_PATHCONV=1` を付ける。**
+`--scope` の `/subscriptions/...` が Windows パス（`C:/Program Files/Git/subscriptions/...`）に
+変換され、`MissingSubscription: The request did not have a subscription or a valid
+tenant level resource provider` という原因の分からないエラーになる（一度踏んだ）。
+`gh api` も同じ理由で先頭の `/` を付けずに `gh api user/packages/...` と書く。
+
 戻すときに壊しやすい点・運用上の注意。
 
 - **CD 後にローカルの azd env が古くなる。** `SERVICE_WEB_IMAGE_NAME` は CD では
