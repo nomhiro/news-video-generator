@@ -185,20 +185,38 @@ def ensure_fresh(
             access_token=str(payload["access_token"]),
             # 新しい refresh token が返らない実装もありうるので、
             # 無ければ現在のものを維持する
+            # `or` で落とすのは意図的。空文字は refresh token として
+            # 決して有効ではないので、欠損（キー無し）と同じに扱う。
             refresh_token=str(payload.get("refresh_token") or credentials.refresh_token),
             expires_at=moment + timedelta(seconds=int(payload.get("expires_in", 7200))),
         )
     except Exception as e:
         raise XTokenExpiredError(f"X のトークンを更新できませんでした: {e}") from e
-    write_json(
-        store,
-        X_TOKEN,
-        {
-            "access_token": refreshed.access_token,
-            "refresh_token": refreshed.refresh_token,
-            "expires_at": refreshed.expires_at.isoformat(),
-        },
-    )
+    # 書き戻しの失敗も `XTokenExpiredError` に変換する。
+    #
+    # 生の例外を投げると、呼び出し元（`PostWorker._run_one` /
+    # 指標計測のタスク）は `XTokenExpiredError` しか捕まえないので
+    # ループの汎用ハンドラに落ちる。そこには「再認証が必要」という情報が
+    # 無い。だがこの時点で**古い refresh token は既に使い切られており**
+    # （単回使用）、保存先には古い値が残っている。つまり自動での回復は
+    # 不可能で、ブラウザでの再認証だけが道。それを言わずにただの
+    # 「エラー」として流すと、原因の分からない停止になる。
+    try:
+        write_json(
+            store,
+            X_TOKEN,
+            {
+                "access_token": refreshed.access_token,
+                "refresh_token": refreshed.refresh_token,
+                "expires_at": refreshed.expires_at.isoformat(),
+            },
+        )
+    except Exception as e:
+        raise XTokenExpiredError(
+            "更新したトークンを保存先に書き戻せませんでした。"
+            "古い refresh token は既に無効なので、再認証が必要です: "
+            f"{e}"
+        ) from e
     return refreshed
 
 

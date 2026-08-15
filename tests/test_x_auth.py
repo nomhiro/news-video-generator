@@ -100,6 +100,30 @@ def test_期限が近ければ_refresh_して_書き戻す(store: FakeStore) -> 
     assert persisted["refresh_token"] == "new-refresh"
 
 
+def test_書き戻しに失敗したら_再認証が必要だと伝える(store: FakeStore) -> None:
+    """生の例外を投げると、原因の分からない停止になる。
+
+    書き戻しに失敗した時点で古い refresh token は既に使い切られている
+    （単回使用）ので、自動での回復は不可能。呼び出し元が捕まえるのは
+    `XTokenExpiredError` だけなので、この型に変換しないと
+    「再認証が必要」という唯一の復旧手段が誰にも伝わらない。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _save(store, now)
+    creds = load_credentials(store)
+    assert creds is not None
+
+    class UnwritableStore(FakeStore):
+        def write(self, name: str, payload: str) -> None:
+            raise OSError("Blob に到達できません")
+
+    unwritable = UnwritableStore()
+    unwritable.data = dict(store.data)
+
+    with pytest.raises(XTokenExpiredError, match="再認証"):
+        ensure_fresh(unwritable, creds, FakeExchange(), now=now)
+
+
 def test_保存先が空なら_None(store: FakeStore) -> None:
     """未認証を例外にすると、画面を開くだけで 500 になる。"""
     assert load_credentials(store) is None
