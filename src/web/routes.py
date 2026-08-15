@@ -1,18 +1,26 @@
 """FastAPI routes for HTMX web interface."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from config import Config
-from src.models.job import BatchProgress
+from src.models.job import BatchProgress, GenerationJob, JobStatus
 from src.models.news import NewsCategory
+from src.models.social import X_MAX_WEIGHTED_LENGTH, PostStatus, SocialPost
 from src.news.aggregator import NewsAggregator
+from src.social.cost import estimate_month_cost
+from src.social.switch import PostingSwitch
+from src.social.x_auth import load_credentials
 from src.storage.artifacts import ArtifactStore, ArtifactStoreError
 from src.storage.jobs import JobRepository
+from src.storage.social import SocialPostRepository
+from src.storage.tokens import TokenStore
 from src.uploaders.tiktok_uploader import TikTokUploader, parse_privacy_level
 from src.uploaders.youtube_uploader import YouTubeUploader
 from src.utils.logger import log_error, log_step, log_success
@@ -21,7 +29,10 @@ from src.web.dependencies import (
     get_artifact_store,
     get_config,
     get_jobs,
+    get_posts,
     get_tiktok_uploader,
+    get_token_store,
+    get_x_switch,
     get_youtube_uploader,
 )
 
@@ -766,3 +777,228 @@ async def tiktok_upload(
                 "error_message": result.error_message,
             },
         )
+
+
+# ============================================================
+# X 運用の画面
+#
+# 以前の画面は「利用者が操作する」ことを前提にしていた。X の自動投稿が
+# 入った今、運用者はこの画面を見ているだけで、実際の操作（下書き生成・
+# 送信）はスケジューラとワーカーが行う。運用者の仕事は「これから出る
+# ものを読んで、おかしければ気付く」ことだけなので、ルートも
+# 「畳まず全文を出す」「状態を色と語の両方で示す」ことを優先する。
+# ============================================================
+
+# 投稿の状態 -> 表示語。色だけでは伝わらない（色覚・モノクロ印刷等）ので
+# 必ず語も出す。
+_POST_STATUS_LABELS: dict[PostStatus, str] = {
+    PostStatus.DRAFTED: "下書き",
+    PostStatus.SCHEDULED: "予約",
+    PostStatus.POSTING: "投稿中",
+    PostStatus.POSTED: "投稿済",
+    PostStatus.FAILED: "失敗",
+    PostStatus.NEEDS_REVIEW: "要確認",
+}
+
+# 動画ジョブの状態 -> 表示語。X の投稿と同じ帯に並べるための対応表。
+_JOB_STATUS_LABELS: dict[JobStatus, str] = {
+    JobStatus.QUEUED: "待機",
+    JobStatus.RUNNING: "生成中",
+    JobStatus.SUCCEEDED: "完成",
+    JobStatus.FAILED: "失敗",
+}
+
+
+def _slot_time(post: SocialPost) -> datetime:
+    """帯に置く時刻を決める。
+
+    投稿済みは実際に出た時刻（`posted_at`）、それ以外は予定時刻を使う。
+    どちらも無い（起こらないはずだが、下書きのまま予定が付いていない等）
+    場合は投入時刻に落とす。
+    """
+    if post.status == PostStatus.POSTED and post.posted_at is not None:
+        return post.posted_at
+    return post.scheduled_at or post.created_at
+
+
+def _to_post_slot(post: SocialPost, zone: ZoneInfo) -> dict[str, object]:
+    """`SocialPost` を帯の1枠に変換する。"""
+    return {
+        "at": _slot_time(post).astimezone(zone),
+        "kind": "x",
+        "status": post.status.value,
+        "status_label": _POST_STATUS_LABELS[post.status],
+        "label": post.article_title,
+    }
+
+
+def _to_job_slot(job: GenerationJob, zone: ZoneInfo) -> dict[str, object]:
+    """`GenerationJob` を帯の1枠に変換する。
+
+    動画と X 投稿を同じ軸に並べる理由: どちらも `gpt-image-2` の
+    リージョン単位クォータ（上限4）を共有しているため、同時に走っている
+    ことが帯を見た瞬間に分かる必要がある。
+    """
+    return {
+        "at": job.created_at.astimezone(zone),
+        "kind": "video",
+        "status": job.status.value,
+        "status_label": _JOB_STATUS_LABELS[job.status],
+        "label": job.article_title,
+    }
+
+
+def _slot_sort_key(slot: dict[str, object]) -> datetime:
+    """帯の並び替え用キー。
+
+    `dict[str, object]` のままだと `sorted` の `key` が `object` を返す形に
+    推論され、比較可能性を型で保証できない。時刻だけを取り出して
+    `datetime` として返す。
+    """
+    at = slot["at"]
+    assert isinstance(at, datetime)
+    return at
+
+
+def _today_jobs(jobs: JobRepository, start: datetime, end: datetime) -> list[GenerationJob]:
+    """今日投入された動画ジョブを返す。
+
+    `JobRepository` は日付で絞る専用のクエリを持たない（既存の用途が
+    「直近バッチ」だけだったため）。ここでは直近バッチから引いて
+    日付でフィルタする最小限の実装にとどめる。専用クエリが必要になったら
+    計測タスクで足す。
+    """
+    batch_id = jobs.latest_batch_id()
+    if batch_id is None:
+        return []
+    return [j for j in jobs.list_batch(batch_id) if start <= j.created_at < end]
+
+
+@router.get("/x/band", response_class=HTMLResponse)
+async def x_band(
+    request: Request,
+    posts: SocialPostRepository = Depends(get_posts),
+    config: Config = Depends(get_config),
+    jobs: JobRepository = Depends(get_jobs),
+) -> HTMLResponse:
+    """今日の時間割。過ぎた枠・いま・これから出るものを1本の軸に並べる。
+
+    このプロダクトの本質は「決めた時刻に、見ていない間に出る」こと。
+    数字のタイルではなく時間軸を主役にしているのはそのため。
+    """
+    zone = ZoneInfo(config.schedule_timezone)
+    local_now = datetime.now(UTC).astimezone(zone)
+    day_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_utc = day_start_local.astimezone(UTC)
+    day_end_utc = day_start_utc + timedelta(days=1)
+
+    post_slots = [
+        _to_post_slot(post, zone)
+        for post in posts.list_upcoming(limit=40)
+        + posts.list_posted_between(day_start_utc, day_end_utc)
+    ]
+    job_slots = [_to_job_slot(job, zone) for job in _today_jobs(jobs, day_start_utc, day_end_utc)]
+
+    return templates.TemplateResponse(
+        request,
+        "partials/day_band.html",
+        {
+            "slots": sorted(post_slots + job_slots, key=_slot_sort_key),
+            "now": local_now,
+            # 1日を 00:00〜24:00 の帯として描くので、いまの位置は割合で渡す
+            "now_ratio": (local_now.hour * 60 + local_now.minute) / (24 * 60),
+            "needs_review": posts.list_needs_review(),
+        },
+    )
+
+
+@router.get("/x/queue", response_class=HTMLResponse)
+async def x_queue(
+    request: Request,
+    posts: SocialPostRepository = Depends(get_posts),
+    message: str | None = None,
+) -> HTMLResponse:
+    """投稿キュー。要確認を先に、次にこれから出るものを並べる。
+
+    本文は畳まない。自動投稿なので運用者の唯一の仕事が「読んで気付く」
+    ことで、開かないと読めない UI では誰も読まない。
+
+    Args:
+        message: 直前の操作結果（例:「取り消しました」）。`aria-live` に出す
+    """
+    return templates.TemplateResponse(
+        request,
+        "partials/post_queue.html",
+        {
+            "needs_review": posts.list_needs_review(),
+            "upcoming": posts.list_upcoming(limit=20),
+            "max_weighted": X_MAX_WEIGHTED_LENGTH,
+            "message": message,
+        },
+    )
+
+
+@router.get("/x/status", response_class=HTMLResponse)
+async def x_status(
+    request: Request,
+    posts: SocialPostRepository = Depends(get_posts),
+    switch: PostingSwitch = Depends(get_x_switch),
+    config: Config = Depends(get_config),
+    tokens: TokenStore = Depends(get_token_store),
+) -> HTMLResponse:
+    """自動投稿の状態、概算コスト、認証の有無。
+
+    未認証のときは、画面から完結する再認証フローを出さない。X の
+    PKCE フローはブラウザのリダイレクトを要求し、コンテナの中では
+    完結できない（YouTube を localhost にリダイレクトできないのと
+    同じ理由）。代わりに、ローカルで認証してから
+    `scripts.push_tokens` で送る手順を案内する。
+    """
+    now = datetime.now(UTC)
+    plain, with_link = posts.monthly_post_counts(now.year, now.month)
+    spent = estimate_month_cost(
+        plain, with_link, config.x_cost_per_post_usd, config.x_cost_per_post_with_link_usd
+    )
+    return templates.TemplateResponse(
+        request,
+        "partials/x_status.html",
+        {
+            "enabled": switch.is_enabled(),
+            # 「概算」と明示する。実際の課金は X 側の集計なので一致を保証できない
+            "spent_usd": spent,
+            "budget_usd": config.x_monthly_budget_usd,
+            "authenticated": load_credentials(tokens) is not None,
+        },
+    )
+
+
+@router.post("/x/enabled", response_class=HTMLResponse)
+async def x_set_enabled(
+    request: Request,
+    enabled: bool = Form(...),
+    switch: PostingSwitch = Depends(get_x_switch),
+    posts: SocialPostRepository = Depends(get_posts),
+    config: Config = Depends(get_config),
+    tokens: TokenStore = Depends(get_token_store),
+) -> HTMLResponse:
+    """自動投稿を開始・停止する。
+
+    実体は Azure Files 上のファイル。SQLite に置くとリビジョン更新で
+    消え、画面で有効にした翌日にマージした時点で黙って止まる。
+    """
+    switch.set_enabled(enabled)
+    return await x_status(request, posts, switch, config, tokens)
+
+
+@router.post("/x/posts/{post_id}/cancel", response_class=HTMLResponse)
+async def x_cancel_post(
+    request: Request,
+    post_id: int,
+    posts: SocialPostRepository = Depends(get_posts),
+) -> HTMLResponse:
+    """予約を取り消す。
+
+    操作名を通す。ボタンが「取り消す」なら結果の文言も「取り消しました」。
+    """
+    posts.mark_failed(post_id, "取り消しました")
+    return await x_queue(request, posts, message="取り消しました")

@@ -1,0 +1,55 @@
+<!--
+  今日の時間軸。
+
+  このプロダクトの本質は「決めた時刻に、見ていない間に出る」こと。
+  数字のタイル（今日は何件、みたいな集計）ではなく、時間軸そのものを
+  主役に描く。動画ジョブと X 投稿を同じ軸に乗せているのは、両者が
+  同じ画像生成クォータ（gpt-image-2、リージョン単位で上限4）を争うため。
+  帯を見た瞬間に「今ちょうど両方が走っている」ことが分かる。
+-->
+<div id="day-band" class="rounded-lg bg-raised border border-ink/10 p-4">
+    <div class="flex items-baseline justify-between mb-3">
+        <h2 class="font-display font-semibold text-ink text-sm tracking-wide">今日の時間軸</h2>
+        <span class="text-xs text-ink/50 tnum">いま {{ now.strftime('%H:%M') }}</span>
+    </div>
+
+    {% if needs_review %}
+    {# 要確認はここにも出す。半端に投稿されたスレッドを放置するのが
+       最悪の結果なので、帯の外（キュー側）だけに置いて埋もれさせない。 #}
+    <div class="mb-3 rounded border border-vermilion/40 bg-vermilion/10 px-3 py-2 text-sm text-vermilion"
+         role="alert">
+        <p class="font-semibold">要確認 {{ needs_review|length }}件</p>
+        {% for post in needs_review %}
+        <p class="mt-1 text-xs">{{ post.article_title }}（{{ post.error_message or "理由不明" }}）</p>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="relative h-20 rounded bg-ink/5 overflow-x-auto">
+        {% for hour in range(0, 25, 6) %}
+        <span class="absolute top-1 -translate-x-1/2 text-[10px] text-ink/40 tnum"
+              style="left: {{ (hour / 24 * 100) }}%">{{ "%02d:00" | format(hour) }}</span>
+        {% endfor %}
+
+        {# 「いま」の線。動くのはここだけ #}
+        <div class="now-marker absolute inset-y-0 w-px bg-vermilion"
+             style="left: {{ now_ratio * 100 }}%" aria-hidden="true"></div>
+
+        {% for slot in slots %}
+        <div class="absolute top-6 -translate-x-1/2 flex flex-col items-center gap-0.5"
+             style="left: {{ ((slot.at.hour * 60 + slot.at.minute) / (24 * 60) * 100) }}%">
+            <span class="w-2.5 h-2.5 rounded-full
+                {% if slot.status in ('posted', 'succeeded') %}bg-teal
+                {% elif slot.status in ('needs_review', 'failed') %}bg-vermilion
+                {% else %}bg-amber{% endif %}"
+                  title="{{ slot.label }} ・ {{ slot.status_label }}"></span>
+            <span class="text-[10px] text-ink/70 tnum whitespace-nowrap">{{ slot.at.strftime('%H:%M') }}</span>
+            <span class="text-[10px] text-ink/50 whitespace-nowrap">{{ slot.status_label }}</span>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if not slots %}
+    <p class="mt-2 text-xs text-ink/40">今日はまだ何も予定されていません</p>
+    {% endif %}
+</div>

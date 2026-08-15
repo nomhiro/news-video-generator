@@ -401,6 +401,16 @@ def get_x_switch(context: AppContext = Depends(get_context)) -> PostingSwitch:
     return context.x_switch
 
 
+def get_token_store(context: AppContext = Depends(get_context)) -> TokenStore:
+    """OAuth トークンの保存先を取得する。
+
+    `/x/status` が X の認証有無（`load_credentials` が None を返すか）を
+    判定するのに使う。YouTube/TikTok アップローダはトークン保存先を
+    内部に持つが、X はここで直接読む必要があるため getter を分けている。
+    """
+    return context.token_store
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """アプリの起動時に依存を組み立て、終了時に片付ける。

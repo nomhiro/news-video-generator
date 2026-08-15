@@ -1,0 +1,73 @@
+<!--
+  投稿キュー。
+
+  本文は畳まない。自動投稿なので運用者の唯一の仕事が「読んで気付く」
+  ことで、開かないと読めない UI では誰も読まない。280（weighted）は
+  短いので全文を出しても場所を取らない。
+-->
+<div id="post-queue" class="rounded-lg bg-raised border border-ink/10 p-4 space-y-4">
+    <div class="flex items-center justify-between">
+        <h2 class="font-display font-semibold text-ink text-sm tracking-wide">投稿キュー</h2>
+        {% if message %}
+        <span aria-live="polite" class="text-xs text-teal">{{ message }}</span>
+        {% else %}
+        <span aria-live="polite" class="sr-only"></span>
+        {% endif %}
+    </div>
+
+    {% if needs_review %}
+    <div>
+        <h3 class="text-xs font-semibold text-vermilion mb-2">要確認</h3>
+        <div class="space-y-2">
+            {% for post in needs_review %}
+            <article class="rounded border border-vermilion/30 bg-vermilion/5 p-3">
+                <div class="flex items-center justify-between text-xs text-ink/60 mb-1">
+                    <span>{{ post.article_title }}</span>
+                    <span class="tnum">{{ post.weighted_length }}/{{ max_weighted }}</span>
+                </div>
+                <p class="text-sm text-ink whitespace-pre-wrap">{{ post.body }}</p>
+                <p class="text-xs text-vermilion mt-1">{{ post.error_message or "理由不明" }}</p>
+                <form hx-post="/x/posts/{{ post.id }}/cancel" hx-target="#post-queue" hx-swap="outerHTML"
+                      class="mt-2">
+                    <button type="submit"
+                            class="text-xs px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
+                                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
+                        取り消す
+                    </button>
+                </form>
+            </article>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <div>
+        <h3 class="text-xs font-semibold text-ink/60 mb-2">これから出る</h3>
+        {% if upcoming %}
+        <div class="space-y-2">
+            {% for post in upcoming %}
+            <article class="rounded border border-ink/10 p-3">
+                <div class="flex items-center justify-between text-xs text-ink/60 mb-1">
+                    <span class="tnum">
+                        {{ post.scheduled_at.strftime('%m/%d %H:%M') if post.scheduled_at else "未定" }}
+                    </span>
+                    <span>{{ post.article_title }}</span>
+                    <span class="tnum">{{ post.weighted_length }}/{{ max_weighted }}</span>
+                </div>
+                <p class="text-sm text-ink whitespace-pre-wrap">{{ post.body }}</p>
+                <form hx-post="/x/posts/{{ post.id }}/cancel" hx-target="#post-queue" hx-swap="outerHTML"
+                      class="mt-2">
+                    <button type="submit"
+                            class="text-xs px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
+                                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
+                        取り消す
+                    </button>
+                </form>
+            </article>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-sm text-ink/40">予定されている投稿はありません</p>
+        {% endif %}
+    </div>
+</div>

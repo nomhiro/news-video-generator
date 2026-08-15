@@ -4,6 +4,49 @@
 @source "../../templates/**/*.html";
 
 /*
+ * 設計トークン。
+ *
+ * 配色は生成する画像カード（インク線 + deep teal + warm amber）と
+ * 同じにしている。運用者は一日中その絵を見るので、画面がそれと
+ * 喧嘩しないほうがよい。以前の青のグラデーションは、何のアプリでも
+ * あり得る既定値だった。
+ */
+@theme {
+    --color-ink: #16232B;
+    --color-paper: #EEF1F0;
+    --color-raised: #FBFCFC;
+    --color-teal: #0F6E6B;
+    --color-amber: #C97A16;
+    --color-vermilion: #B23B2E;
+
+    /*
+     * webfont はベンダリングしない。CDN を使わない方針では自前で
+     * woff2 を置く必要があり、この環境ではフォントの実バイナリを
+     * 取得できない。`@font-face` だけ書いてファイルを置かないと、
+     * 404 が毎回飛ぶうえに黙ってフォールバックする（見た目の指示が
+     * 効かないのに気付きにくい）ため、システムフォントで代替する。
+     * 時刻・件数・金額の桁を揃えるのは `.tnum`（tabular-nums）で行う。
+     */
+    --font-display: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP",
+        system-ui, sans-serif;
+    --font-body: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP",
+        system-ui, sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+/* 数字を等幅で揃える。時刻の桁がずれると帯が読めない */
+.tnum {
+    font-variant-numeric: tabular-nums;
+}
+
+/* 「いま」の線。動くのはここだけ */
+@media (prefers-reduced-motion: reduce) {
+    .now-marker {
+        transition: none;
+    }
+}
+
+/*
  * アプリ固有のスタイル。
  * Tailwind のユーティリティで表現できないものだけここに置く。
  */
