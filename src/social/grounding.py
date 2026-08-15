@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # 数値の抽出。桁区切りと小数を含む。
 _NUMBER_PATTERN = re.compile(r"\d[\d,\.]*")
@@ -33,6 +34,21 @@ def _normalize(value: str) -> str:
     return value.replace(",", "").rstrip(".")
 
 
+def _nfkc(value: str) -> str:
+    """全角の数字・記号を半角に畳む。
+
+    `\\d` は全角数字（`１`）にも一致するため、畳まないと記事の「10億」と
+    投稿の「１０億」が別の数値として扱われ、**まともな投稿が
+    「根拠が無い」と判定されて破棄される**（再生成1回で通らなければ
+    その記事の投稿を諦める設計なので、丸ごと失う）。
+
+    桁区切りも畳む必要がある。`_NUMBER_PATTERN` の区切り文字は半角の
+    `,` と `.` だけなので、全角の `，` があると数値が途中で切れる
+    （`１，２００` の一致が `1` だけになる）。
+    """
+    return unicodedata.normalize("NFKC", value)
+
+
 def ungrounded_numbers(text: str, source: str) -> set[str]:
     """記事本文に根拠が無い数値を返す。
 
@@ -43,7 +59,9 @@ def ungrounded_numbers(text: str, source: str) -> set[str]:
     Returns:
         set[str]: 根拠の無い数値（正規化済み）。空なら合格
     """
-    source_numbers = {_normalize(m) for m in _NUMBER_PATTERN.findall(source)}
+    # 数値を抜く前に全角を畳む（理由は `_nfkc`）。
+    text = _nfkc(text)
+    source_numbers = {_normalize(m) for m in _NUMBER_PATTERN.findall(_nfkc(source))}
 
     ungrounded: set[str] = set()
     for match in _NUMBER_PATTERN.finditer(text):
