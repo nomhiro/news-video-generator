@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.models.job import JobStatus
@@ -76,3 +76,50 @@ class JobRecord(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - デバッグ用
         return f"<JobRecord id={self.id} status={self.status} title={self.article_title[:20]!r}>"
+
+
+class SocialPostRecord(Base):
+    """X 投稿1件。
+
+    スレッドは `group_id` でまとめ、`position` で順序を持つ。
+    1行 = 1テーマ（下書き全体を JSON）にしなかった理由: スレッドの途中で
+    失敗したときに「どこまで出せたか」が行として観測できない。
+    """
+
+    __tablename__ = "social_posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    group_id: Mapped[str] = mapped_column(String(36), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+    article_id: Mapped[str] = mapped_column(String(64), index=True)
+    article_title: Mapped[str] = mapped_column(Text)
+
+    kind: Mapped[str] = mapped_column(String(16))
+    body: Mapped[str] = mapped_column(Text)
+    # 生成時に計算した weighted length。画面に「118/140」と出す。
+    weighted_length: Mapped[int] = mapped_column(Integer, default=0)
+    # URL を含むか。単価が $0.015 と $0.20 で13倍違うため、
+    # コスト概算にはこの区別が必須。
+    has_link: Mapped[bool] = mapped_column(Boolean, default=False)
+    image_key: Mapped[str | None] = mapped_column(Text, default=None)
+
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    tweet_id: Mapped[str | None] = mapped_column(String(32), default=None)
+    reply_to_tweet_id: Mapped[str | None] = mapped_column(String(32), default=None)
+
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        # ワーカーの検索は「SCHEDULED で予定時刻を過ぎた最古の1件」。
+        Index("ix_social_posts_status_scheduled_at", "status", "scheduled_at"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - デバッグ用
+        return f"<SocialPostRecord id={self.id} status={self.status} kind={self.kind}>"
