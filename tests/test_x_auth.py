@@ -128,3 +128,41 @@ def test_refresh_が失敗したら_XTokenExpiredError(store: FakeStore) -> None
 
     with pytest.raises(XTokenExpiredError):
         ensure_fresh(store, creds, Failing(), now=now)
+
+
+def test_refresh_の応答に_access_token_が無ければ_XTokenExpiredError(
+    store: FakeStore,
+) -> None:
+    """200 で返ってきても中身が壊れていることがある。
+
+    ここを素通りさせると KeyError が再認証ボタンを経由せず
+    そのまま外に漏れる。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _save(store, now)
+    creds = load_credentials(store)
+    assert creds is not None
+
+    class MissingAccessToken:
+        def refresh(self, refresh_token: str) -> dict[str, Any]:
+            return {"expires_in": 7200}
+
+    with pytest.raises(XTokenExpiredError):
+        ensure_fresh(store, creds, MissingAccessToken(), now=now)
+
+
+def test_refresh_の応答の_expires_in_が数値でなければ_XTokenExpiredError(
+    store: FakeStore,
+) -> None:
+    """同上。数値でない expires_in も壊れた応答の一種。"""
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _save(store, now)
+    creds = load_credentials(store)
+    assert creds is not None
+
+    class NonNumericExpiresIn:
+        def refresh(self, refresh_token: str) -> dict[str, Any]:
+            return {"access_token": "new-access", "expires_in": "soon"}
+
+    with pytest.raises(XTokenExpiredError):
+        ensure_fresh(store, creds, NonNumericExpiresIn(), now=now)

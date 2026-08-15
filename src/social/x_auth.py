@@ -123,18 +123,23 @@ def ensure_fresh(
     if not credentials.needs_refresh(moment):
         return credentials
 
+    # payload の組み立てまでこの try に含める。200 で返ってきても
+    # access_token が欠けている・expires_in が数値でないといった
+    # 壊れた応答が実際にありうる。ここで KeyError / ValueError を
+    # 素通りさせると、再認証ボタンにつながる XTokenExpiredError を
+    # 経由せずクラッシュする（呼び出し元は「更新が失敗した」という
+    # 一種類の失敗しか想定していない）。narrow に戻さないこと。
     try:
         payload = exchange.refresh(credentials.refresh_token)
+        refreshed = XCredentials(
+            access_token=str(payload["access_token"]),
+            # 新しい refresh token が返らない実装もありうるので、
+            # 無ければ現在のものを維持する
+            refresh_token=str(payload.get("refresh_token") or credentials.refresh_token),
+            expires_at=moment + timedelta(seconds=int(payload.get("expires_in", 7200))),
+        )
     except Exception as e:
         raise XTokenExpiredError(f"X のトークンを更新できませんでした: {e}") from e
-
-    refreshed = XCredentials(
-        access_token=str(payload["access_token"]),
-        # 新しい refresh token が返らない実装もありうるので、
-        # 無ければ現在のものを維持する
-        refresh_token=str(payload.get("refresh_token") or credentials.refresh_token),
-        expires_at=moment + timedelta(seconds=int(payload.get("expires_in", 7200))),
-    )
     write_json(
         store,
         X_TOKEN,
