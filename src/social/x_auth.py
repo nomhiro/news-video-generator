@@ -202,6 +202,56 @@ def ensure_fresh(
     return refreshed
 
 
+def exchange_authorization_code(
+    client_id: str,
+    client_secret: str,
+    code: str,
+    redirect_uri: str,
+    code_verifier: str,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """認可コードをトークン一式に交換する（`scripts/authorize_x.py` から呼ぶ）。
+
+    `HttpTokenExchange.refresh` と処理が重なるが、あちらは refresh_token
+    グラント専用で `code_verifier` を持たない。初回認証は
+    `grant_type=authorization_code` + `code_verifier` が必須なので別関数にした。
+
+    Args:
+        client_id: アプリのクライアントID
+        client_secret: アプリのクライアントシークレット
+        code: 認可コード（リダイレクトの `code` パラメータ）
+        redirect_uri: 認可 URL の組み立てに使ったのと同じリダイレクト先
+        code_verifier: `build_authorization_url` が生成した PKCE の verifier
+        timeout: HTTP タイムアウト（秒）
+
+    Returns:
+        dict[str, Any]: 応答 JSON（access_token / refresh_token / expires_in）
+
+    Raises:
+        XAuthError: 通信または応答の解釈に失敗した
+    """
+    try:
+        response = httpx.post(
+            TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "client_id": client_id,
+                "code_verifier": code_verifier,
+            },
+            auth=(client_id, client_secret),
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (httpx.HTTPError, ValueError) as e:
+        raise XAuthError(f"トークン交換の通信に失敗しました: {e}") from e
+    if not isinstance(data, dict):
+        raise XAuthError(f"トークン交換の応答が不正です: {data!r}")
+    return data
+
+
 def build_authorization_url(
     client_id: str, redirect_uri: str, verifier: str | None = None
 ) -> tuple[str, str, str]:
