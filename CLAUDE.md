@@ -569,6 +569,17 @@ tenant level resource provider` という原因の分からないエラーにな
 - **切り戻しはリビジョンではなくイメージタグで行う。** リビジョンは1件しか
   残らないため `az containerapp revision activate` に頼れない。GHCR にタグ
   （`gh-<短縮sha>`）が残るので、前のタグで `az containerapp update --image` を打つ。
+- **ただし X 運用の導入（記事の `consumed` 化）より前のイメージには切り戻せない。**
+  現行の `to_dict` は `data/news/*.json` に `consumed` を書く。導入前のコードの
+  `from_dict` は `cls(**data)` なので、知らないキーを受け取って `TypeError` で落ちる。
+  `_load_category` が捕まえるのは `JSONDecodeError` / `KeyError` / `OSError` だけなので、
+  **記事一覧・動画の計画・投稿の計画がすべて落ちる**（実際に旧コードで再現して確認した）。
+  互換のため `video_generated` も書き続けているが、それだけでは足りない。
+
+  切り戻しを安全にしたいなら2段階で入れる。まず「知らないキーを無視する `from_dict`」を
+  単体で `main` に入れて1リリース回し、そのあとで機能を入れる。いま急いで切り戻す
+  必要が出た場合は、`data/news/*.json` から `consumed` キーを落とすか、
+  ファイルを退避して取り直す（選択状態と生成済みの記録は失われる）。
 - **最初のイメージをローカルから push してはいけない。** GHCR のパッケージと
   リポジトリの紐付けは**パッケージ作成時にしか行われない**。ローカルの docker から
   先に push すると `repository: null` の未紐付けパッケージができ、以降 Actions の
