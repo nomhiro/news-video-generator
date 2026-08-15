@@ -91,6 +91,7 @@ def plan_daily_posts(
     posts: SupportsPostEnqueue,
     generator: SupportsPostGeneration,
     *,
+    enabled: bool,
     times: list[str],
     posts_per_day: int,
     hashtags: list[str],
@@ -109,6 +110,8 @@ def plan_daily_posts(
         news: 記事ストア
         posts: 投稿表
         generator: 下書きの生成器
+        enabled: 自動投稿スイッチが有効か（`PostingSwitch.is_enabled()`）。
+            False なら何も積まずに帰る（下の docstring 本文を参照）
         times: 投稿時刻（HH:MM、timezone のローカル時刻）
         posts_per_day: 1日のテーマ数
         hashtags: 固定のハッシュタグ
@@ -125,6 +128,23 @@ def plan_daily_posts(
     Returns:
         DailyPostPlan: 積んだまとまり、または積まなかった理由
     """
+    # スイッチは「送信するか」だけでなく「X チャネルが動いているか」を
+    # 意味する。無効なのに下書きだけ作ると：
+    #
+    # 1. `PostWorker` の discard_stale が X_MAX_POST_DELAY_MINUTES 後に
+    #    その下書きを黙って捨てる。見えるものが無いので誰も見直せない
+    # 2. 記事は「投稿できた後」にしか消費済みにならないため、同じ記事が
+    #    翌日以降も再ドラフトされ続け、無駄が収束しない
+    # 3. 下書き生成は Azure OpenAI 呼び出しであり、Task 6 以降は CARD が
+    #    画像も生成する。`gpt-image-2` のクォータはリージョン上限 4 で
+    #    動画パイプラインと共有しているため、見られない出力のために
+    #    奪うのは実害が大きい
+    #
+    # つまりスイッチは送信ステップだけでなく計画ステップも止める。
+    if not enabled:
+        log_step("自動投稿が無効です。下書きは作成しません", "⏭️")
+        return DailyPostPlan(group_ids=[], skipped_reason="自動投稿が無効です（スイッチ off）")
+
     # 上限を超えていたら積まない。
     #
     # 積んでから投稿側で止めると、上限が戻った月初に古い投稿が

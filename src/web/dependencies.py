@@ -160,7 +160,7 @@ class AppContext:
             artifact_store=artifact_store,
             jobs=jobs,
             worker=JobWorker(jobs, PipelineJobRunner(pipeline, aggregator)),
-            scheduler=_build_scheduler(config, aggregator, jobs, posts, post_generator),
+            scheduler=_build_scheduler(config, aggregator, jobs, posts, post_generator, x_switch),
             youtube_uploader=YouTubeUploader(token_store=token_store),
             tiktok_uploader=TikTokUploader(
                 client_key=config.tiktok_client_key.get_secret_value(),
@@ -221,6 +221,7 @@ def _build_scheduler(
     jobs: JobRepository,
     posts: SocialPostRepository,
     post_generator: PostGenerator,
+    x_switch: PostingSwitch,
 ) -> DailyScheduler | None:
     """定期実行を組み立てる（無効なら None）。
 
@@ -238,6 +239,9 @@ def _build_scheduler(
         jobs: ジョブ表
         posts: 投稿表
         post_generator: 投稿の下書き生成器
+        x_switch: 自動投稿の有効/無効。`plan_daily_posts` に渡し、
+            無効なら下書きの生成そのものを止める（送信ステップだけを
+            止めるものではない。理由は `plan_daily_posts` の docstring）
 
     Returns:
         DailyScheduler | None: 有効なら組み立てたスケジューラ
@@ -262,6 +266,7 @@ def _build_scheduler(
                 aggregator,
                 posts,
                 post_generator,
+                enabled=x_switch.is_enabled(),
                 times=config.x_post_times,
                 posts_per_day=config.x_posts_per_day,
                 hashtags=config.x_hashtags,

@@ -67,6 +67,7 @@ TIMES = ["08:00", "12:30", "19:00", "21:30"]
 
 def _plan(news, posts, generator, **overrides):
     kwargs: dict[str, Any] = {
+        "enabled": True,
         "times": TIMES,
         "posts_per_day": 4,
         "hashtags": ["#AI"],
@@ -86,6 +87,22 @@ def test_記事ごとに時刻順で積む() -> None:
     assert len(plan.group_ids) == 4
     scheduled = [next(iter(times.values())) for _, times in posts.enqueued]
     assert scheduled == sorted(scheduled)
+
+
+def test_スイッチが無効なら何も積まない() -> None:
+    """switch off はスイッチであって発信計画ではない。
+
+    無効なのに下書きだけ作ると、discard_stale に黙って捨てられて
+    誰にも見えない・記事が消費済みにならず翌日も再ドラフトされる・
+    Azure OpenAI（Task 6 以降は画像クォータも）を無駄に使う。
+    """
+    posts = FakePosts()
+    plan = _plan(FakeNews([_article(s) for s in "abcd"]), posts, FakeGenerator(), enabled=False)
+
+    assert plan.enqueued is False
+    assert plan.skipped_reason is not None
+    assert "スイッチ" in plan.skipped_reason
+    assert posts.enqueued == []
 
 
 def test_予算上限を超えていたら何も積まない() -> None:
