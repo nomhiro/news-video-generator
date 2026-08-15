@@ -41,9 +41,6 @@ param envSlug string
 @description('リソース名の一意サフィックス（uniqueString の13文字）')
 param resourceToken string
 
-@description('コンテナレジストリ名。長さと文字種の制約は main.bicep 側で担保している')
-param registryName string
-
 @description('生成物を置く Blob のアカウント URL。アプリの ARTIFACT_STORE=blob で使う')
 param artifactAccountUrl string = ''
 
@@ -145,14 +142,14 @@ param scheduleFormats string = 'short'
 増やす前にクォータを上げる。''')
 param scheduleArticlesPerFormat int = 1
 
-@description('''動かすコンテナイメージ。
-既定はプレースホルダで、初回の払い出し時だけ使う。
-`azd deploy` が実イメージに差し替え、その名前を azd env の
-SERVICE_WEB_IMAGE_NAME に記録する。main.parameters.json がそれを
-このパラメータに戻すので、**あとから azd provision してもイメージが
-プレースホルダに戻らない**。
-戻ると quickstart イメージ（8080 待ち受け）のリビジョンが作られ、
-プローブが通らず Activating のまま残る（一度踏んだ）。''')
+@description('''動かすコンテナイメージ。既定はプレースホルダ。
+実イメージは CD（.github/workflows/deploy.yml）が
+ghcr.io/nomhiro/news-video-generator/web:gh-<短縮sha> に差し替える。
+
+**CD は azd env を更新しない**ので、provision の前に現行イメージを
+SERVICE_WEB_IMAGE_NAME に入れておく必要がある。入れ忘れると
+quickstart イメージ（8080 待ち受け）のリビジョンが作られ、プローブが
+通らず Activating のまま残る（一度踏んだ）。手順は CLAUDE.md にある。''')
 param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 
 @description('''Container App に渡す CPU コア数。
@@ -180,21 +177,13 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   }
 }
 
-// イメージの置き場所。
-resource registry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
-  name: registryName
-  location: location
-  tags: tags
-  sku: {
-    // Basic で足りる。geo-replication も大きなストレージも要らない。
-    name: 'Basic'
-  }
-  properties: {
-    // 管理者ユーザーは無効にし、マネージドIDの AcrPull で引く。
-    // 管理者パスワードは共有シークレットになり、失効管理ができない。
-    adminUserEnabled: false
-  }
-}
+// イメージの置き場所は GHCR（ghcr.io/nomhiro/news-video-generator/web）。
+// ここにレジストリは作らない。GitHub の外にもう1つレジストリを持つ理由が無く、
+// Basic ACR は使わなくても課金が続く（Issue #15）。
+//
+// GHCR のパッケージは public にしてあるので、Container App の configuration に
+// registries を書く必要も、pull 用の資格情報も要らない。private にすると
+// リビジョン作成時とレプリカ再起動時の pull に長期の PAT が必要になる。
 
 resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: 'cae-${take(envSlug, 40)}-${resourceToken}'
@@ -248,18 +237,8 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
   tags: tags
 }
 
-// AcrPull: イメージを引くための最小ロール。
-var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
-
-resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: registry
-  name: guid(registry.id, identity.id, acrPullRoleId)
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+// レジストリが GHCR（public）になったため、AcrPull のロール割当は要らない。
+// マネージド ID は Blob（生成物とトークン）へのアクセスにだけ使う。
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'ca-${take(envSlug, 20)}-${resourceToken}'
@@ -282,12 +261,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         targetPort: 8000
         transport: 'auto'
       }
-      registries: [
-        {
-          server: registry.properties.loginServer
-          identity: identity.id
-        }
-      ]
+      // registries は書かない。GHCR の public パッケージは匿名で pull できる。
       // キーはここに入れ、env からは secretRef で参照する。
       // env に直接書くと `az containerapp show` の出力に平文で出る。
       secrets: concat(
@@ -468,9 +442,6 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
   }
-  dependsOn: [
-    acrPull
-  ]
 }
 
 // Container Apps 組み込みの認証（EasyAuth）。
@@ -534,8 +505,6 @@ resource auth 'Microsoft.App/containerApps/authConfigs@2024-03-01' =
     }
   }
 
-output registryLoginServer string = registry.properties.loginServer
-output registryName string = registry.name
 output containerAppName string = containerApp.name
 output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
 output identityClientId string = identity.properties.clientId

@@ -156,10 +156,6 @@ var storageAccountName = 'st${take(replace(envSlug, '-', ''), 9)}${resourceToken
 //   名前は決定的なので、URL は参照せずに組み立てられる。
 var storageAccountUrl = 'https://${storageAccountName}.blob.${environment().suffixes.storage}'
 
-// ACR 名は 5〜50文字の英数字のみ。
-// 'cr' (2) + ハイフンを除いた envSlug (最大20) + resourceToken (13) = 15〜35。
-var registryName = 'cr${take(replace(envSlug, '-', ''), 20)}${resourceToken}'
-
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
   name: 'rg-${envSlug}'
   location: location
@@ -238,7 +234,6 @@ module appHosting 'core/app-hosting.bicep' = if (deployApp) {
     tags: tags
     envSlug: envSlug
     resourceToken: resourceToken
-    registryName: registryName
     containerImage: containerImage
     scheduleEnabled: scheduleEnabled
     scheduleTime: scheduleTime
@@ -291,11 +286,7 @@ output AZURE_SPEECH_REGION string = speech.outputs.region
 
 output APP_HOSTING_DEPLOYED bool = deployApp
 
-// azd deploy がイメージの push 先を知るために読む値。
-// 出力していないと "could not determine container registry endpoint" で失敗する。
-output AZURE_CONTAINER_REGISTRY_ENDPOINT string = deployApp
-  ? appHosting!.outputs.registryLoginServer
-  : ''
+// レジストリは GHCR なので push 先の出力は要らない（Issue #15）。
 output AZURE_CONTAINER_APP_NAME string = deployApp ? appHosting!.outputs.containerAppName : ''
 output SERVICE_WEB_ENDPOINT_URL string = deployApp
   ? 'https://${appHosting!.outputs.containerAppFqdn}'
