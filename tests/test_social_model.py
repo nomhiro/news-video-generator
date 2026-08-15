@@ -1,6 +1,7 @@
 """投稿のドメインモデル。"""
 
 import pytest
+
 from src.models.social import (
     InvalidPostTransition,
     PostStatus,
