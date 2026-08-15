@@ -610,7 +610,32 @@ git config core.hooksPath .githooks   # clone した直後に一度だけ
 - **これは門番ではない。** `--no-verify` で飛ばせるし、`core.hooksPath` の設定を
   忘れた clone や GitHub の Web エディタ経由では動かない。PR に対しても何も
   走らないので、**無検査のコードが `main` に入るとそのまま CD が走る**。
-  ブランチ保護を入れていないこととセットで意識しておく。
+  `main` は PR 経由に強制してあるが（下記）、それは「レビューの機会を作る」
+  だけで、自動検査を代替しない。
+
+### `main` は PR 経由でしか変えられない
+
+ruleset `protect main`（GitHub の Repository rules）で次を強制している。
+
+| ルール | 効果 |
+|---|---|
+| `pull_request` | 直接 push を拒否する（`GH013: Changes must be made through a pull request.`） |
+| `non_fast_forward` | force push を拒否する |
+| `deletion` | ブランチの削除を拒否する |
+
+`main` へのマージが即デプロイなので、直接 push を許すと「手元のコミットが
+そのまま本番に出る」経路ができる。PR を挟めば、少なくとも差分を見る機会と
+記録が残る。
+
+- **承認必須数は 0 にしてある。** GitHub では自分の PR を自分で承認できないため、
+  1 以上にすると1人しかいないこのリポジトリではマージ不能になって詰む。
+- **bypass actors は空**にしてある。所有者でも直接 push できない。
+  緊急時に外すなら Settings → Rules → `protect main` で
+  enforcement を `Disabled` にするか、自分を bypass actor に足す。
+- **必須ステータスチェックは設定していない。** PR で走るワークフローが1つも
+  無いため（Actions は CD 専用）、指定できるものが無い。壊れたコードが
+  `main` に入るのを止めたくなったら、PR 用の検査ワークフローを戻すのと
+  セットで `required_status_checks` を足す。
 
 ### 長尺は当面作らない
 
