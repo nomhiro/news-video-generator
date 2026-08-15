@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Protocol
 
 from src.models.social import PostKind
+from src.social.cost import PostBudget, estimate_month_cost, is_over_budget
 from src.social.x_auth import XTokenExpiredError
 from src.social.x_client import XClient, XSendUncertainError
 from src.storage.social import SocialPostRepository
@@ -127,6 +128,7 @@ class PostWorker:
         fetch_image: Callable[[str], Path] | None = None,
         on_posted: Callable[[str], None] | None = None,
         max_post_delay_minutes: int | None = None,
+        budget: PostBudget | None = None,
     ):
         """初期化する。
 
@@ -145,6 +147,13 @@ class PostWorker:
                 呼び出しのため）。デプロイやプロセス停止で数時間止まった後、
                 復帰した瞬間に古い投稿を連投すると、閲覧者にはスパムに見える
                 （4件が一斉に出るのはニュースとしての新鮮さも失っている）
+            budget: 概算コストの上限と単価。**送信側でも上限を見るために
+                必要**。計画側（`post_planner`）にも同じ判定があるが、
+                そちらは「積むかどうか」しか決められない。積んだあとに
+                上限を越えた場合、送信側に判定が無いとその日の残りは
+                そのまま出てしまう。省略時は上限を見ない
+                （`max_post_delay_minutes` と同じ扱い。テストで
+                上限判定の影響を受けたくない呼び出しのため）
         """
         self._repository = repository
         self._client_factory = client_factory
@@ -153,12 +162,17 @@ class PostWorker:
         self._fetch_image = fetch_image
         self._on_posted = on_posted
         self._max_post_delay_minutes = max_post_delay_minutes
+        self._budget = budget
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         # 未認証/失効の状態が変わったときだけログを出すためのフラグ。
         # `_run_one` の docstring を参照。
         self._needs_reauth = False
+        # 予算上限に達している状態が変わったときだけログを出すためのフラグ
+        # （`_needs_reauth` と同じ理由: 30秒ごとに同じ行を出すと、本当に
+        # 見るべきエラーがログに埋もれる）。
+        self._over_budget = False
 
     def start(self) -> None:
         """ワーカースレッドを起動する。
@@ -213,6 +227,36 @@ class PostWorker:
 
         log_step("投稿ワーカーを停止しました", "🐦")
 
+    def _is_over_budget(self) -> bool:
+        """当月の概算コストが上限を超えているか。
+
+        ログは状態が変わったときだけ出す（`_needs_reauth` と同じ規律。
+        30秒ごとに同じ行を出すと、本当に見るべきエラーが埋もれる）。
+
+        Returns:
+            bool: 超えていれば True（`budget` 未設定なら常に False）
+        """
+        if self._budget is None:
+            return False
+
+        now = datetime.now(UTC)
+        plain, with_link = self._repository.monthly_post_counts(now.year, now.month)
+        spent = estimate_month_cost(
+            plain, with_link, self._budget.unit_usd, self._budget.unit_with_link_usd
+        )
+        over = is_over_budget(spent, self._budget.monthly_usd)
+
+        if over and not self._over_budget:
+            log_error(
+                f"概算コストが上限に達したため投稿を止めます"
+                f"（${spent:.2f} / ${self._budget.monthly_usd:.2f}）。"
+                "予約は残すので、上限を上げれば出せます"
+            )
+        elif not over and self._over_budget:
+            log_step("概算コストが上限を下回りました。投稿を再開します", "🐦")
+        self._over_budget = over
+        return over
+
     def _run_one(self) -> bool:
         """1回分のループ本体（掃く→判定→作る→出す→閉じる）。
 
@@ -240,6 +284,17 @@ class PostWorker:
         # の全デプロイの既定状態）ずっと `httpx.Client` を開いて捨てる
         # ことになり、接続プールが漏れ続ける。
         if not self._switch.is_enabled():
+            return False
+
+        # 上限を超えていたら掴まない。**行は SCHEDULED のまま残す**
+        # （設計どおり。上限が戻れば出せるし、遅れすぎれば
+        # discard_stale が理由付きで見送る）。
+        #
+        # 計画側（`post_planner`）の判定だけでは足りない。積んだあとに
+        # 上限を越えるのは普通に起きる（積んだ時点では 4件ぶんの余裕が
+        # あったが、その日の他の投稿で越える等）。そのとき送信側に
+        # 判定が無いと、その日の残りはそのまま出てしまう。
+        if self._is_over_budget():
             return False
 
         try:

@@ -92,6 +92,37 @@ def test_定期実行はplan_daily_postsに画像カードの5点セットを渡
         context.aggregator.close()
 
 
+def test_積まなかった理由をログに出す(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`DailyPostPlan.skipped_reason` を呼び出し元が捨てていた（I10）。
+
+    捨てていた間、「予算上限で止まった」「X で未使用の記事が無い」と
+    いった判断がログにも画面にも残らず、投稿が出ない日と「そもそも計画が
+    走っていない」日を区別できなかった。
+    """
+    logged: list[str] = []
+
+    async def fake_plan_daily_batch(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
+        return DailyPostPlan(group_ids=[], skipped_reason="予算上限（概算 $40.00）")
+
+    monkeypatch.setattr(dependencies, "plan_daily_batch", fake_plan_daily_batch)
+    monkeypatch.setattr(dependencies, "plan_daily_posts", fake_plan_daily_posts)
+    monkeypatch.setattr(
+        dependencies, "log_step", lambda message, *args, **kwargs: logged.append(message)
+    )
+
+    context = dependencies.AppContext.build(_config(tmp_path))
+    try:
+        assert context.scheduler is not None
+        asyncio.run(context.scheduler._task())
+    finally:
+        context.aggregator.close()
+
+    assert any("予算上限（概算 $40.00）" in message for message in logged)
+
+
 def test_投稿ワーカーの_on_posted_が記事ストアに繋がっている(tmp_path: Path) -> None:
     """`on_posted=` の配線を消してもテストが緑のままだった（I4）。
 

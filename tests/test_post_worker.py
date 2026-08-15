@@ -7,6 +7,7 @@ import pytest
 
 from src.jobs.post_worker import PostWorker, post_due_once
 from src.models.social import NewPost, PostKind, PostStatus
+from src.social.cost import PostBudget
 from src.social.x_auth import XTokenExpiredError
 from src.social.x_client import XSendUncertainError
 from src.storage.db import create_db_engine, create_session_factory
@@ -296,6 +297,98 @@ def test_遅れすぎた投稿はワーカーの1周で見送られる(repositor
     assert posted is False  # 掃いただけで、出すものは無かった
     assert client.posted == []
     assert repository.list_upcoming() == []  # SCHEDULED のまま残っていない
+
+
+def test_予算上限に達したら_出さずに予約を残す(repository: SocialPostRepository) -> None:
+    """計画側の判定だけでは足りない（I10）。
+
+    積んだあとに上限を越えるのは普通に起きる。そのとき送信側に判定が
+    無いと、その日の残りはそのまま出てしまう。行は SCHEDULED のまま残す
+    （上限を上げれば出せるし、遅れすぎれば discard_stale が理由付きで
+    見送る）。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    # 当月に $0.20 × 200 = $40 ぶんの投稿済みを作る（上限 $20 を超える）
+    for index in range(200):
+        repository.enqueue(
+            [
+                NewPost(
+                    article_id=f"old{index}",
+                    article_title="過去の投稿",
+                    kind=PostKind.PROMO,
+                    body="本文 https://example.com/v",
+                    has_link=True,
+                )
+            ],
+            {0: now},
+        )
+        claimed = repository.claim_due(now)
+        assert claimed is not None
+        repository.mark_posted(claimed.id, tweet_id=f"tw{index}", posted_at=now)
+
+    _enqueue(repository, now)
+    factory = CountingFactory(FakeClient())
+    worker = PostWorker(
+        repository,
+        client_factory=factory,
+        switch=EnabledSwitch(),
+        budget=PostBudget(monthly_usd=20.0, unit_usd=0.015, unit_with_link_usd=0.20),
+    )
+
+    posted = worker._run_one()
+
+    assert posted is False
+    assert factory.calls == 0  # クライアントも作らない
+    assert [p.status for p in repository.list_upcoming()] == [PostStatus.SCHEDULED]
+
+
+def test_予算上限のログは状態が変わるまで繰り返さない(
+    repository: SocialPostRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """30秒ごとに同じ行を出すと、本当に見るべきエラーが埋もれる。"""
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    repository.enqueue(
+        [
+            NewPost(
+                article_id="old",
+                article_title="過去の投稿",
+                kind=PostKind.PROMO,
+                body="本文 https://example.com/v",
+                has_link=True,
+            )
+        ],
+        {0: now},
+    )
+    claimed = repository.claim_due(now)
+    assert claimed is not None
+    repository.mark_posted(claimed.id, tweet_id="tw1", posted_at=now)
+    _enqueue(repository, now)
+
+    calls: list[str] = []
+    monkeypatch.setattr("src.jobs.post_worker.log_error", lambda message: calls.append(message))
+    worker = PostWorker(
+        repository,
+        client_factory=lambda: FakeClient(),
+        switch=EnabledSwitch(),
+        # 上限 $0.01 なので1件（$0.20）で確実に超える
+        budget=PostBudget(monthly_usd=0.01, unit_usd=0.015, unit_with_link_usd=0.20),
+    )
+
+    for _ in range(3):
+        worker._run_one()
+
+    assert len(calls) == 1
+
+
+def test_予算を渡さなければ上限を見ない(repository: SocialPostRepository) -> None:
+    """`max_post_delay_minutes` と同じ扱い（省略時は判定しない）。"""
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _enqueue(repository, now)
+    client = FakeClient()
+    worker = PostWorker(repository, client_factory=lambda: client, switch=EnabledSwitch())
+
+    assert worker._run_one() is True
+    assert client.posted == [("本文0", None)]
 
 
 def test_スイッチが無効ならクライアントを作らない(repository: SocialPostRepository) -> None:

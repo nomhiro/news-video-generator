@@ -282,6 +282,28 @@ def test_概算コストに概算と明示する(client: TestClient, fake_posts:
     assert "概算" in response.text
 
 
+def test_予算上限に達していれば停止中と出す(fake_switch: FakeSwitch) -> None:
+    """上限に達している間、スイッチが有効でもワーカーは送信しない。
+
+    スイッチの語（稼働中）だけを見せると「稼働中なのに出ない」ことの
+    説明が画面から消える。
+    """
+
+    class OverBudgetPosts(FakeSocialPosts):
+        def monthly_post_counts(self, year: int, month: int) -> tuple[int, int]:
+            return (0, 200)  # 200 * 0.20 = $40 > $20
+
+    fake_switch.set_enabled(True)
+    posts = OverBudgetPosts([], [])
+
+    with _client_for(posts, fake_switch) as client:
+        panel = client.get("/x/status").text
+        header = client.get("/x/status/header").text
+
+    assert "予算上限で停止中" in panel
+    assert "予算上限で停止中" in header
+
+
 def test_ヘッダーは状態と概算コストだけを出す(client: TestClient) -> None:
     """ヘッダーは一日中見えている場所なので、操作と手順の説明を置かない。
 

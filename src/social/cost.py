@@ -6,6 +6,29 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class PostBudget:
+    """上限と単価の組。
+
+    3つの数値を個別の引数で持ち回すのをやめた理由: 単価だけ既定値を
+    与えると「料金をコードに埋めない」という方針が崩れる（既定値は
+    改定されても誰も直さない）。1つの値オブジェクトにすれば、
+    「上限判定をするかしないか」を `None` で表せて、単価に既定値を
+    置く必要が無くなる。
+
+    Attributes:
+        monthly_usd: 当月の概算コストの上限
+        unit_usd: リンク無しの単価
+        unit_with_link_usd: リンク有りの単価（13倍違う）
+    """
+
+    monthly_usd: float
+    unit_usd: float
+    unit_with_link_usd: float
+
 
 def estimate_month_cost(plain: int, with_link: int, unit: float, unit_with_link: float) -> float:
     """当月の概算コストを返す。

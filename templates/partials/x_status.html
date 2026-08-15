@@ -17,8 +17,16 @@
     <div class="flex items-center justify-between gap-3">
         <span class="font-display font-semibold text-ink text-sm">自動投稿</span>
         <div class="flex items-center gap-2 text-xs">
-            <span class="{{ 'text-teal' if enabled else 'text-ink/50' }} font-medium">
+            {# 予算上限に達している間は、スイッチが有効でもワーカーは
+               送信しない（行は SCHEDULED のまま残る）。スイッチの語だけを
+               見せると「稼働中なのに出ない」ことの説明が画面から消える。 #}
+            <span class="{{ 'text-vermilion' if enabled and over_budget
+                            else ('text-teal' if enabled else 'text-ink/50') }} font-medium">
+                {% if enabled and over_budget %}
+                予算上限で停止中
+                {% else %}
                 {{ "稼働中" if enabled else "停止中" }}
+                {% endif %}
             </span>
             <form hx-post="/x/enabled" hx-target="#x-status-panel" hx-swap="innerHTML">
                 <input type="hidden" name="enabled" value="{{ 'false' if enabled else 'true' }}">
@@ -35,8 +43,10 @@
         今月の概算コスト
         <span class="tnum font-semibold text-ink">${{ "%.2f" | format(spent_usd) }}</span>
         / ${{ "%.2f" | format(budget_usd) }}
-        {% if spent_usd > budget_usd %}
-        <span class="text-vermilion font-semibold ml-1">予算超過</span>
+        {% if over_budget %}
+        <span class="text-vermilion font-semibold ml-1">
+            予算超過（予約は残しています）
+        </span>
         {% endif %}
     </div>
 

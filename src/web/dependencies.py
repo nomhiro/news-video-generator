@@ -19,6 +19,7 @@ from src.models.news import CHANNEL_X
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
 from src.social.card_visual import CardVisualGenerator
+from src.social.cost import PostBudget
 from src.social.metrics import collect_metrics
 from src.social.post_generator import PostGenerator
 from src.social.switch import PostingSwitch
@@ -167,6 +168,13 @@ class AppContext:
             # （出せなかった記事を二度と使えなくなるため）。
             on_posted=lambda article_id: _mark_posted_consumed(aggregator, article_id),
             max_post_delay_minutes=config.x_max_post_delay_minutes,
+            # 上限判定は計画側だけでは足りない。積んだあとに上限を越えたら、
+            # その日の残りが出てしまう（行は SCHEDULED のまま残す）。
+            budget=PostBudget(
+                monthly_usd=config.x_monthly_budget_usd,
+                unit_usd=config.x_cost_per_post_usd,
+                unit_with_link_usd=config.x_cost_per_post_with_link_usd,
+            ),
         )
 
         return cls(

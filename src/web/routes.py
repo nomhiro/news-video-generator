@@ -20,7 +20,7 @@ from src.models.social import (
     SocialPost,
 )
 from src.news.aggregator import NewsAggregator
-from src.social.cost import estimate_month_cost
+from src.social.cost import estimate_month_cost, is_over_budget
 from src.social.switch import PostingSwitch
 from src.social.x_auth import load_credentials
 from src.storage.artifacts import ArtifactStore, ArtifactStoreError
@@ -978,6 +978,10 @@ def _x_status_context(
         "spent_usd": spent,
         "budget_usd": config.x_monthly_budget_usd,
         "authenticated": load_credentials(tokens) is not None,
+        # 上限に達していると、スイッチが有効でもワーカーは送信しない
+        # （行は SCHEDULED のまま残る）。スイッチの語だけを見せると
+        # 「稼働中なのに出ない」ことの説明が画面に無くなる。
+        "over_budget": is_over_budget(spent, config.x_monthly_budget_usd),
     }
 
 
