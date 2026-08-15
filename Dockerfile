@@ -28,6 +28,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---- 実行ステージ ----
 FROM python:3.13-slim AS runtime
 
+# GHCR のパッケージをリポジトリに紐付けるためのラベル。
+# 無いとパッケージが「どのリポジトリのものか」不明なまま登録され、
+# リポジトリ側の権限を引き継がず、Packages 一覧からも辿れない。
+LABEL org.opencontainers.image.source="https://github.com/nomhiro/news-video-generator"
+
 # ffmpeg と日本語フォント。
 #
 # fonts-noto-cjk は約60MB あるが、これが無いと
