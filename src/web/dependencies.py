@@ -19,6 +19,7 @@ from src.models.news import CHANNEL_X
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
 from src.social.card_visual import CardVisualGenerator
+from src.social.metrics import collect_metrics
 from src.social.post_generator import PostGenerator
 from src.social.switch import PostingSwitch
 from src.social.x_auth import HttpTokenExchange, XTokenExpiredError, ensure_fresh, load_credentials
@@ -67,6 +68,9 @@ class AppContext:
         posts: 投稿表（social_posts、進捗の永続化）
         x_switch: 自動投稿の有効/無効
         post_worker: 投稿を実行するワーカー
+        metrics_scheduler: 指標計測の定期実行（無効なら None）。動画計画・
+            X投稿計画とは別の `DailyScheduler` インスタンス。理由は
+            `_build_metrics_scheduler` の docstring を参照
     """
 
     config: Config
@@ -82,6 +86,7 @@ class AppContext:
     posts: SocialPostRepository
     x_switch: PostingSwitch
     post_worker: PostWorker
+    metrics_scheduler: DailyScheduler | None
 
     @classmethod
     def build(cls, config: Config) -> "AppContext":
@@ -196,6 +201,7 @@ class AppContext:
             posts=posts,
             x_switch=x_switch,
             post_worker=post_worker,
+            metrics_scheduler=_build_metrics_scheduler(config, posts, token_store, artifact_store),
         )
 
 
@@ -329,6 +335,84 @@ def _build_scheduler(
     )
 
 
+def _build_metrics_scheduler(
+    config: Config,
+    posts: SocialPostRepository,
+    token_store: TokenStore,
+    artifact_store: ArtifactStore,
+) -> DailyScheduler | None:
+    """指標計測の定期実行を組み立てる（無効なら None）。
+
+    **なぜ動画計画・X投稿計画とは別の `DailyScheduler` インスタンスか。**
+    `DailyScheduler` は1つのコールバックを1つの時刻で回す作りで、
+    2つ目の時刻を持たせる口が無い。選べる形は2つ。
+
+    1. 別インスタンスを1つ増やす（本実装）
+    2. 既存のコールバックの中に「今が計測の時刻か」を見る分岐を足す
+
+    2 を選ばなかった理由: 既存のコールバックは `SCHEDULE_TIME` に
+    1日1回しか起きない。分岐を追加すると、計測用の時刻に達したかどうかを
+    このコールバック自身が毎回チェックする仕組み（もう1つのタイマー）を
+    自分で持つ必要があり、結局 `DailyScheduler` を再実装することになる。
+    2つ目のインスタンスを作れば、その面倒は既存クラスにそのまま乗れる。
+
+    有効/無効も既存のスケジューラと同じ `SCHEDULE_ENABLED` に乗せる
+    （計測だけを個別に切る要求は今のところ無く、設定を増やすと
+    「動画計画は動くのに計測だけ動かない」という気付きにくい構成を
+    作れてしまう）。
+
+    **プロセスが落ちていた瞬間は測らない（catch-up はしない）。**
+    `DailyScheduler` は次回時刻まで単純に待つだけで、過去の未実行分を
+    追いかける仕組みを持たない。3日遅れて測った「24時間後の指標」は
+    もはや24時間後の指標ではないので、これは正しい振る舞い。
+
+    Args:
+        config: アプリケーション設定
+        posts: 投稿表
+        token_store: OAuth トークンの保存先（X クライアントの構築に使う）
+        artifact_store: 指標ファイルの保存先
+
+    Returns:
+        DailyScheduler | None: 有効なら組み立てたスケジューラ
+    """
+    if not config.schedule_enabled:
+        return None
+
+    async def task() -> object:
+        # `PostWorker._run_one` と同じ規律: クライアントは使うときに作り、
+        # 使い終わったら必ず閉じる。ここでの「使うとき」はポーリングの
+        # 一周（既定30秒）ではなく、この日次タスクが起きた瞬間そのもの
+        # （1日1回）。作りっぱなしで待機する経路が無いので、
+        # 30秒ごとに漏れる PostWorker の問題はそもそも起きないが、
+        # 閉じる責務をどちらが持つかを揃えるために同じ形にしている。
+        try:
+            client = _build_x_client(config, token_store)
+        except XTokenExpiredError as e:
+            # 未認証・失効は珍しい異常ではない。1日測れなくても、
+            # 次の実行（翌日）まで待てば良い（このタスク自体が
+            # catch-up を持たない設計なので、ここで諦めて構わない）。
+            log_error(f"X の認証が必要です。今日の指標計測を見送ります: {e}")
+            return None
+
+        try:
+            measured = collect_metrics(
+                posts,
+                client,
+                artifact_store,
+                config.output_dir / "metrics",
+                now=datetime.now(UTC),
+            )
+        finally:
+            client.close()
+        return measured
+
+    return DailyScheduler(
+        task,
+        run_at=config.metrics_run_at,
+        timezone=config.schedule_timezone,
+    )
+
+
 def get_context(request: Request) -> AppContext:
     """リクエストからアプリの依存を取り出す。
 
@@ -433,11 +517,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     context.post_worker.start()
     if context.scheduler is not None:
         context.scheduler.start()
+    if context.metrics_scheduler is not None:
+        context.metrics_scheduler.start()
     try:
         yield
     finally:
         if context.scheduler is not None:
             context.scheduler.stop()
+        if context.metrics_scheduler is not None:
+            context.metrics_scheduler.stop()
         # 停止を待つ。待たずに落とすと、実行中のジョブが RUNNING のまま
         # 残る（リースが切れれば回収されるが、無駄に15分待つことになる）。
         context.worker.stop()

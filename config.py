@@ -269,6 +269,17 @@ class Config(BaseSettings):
     # 記事の選択状態（news_data_dir）と同じボリュームに置く。
     x_posting_switch_path: Path = Field(default=Path("./data/x_posting.json"))
 
+    # 指標計測の実行時刻（SCHEDULE_TIMEZONE のローカル時刻、HH:MM）。
+    # SCHEDULE_TIME（動画計画・X投稿計画）とは別の時刻にする。同時に回すと、
+    # 記事選定（動画計画）・投稿計画・指標の読み取り課金が同じ枠で重なり、
+    # どれが遅延の原因か切り分けにくくなる。
+    #
+    # 08:00〜20:00 の間で選ぶ。計測は「24時間前・7日前」を窓 ±12時間で
+    # 探すため、投稿時刻（X_POST_TIMES、最も早くて08:00・最も遅くて21:30）
+    # を1日分すべて窓の内側に収めるには、実行時刻がこの帯の中である必要がある
+    # （境界に近いと、その日の最初か最後の投稿が窓から外れる）。
+    x_metrics_time: str = Field(default="11:00")
+
     @field_validator("ai_search_queries", mode="before")
     @classmethod
     def _parse_ai_search_queries(cls, value: object) -> object:
@@ -358,6 +369,21 @@ class Config(BaseSettings):
         """
         if isinstance(value, str):
             return [v.strip() for v in value.split(",") if v.strip()]
+        return value
+
+    @field_validator("x_metrics_time")
+    @classmethod
+    def _check_x_metrics_time(cls, value: str) -> str:
+        """HH:MM として解釈できること。
+
+        `schedule_time` と同じ理由: 解釈できない値だとスケジューラの
+        起動時に落ちる。設定を読む時点で弾いた方が原因が分かりやすい。
+        """
+        try:
+            hour, minute = (int(part) for part in value.split(":", 1))
+            dt_time(hour=hour, minute=minute)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"X_METRICS_TIME は HH:MM の形式で指定してください: {value!r}") from e
         return value
 
     @field_validator("x_post_times")
@@ -491,6 +517,18 @@ class Config(BaseSettings):
         from datetime import time as _time
 
         hour, minute = (int(part) for part in self.schedule_time.split(":", 1))
+        return _time(hour=hour, minute=minute)
+
+    @property
+    def metrics_run_at(self) -> "dt_time":
+        """指標計測の実行時刻を `datetime.time` で返す。
+
+        Returns:
+            dt_time: 実行時刻（検証済みなので必ず解釈できる）
+        """
+        from datetime import time as _time
+
+        hour, minute = (int(part) for part in self.x_metrics_time.split(":", 1))
         return _time(hour=hour, minute=minute)
 
     @property
