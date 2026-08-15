@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from src.models.news import NewsArticle, NewsCategory
+from src.models.news import CHANNEL_VIDEO, CHANNEL_X, NewsArticle, NewsCategory
 from src.pipeline import Pipeline
 
 # --------------------------------------------------------------------------
@@ -142,3 +142,78 @@ def test_falls_back_to_default_name_when_empty(sanitize) -> None:
 def test_keeps_japanese_characters(sanitize) -> None:
     """日本語は保持すること（出力ファイルを人が識別できるようにするため）。"""
     assert sanitize("OpenAIが新モデルを発表") == "OpenAIが新モデルを発表"
+
+
+# --------------------------------------------------------------------------
+# チャネル別消費記録
+# --------------------------------------------------------------------------
+
+
+def test_旧形式の_video_generated_を_consumed_として読む():
+    """既存の data/news/*.json を移行スクリプトなしで読めること。
+
+    クラウドの Azure Files 上には旧形式の JSON が既に存在する。
+    読めなくなると記事一覧が空になり、生成対象を全て見失う。
+    """
+    data = {
+        "id": "abc123",
+        "title": "テスト記事",
+        "url": "https://example.com/a",
+        "source": "Example",
+        "category": "ai",
+        "fetched_at": "2026-08-01T10:00:00",
+        "video_generated": True,
+    }
+
+    article = NewsArticle.from_dict(data)
+
+    assert article.is_consumed_by(CHANNEL_VIDEO) is True
+    assert article.video_generated is True
+    assert article.is_consumed_by(CHANNEL_X) is False
+    assert article.consumed[CHANNEL_VIDEO] == "2026-08-01T10:00:00"
+
+
+def test_未消費の記事は_どのチャネルでも未消費():
+    article = NewsArticle(
+        id="x", title="t", url="https://example.com/b", source="s", category=NewsCategory.AI
+    )
+
+    assert article.consumed == {}
+    assert article.video_generated is False
+    assert article.is_consumed_by(CHANNEL_X) is False
+
+
+def test_mark_consumed_は_他のチャネルを消さない():
+    article = NewsArticle(
+        id="x", title="t", url="https://example.com/c", source="s", category=NewsCategory.AI
+    )
+
+    article.mark_consumed(CHANNEL_VIDEO)
+    article.mark_consumed(CHANNEL_X)
+
+    assert article.is_consumed_by(CHANNEL_VIDEO) is True
+    assert article.is_consumed_by(CHANNEL_X) is True
+
+
+def test_to_dict_は_video_generated_を_出力しない():
+    """出力に旧フィールドを残すと、権威が2つになって食い違う。"""
+    article = NewsArticle(
+        id="x", title="t", url="https://example.com/d", source="s", category=NewsCategory.AI
+    )
+    article.mark_consumed(CHANNEL_VIDEO)
+
+    data = article.to_dict()
+
+    assert "video_generated" not in data
+    assert data["consumed"] == article.consumed
+
+
+def test_from_dict_は_to_dict_の_出力を_復元できる():
+    article = NewsArticle(
+        id="x", title="t", url="https://example.com/e", source="s", category=NewsCategory.AI
+    )
+    article.mark_consumed(CHANNEL_X)
+
+    restored = NewsArticle.from_dict(article.to_dict())
+
+    assert restored.consumed == article.consumed

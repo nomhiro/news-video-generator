@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from src.models.news import NewsArticle, NewsCategory
+from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
 from src.utils.logger import log_error, log_step, log_success
 
 
@@ -42,8 +42,8 @@ class SupportsNewsFetching(Protocol):
         """指定した記事の本文を取得する。"""
         ...
 
-    def get_articles_by_category(self, category: NewsCategory) -> list[NewsArticle]:
-        """カテゴリの記事を返す。"""
+    def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
+        """そのチャネルでまだ使っていない記事を返す。"""
         ...
 
 
@@ -119,7 +119,7 @@ async def plan_daily_batch(
         log_error(f"ニュースの取得に失敗しました（既存の記事で続行します）: {e}")
 
     needed = articles_per_format * len(formats)
-    candidates = _pick_candidates(news, needed)
+    candidates = news.pick_unconsumed(CHANNEL_VIDEO, needed)
     if not candidates:
         log_error("未生成の記事が見つかりませんでした")
         return DailyPlan(batch_ids={}, skipped_reason="未生成の記事がありません")
@@ -149,32 +149,3 @@ async def plan_daily_batch(
     if not batch_ids:
         return DailyPlan(batch_ids={}, skipped_reason="投入できる記事がありませんでした")
     return DailyPlan(batch_ids=batch_ids)
-
-
-def _pick_candidates(news: SupportsNewsFetching, needed: int) -> list[NewsArticle]:
-    """まだ動画にしていない記事を選ぶ。
-
-    AI カテゴリを優先する。このチャンネルの主題がAI・技術ニュースで、
-    独自解説を載せやすいのがこの分野だから。足りなければ
-    technology カテゴリで補う。
-
-    Args:
-        news: ニュースストア
-        needed: 必要な件数
-
-    Returns:
-        list[NewsArticle]: 選んだ記事（足りなければ少なく返す）
-    """
-    picked: list[NewsArticle] = []
-    seen: set[str] = set()
-
-    for category in (NewsCategory.AI, NewsCategory.TECHNOLOGY):
-        for article in news.get_articles_by_category(category):
-            if len(picked) >= needed:
-                return picked
-            if article.video_generated or article.id in seen:
-                continue
-            seen.add(article.id)
-            picked.append(article)
-
-    return picked

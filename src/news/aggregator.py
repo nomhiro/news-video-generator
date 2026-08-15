@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from src.models.news import NewsArticle, NewsCategory
+from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
 from src.news.sources.google_news import GoogleNewsSource
 from src.news.sources.scraper import ArticleScraper
 from src.utils.logger import log_error, log_step, log_success
@@ -225,7 +225,7 @@ class NewsAggregator:
             old = existing_by_id.get(article.id)
             if old is not None:
                 article.is_selected = old.is_selected
-                article.video_generated = old.video_generated
+                article.consumed = dict(old.consumed)
                 article.content = old.content or article.content
                 article.thumbnail_url = old.thumbnail_url or article.thumbnail_url
             merged.append(article)
@@ -344,12 +344,31 @@ class NewsAggregator:
 
         return self._update_article(article_id, deselect) is not None
 
-    def mark_as_generated(self, article_id: str) -> bool:
-        """記事を動画生成済みとしてマークする。
+    def mark_consumed(self, article_id: str, channel: str) -> bool:
+        """記事をそのチャネルで消費済みとしてマークする。
 
-        動画生成は threadpool のスレッドから呼ぶため、
-        イベントループ側の toggle_selection と同時に走りうる。
-        `_update_article` がロックで直列化する。
+        動画生成は threadpool のスレッドから、投稿は PostWorker の
+        スレッドから呼ばれ、イベントループ側の toggle_selection と
+        同時に走りうる。`_update_article` がロックで直列化する。
+
+        Args:
+            article_id: 記事ID
+            channel: CHANNEL_VIDEO / CHANNEL_X
+
+        Returns:
+            bool: 記事が見つかって更新できたか
+        """
+
+        def mark(article: NewsArticle) -> None:
+            article.mark_consumed(channel)
+
+        return self._update_article(article_id, mark) is not None
+
+    def mark_as_generated(self, article_id: str) -> bool:
+        """記事を動画生成済みとしてマークし、選択を外す。
+
+        選択を外すのは動画だけの都合（画面の「選択した記事」から消す）。
+        X の投稿では選択状態に触らないため、mark_consumed とは分けている。
 
         Args:
             article_id: 記事ID
@@ -359,10 +378,38 @@ class NewsAggregator:
         """
 
         def mark(article: NewsArticle) -> None:
-            article.video_generated = True
+            article.mark_consumed(CHANNEL_VIDEO)
             article.is_selected = False
 
         return self._update_article(article_id, mark) is not None
+
+    def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
+        """そのチャネルでまだ使っていない記事を選ぶ。
+
+        AI カテゴリを優先する。このアカウントの主題が AI・技術ニュースで、
+        独自解説を載せやすいのがこの分野だから。足りなければ
+        technology で補う。
+
+        Args:
+            channel: CHANNEL_VIDEO / CHANNEL_X
+            needed: 必要な件数
+
+        Returns:
+            list[NewsArticle]: 選んだ記事（足りなければ少なく返す）
+        """
+        picked: list[NewsArticle] = []
+        seen: set[str] = set()
+
+        for category in (NewsCategory.AI, NewsCategory.TECHNOLOGY):
+            for article in self.get_articles_by_category(category):
+                if len(picked) >= needed:
+                    return picked
+                if article.is_consumed_by(channel) or article.id in seen:
+                    continue
+                seen.add(article.id)
+                picked.append(article)
+
+        return picked
 
     async def scrape_selected_content(self) -> list[NewsArticle]:
         """選択記事の本文をスクレイピングする。

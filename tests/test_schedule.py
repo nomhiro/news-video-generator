@@ -17,7 +17,7 @@ import pytest
 
 from src.jobs.planner import plan_daily_batch
 from src.jobs.scheduler import DailyScheduler, next_run_at
-from src.models.news import NewsArticle, NewsCategory
+from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -142,15 +142,17 @@ def test_scheduler_survives_a_failing_task() -> None:
 
 
 def _article(article_id: str, title: str, generated: bool = False) -> NewsArticle:
-    return NewsArticle(
+    article = NewsArticle(
         id=article_id,
         title=title,
         url=f"https://example.com/{article_id}",
         source="テスト",
         category=NewsCategory.AI,
         content="本文" * 60,
-        video_generated=generated,
     )
+    if generated:
+        article.mark_consumed(CHANNEL_VIDEO)
+    return article
 
 
 class FakeNews:
@@ -180,8 +182,9 @@ class FakeNews:
         self.scraped.extend(a.id for a in articles)
         return articles
 
-    def get_articles_by_category(self, category: NewsCategory) -> list[NewsArticle]:
-        return [a for a in self.articles if a.category is category]
+    def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
+        picked = [a for a in self.articles if not a.is_consumed_by(channel)]
+        return picked[:needed]
 
     # 定期実行が触ってはいけないもの
     def toggle_selection(self, article_id: str) -> bool | None:  # pragma: no cover

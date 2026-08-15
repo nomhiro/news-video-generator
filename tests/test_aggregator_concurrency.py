@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from src.models.news import NewsArticle, NewsCategory
+from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
 from src.news.aggregator import NewsAggregator
 
 
@@ -202,8 +202,8 @@ def test_merge_preserves_user_state(aggregator: NewsAggregator) -> None:
         content="すでに取得した本文",
         thumbnail_url="https://example.com/thumb.jpg",
         is_selected=True,
-        video_generated=True,
     )
+    existing.mark_consumed(CHANNEL_VIDEO)
     fetched = NewsArticle(
         id="article-000",
         title="新しいタイトル",
