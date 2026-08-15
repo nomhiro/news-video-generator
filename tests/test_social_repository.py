@@ -92,6 +92,35 @@ def test_discard_stale_は_遅れすぎた行を捨てる(repository: SocialPost
     assert repository.claim_due(now) is None
 
 
+def test_list_recent_failed_は_見送られた行を返す(repository: SocialPostRepository) -> None:
+    """FAILED を返す一覧が無いと、見送られた投稿が画面に一切出ない。
+
+    `discard_stale` が4件まとめて捨てた日を、運用者は空のキューから
+    「ニュースが無かった」と読み違える。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    repository.enqueue([_post()], {0: now - timedelta(minutes=90)})
+    repository.enqueue([_post()], {0: now + timedelta(hours=1)})  # 生き残る
+    repository.discard_stale(now, max_delay_minutes=60)
+
+    failed = repository.list_recent_failed(now - timedelta(hours=24))
+
+    assert len(failed) == 1
+    assert failed[0].status is PostStatus.FAILED
+    assert "60分以上遅れた" in (failed[0].error_message or "")
+
+
+def test_list_recent_failed_は_古い行を返さない(repository: SocialPostRepository) -> None:
+    """since より前に作られた行は運用者の問い（今日の投稿）に関係しない。"""
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    repository.enqueue([_post()], {0: now - timedelta(minutes=90)})
+    repository.discard_stale(now, max_delay_minutes=60)
+
+    # created_at は行の作成時刻（現在時刻）なので、未来を since にすれば
+    # 「範囲外」を再現できる。
+    assert repository.list_recent_failed(datetime.now(UTC) + timedelta(hours=1)) == []
+
+
 def test_cancel_は_送信中の行を拒否する(repository: SocialPostRepository) -> None:
     """`POSTING -> FAILED` は遷移表では許されているので、状態を見ないと通る。
 

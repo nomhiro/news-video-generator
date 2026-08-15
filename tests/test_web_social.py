@@ -67,6 +67,7 @@ def _post(
     scheduled_at: datetime | None,
     posted_at: datetime | None = None,
     error_message: str | None = None,
+    created_at: datetime | None = None,
 ) -> SocialPost:
     return SocialPost(
         id=post_id,
@@ -86,7 +87,7 @@ def _post(
         reply_to_tweet_id=None,
         attempts=0,
         error_message=error_message,
-        created_at=datetime(2026, 8, 15, tzinfo=UTC),
+        created_at=created_at or datetime(2026, 8, 15, tzinfo=UTC),
     )
 
 
@@ -112,6 +113,9 @@ class FakeSocialPosts:
 
     def list_needs_review(self) -> list[SocialPost]:
         return self._needs_review
+
+    def list_recent_failed(self, since: datetime) -> list[SocialPost]:
+        return [p for p in self._settled if p.status is PostStatus.FAILED and p.created_at >= since]
 
     def list_posted_between(self, start: datetime, end: datetime) -> list[SocialPost]:
         return [
@@ -305,6 +309,34 @@ def _client_for(posts: FakeSocialPosts, switch: FakeSwitch) -> TestClient:
     app.dependency_overrides[get_jobs] = lambda: FakeJobs()
     app.dependency_overrides[get_token_store] = lambda: FakeTokenStore()
     return TestClient(app)
+
+
+def test_出せなかった投稿が帯とキューに出る(fake_switch: FakeSwitch) -> None:
+    """FAILED を返す一覧が1つも無かったため、失敗は画面から見えなかった。
+
+    デプロイでアプリが数時間止まった後は `discard_stale` が4件まとめて
+    見送る。運用者は空のキューを見て「今日はニュースが無かった」と
+    解釈するしかなく、痕跡はログの1行だけだった。
+    """
+    now = datetime.now(UTC)
+    dropped = _post(
+        5,
+        PostStatus.FAILED,
+        "遅れすぎて見送られた本文です。",
+        scheduled_at=now - timedelta(hours=3),
+        error_message="予定時刻から60分以上遅れたため投稿しませんでした",
+        created_at=now - timedelta(hours=4),
+    )
+    posts = FakeSocialPosts([], [], settled=[dropped])
+
+    with _client_for(posts, fake_switch) as client:
+        band = client.get("/x/band").text
+        queue = client.get("/x/queue").text
+
+    assert "出せなかった投稿 1件" in band
+    assert "60分以上遅れたため" in band
+    assert "出せなかった投稿 1件" in queue
+    assert "60分以上遅れたため" in queue
 
 
 def test_送信中の投稿は取り消せない(fake_switch: FakeSwitch) -> None:

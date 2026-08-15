@@ -884,10 +884,15 @@ async def x_band(
     day_start_utc = day_start_local.astimezone(UTC)
     day_end_utc = day_start_utc + timedelta(days=1)
 
+    # 失敗した行も帯に載せる。載せていなかった間、`discard_stale` が
+    # 見送った投稿はどの一覧にも出ず、痕跡がログの1行だけだった
+    # （運用者は空のキューを見て「今日はニュースが無かった」と解釈する）。
+    failed = posts.list_recent_failed(day_start_utc)
     post_slots = [
         _to_post_slot(post, zone)
         for post in posts.list_upcoming(limit=40)
         + posts.list_posted_between(day_start_utc, day_end_utc)
+        + failed
     ]
     # `latest_batch_id()` + `list_batch()` は直近1バッチしか見ない。
     # 同じ日に複数バッチが走ると早い方の動画が帯から消え、進行中の
@@ -905,6 +910,7 @@ async def x_band(
             # 1日を 00:00〜24:00 の帯として描くので、いまの位置は割合で渡す
             "now_ratio": (local_now.hour * 60 + local_now.minute) / (24 * 60),
             "needs_review": posts.list_needs_review(),
+            "failed": failed,
         },
     )
 
@@ -923,11 +929,20 @@ async def x_queue(
     Args:
         message: 直前の操作結果（例:「取り消しました」）。`aria-live` に出す
     """
+    # 失敗した行も出す。出なかった投稿があることを、空のキューだけから
+    # 読み取ることはできない。
+    #
+    # 帯（`/x/band`）は1日の時間軸を描くので日付境界で切るが、キューは
+    # 時間軸ではないので直近24時間で切る。日付境界だと 00:05 に見たとき
+    # 「昨夜 21:30 の投稿が落ちた」ことが消える。
+    since = datetime.now(UTC) - timedelta(hours=24)
+
     return templates.TemplateResponse(
         request,
         "partials/post_queue.html",
         {
             "needs_review": posts.list_needs_review(),
+            "failed": posts.list_recent_failed(since),
             "upcoming": posts.list_upcoming(limit=20),
             "max_weighted": X_MAX_WEIGHTED_LENGTH,
             "message": message,

@@ -309,6 +309,42 @@ class SocialPostRepository:
             ).all()
             return [_to_domain(r) for r in records]
 
+    def list_recent_failed(self, since: datetime) -> list[SocialPost]:
+        """`since` 以降に作られた FAILED の行を新しい順に返す。
+
+        **これが無い間、FAILED はどの一覧にも出てこなかった。**
+        FAILED になる経路は3つあり、どれも黙って消える:
+
+        1. `discard_stale`（遅れすぎた予定の見送り）
+        2. 画面からの取り消し
+        3. 送信前の失敗（画像カードのメディアアップロード失敗を含む）
+
+        デプロイでアプリが数時間止まった後は 1 が4件まとめて起き、
+        運用者は空のキューを見て「今日はニュースが無かった」と解釈する。
+        痕跡がログの1行しか無いのが問題だった。
+
+        絞り込みに `created_at` を使う（`scheduled_at` は理屈上 NULL に
+        なりうるが `created_at` は NOT NULL）。下書きは予定と同じ日に
+        作られるので、運用者の問い（「今日の投稿は落ちていないか」）には
+        これで答えられる。
+
+        Args:
+            since: この時刻以降に作られた行だけを見る
+
+        Returns:
+            list[SocialPost]: FAILED の行（新しい順）
+        """
+        with session_scope(self._sessions) as session:
+            records = session.scalars(
+                select(SocialPostRecord)
+                .where(
+                    SocialPostRecord.status == PostStatus.FAILED,
+                    SocialPostRecord.created_at >= since,
+                )
+                .order_by(SocialPostRecord.created_at.desc())
+            ).all()
+            return [_to_domain(r) for r in records]
+
     def list_posted_between(self, start: datetime, end: datetime) -> list[SocialPost]:
         """期間内に投稿できたものを返す（計測の対象を選ぶのに使う）。"""
         with session_scope(self._sessions) as session:

@@ -25,6 +25,18 @@
     </div>
     {% endif %}
 
+    {% if failed %}
+    {# 失敗（見送り・取り消し・送信前の失敗）も必ず出す。出さなかった間、
+       デプロイで数時間止まった日は4件が黙って捨てられ、運用者は空の
+       キューを見て「今日はニュースが無かった」と解釈していた。 #}
+    <div class="mb-3 rounded border border-vermilion/30 bg-vermilion/5 px-3 py-2 text-sm text-vermilion">
+        <p class="font-semibold">出せなかった投稿 {{ failed|length }}件</p>
+        {% for post in failed %}
+        <p class="mt-1 text-xs">{{ post.article_title }}（{{ post.error_message or "理由不明" }}）</p>
+        {% endfor %}
+    </div>
+    {% endif %}
+
     <div class="relative h-20 rounded bg-ink/5 overflow-x-auto">
         {% for hour in range(0, 25, 6) %}
         <span class="absolute top-1 -translate-x-1/2 text-[10px] text-ink/40 tnum"

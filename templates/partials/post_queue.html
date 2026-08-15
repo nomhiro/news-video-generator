@@ -41,6 +41,28 @@
     </div>
     {% endif %}
 
+    {% if failed %}
+    {# 直近24時間で出せなかった投稿。空のキューだけを見ても
+       「今日は出なかった」ことしか分からず、「出そうとして落ちた」のか
+       「そもそも作られなかった」のかが区別できない。 #}
+    <div>
+        <h3 class="text-xs font-semibold text-vermilion mb-2">出せなかった投稿 {{ failed|length }}件</h3>
+        <div class="space-y-2">
+            {% for post in failed %}
+            <article class="rounded border border-vermilion/20 bg-vermilion/5 p-3">
+                <div class="flex items-center justify-between text-xs text-ink/60 mb-1">
+                    <span class="tnum">
+                        {{ post.scheduled_at.strftime('%m/%d %H:%M') if post.scheduled_at else "未定" }}
+                    </span>
+                    <span>{{ post.article_title }}</span>
+                </div>
+                <p class="text-xs text-vermilion">{{ post.error_message or "理由不明" }}</p>
+            </article>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
     <div>
         <h3 class="text-xs font-semibold text-ink/60 mb-2">これから出る</h3>
         {% if upcoming %}
