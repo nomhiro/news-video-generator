@@ -12,13 +12,17 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from src.generators.image_generator import ContentFilterError
 from src.models.news import CHANNEL_X, NewsArticle
 from src.models.social import NewPost, PostKind
+from src.social.card_visual import CARD_IMAGE_SIZE, CardVisual, build_card_prompt
 from src.social.cost import estimate_month_cost, is_over_budget
 from src.utils.logger import log_error, log_step, log_success
 
@@ -51,8 +55,48 @@ class SupportsPostEnqueue(Protocol):
 class SupportsPostGeneration(Protocol):
     """下書き生成器の必要な部分だけ。"""
 
-    def generate(self, article: NewsArticle, kind: PostKind, hashtags: list[str]) -> list[NewPost]:
+    def generate(
+        self,
+        article: NewsArticle,
+        kind: PostKind,
+        hashtags: list[str],
+        caption: str | None = None,
+    ) -> list[NewPost]:
         """記事から投稿の下書きを生成する。"""
+        ...
+
+
+class SupportsActiveJobsCheck(Protocol):
+    """ジョブ表の必要な部分だけ。"""
+
+    def has_active_jobs(self) -> bool:
+        """実行待ち・実行中の動画生成ジョブがあるか。"""
+        ...
+
+
+class SupportsCardVisualGeneration(Protocol):
+    """`CardVisualGenerator` の必要な部分だけ。"""
+
+    def generate(self, article: NewsArticle) -> CardVisual:
+        """記事から画像カードの視覚指示を生成する。"""
+        ...
+
+
+class SupportsCardImageGeneration(Protocol):
+    """`ImageGenerator` の必要な部分だけ。"""
+
+    def generate_batch(
+        self, prompts: list[str], output_dir: Path, *, size: str | None = None
+    ) -> list[Path]:
+        """プロンプトから画像を生成する。"""
+        ...
+
+
+class SupportsArtifactPublish(Protocol):
+    """`ArtifactStore` の必要な部分だけ。"""
+
+    def publish(self, local_path: Path, key: str) -> str:
+        """ローカルのファイルを保存先へ公開する。"""
         ...
 
 
@@ -100,9 +144,11 @@ def plan_daily_posts(
     unit_with_link_usd: float,
     now: datetime,
     timezone: str = "Asia/Tokyo",
-    card_generator: object | None = None,
-    image_generator: object | None = None,
-    artifacts: object | None = None,
+    card_generator: SupportsCardVisualGeneration | None = None,
+    image_generator: SupportsCardImageGeneration | None = None,
+    artifacts: SupportsArtifactPublish | None = None,
+    jobs: SupportsActiveJobsCheck | None = None,
+    output_dir: Path | None = None,
 ) -> DailyPostPlan:
     """記事を選び、下書きを作り、予定時刻を入れて積む。
 
@@ -120,10 +166,16 @@ def plan_daily_posts(
         unit_with_link_usd: リンク有りの単価
         now: 現在時刻（UTC aware）
         timezone: times を解釈するタイムゾーン
-        card_generator: 画像カードのキャプション生成器。このタスクでは
-            未使用（Task 6 が実装する）。無ければ画像無しの CARD を作る
+        card_generator: 画像カードの視覚指示生成器。`image_generator` /
+            `artifacts` / `output_dir` のいずれかと組にならない場合、
+            または省略時は、画像無しの CARD を作る（Task 6 以前の動作）
         image_generator: 画像カードの生成器。同上
         artifacts: 生成した画像の保存先。同上
+        jobs: 動画生成ジョブ表。`has_active_jobs()` が True の間はカードを
+            作らない（`gpt-image-2` のクォータをリージョン単位で
+            動画パイプラインと共有しているため、奪うと双方が遅くなる）
+        output_dir: 画像カードを生成する作業ディレクトリ（ローカル）。
+            生成後に `artifacts` へ publish する。省略時はカードを作らない
 
     Returns:
         DailyPostPlan: 積んだまとまり、または積まなかった理由
@@ -172,12 +224,28 @@ def plan_daily_posts(
             break
 
         kind = KIND_ROTATION[index % len(KIND_ROTATION)]
+        image_key: str | None = None
+        caption: str | None = None
+        # card_generator / image_generator / artifacts が揃っていない場合は
+        # 画像生成そのものを試みず、画像無しの CARD のまま進む
+        # （Task 6 以前からの動作。呼び出し元が未設定でも壊れない）。
+        if kind is PostKind.CARD and card_generator and image_generator and artifacts:
+            kind, image_key, caption = _build_card_image(
+                article, card_generator, image_generator, artifacts, jobs, output_dir
+            )
+
         try:
-            drafts = generator.generate(article, kind, hashtags)
+            if caption:
+                drafts = generator.generate(article, kind, hashtags, caption=caption)
+            else:
+                drafts = generator.generate(article, kind, hashtags)
         # 1件の生成失敗で1日を落とさない。残りの記事は積む
         except Exception as e:
             log_error(f"下書きの生成に失敗しました（{article.title[:24]}）: {e}")
             continue
+
+        if image_key:
+            drafts = [dataclasses.replace(drafts[0], image_key=image_key), *drafts[1:]]
 
         at = schedule[index]
         group_ids.append(posts.enqueue(drafts, {d.position: at for d in drafts}))
@@ -186,6 +254,65 @@ def plan_daily_posts(
     if not group_ids:
         return DailyPostPlan(group_ids=[], skipped_reason="積める下書きがありませんでした")
     return DailyPostPlan(group_ids=group_ids)
+
+
+def _build_card_image(
+    article: NewsArticle,
+    card_generator: SupportsCardVisualGeneration,
+    image_generator: SupportsCardImageGeneration,
+    artifacts: SupportsArtifactPublish,
+    jobs: SupportsActiveJobsCheck | None,
+    output_dir: Path | None,
+) -> tuple[PostKind, str | None, str | None]:
+    """画像カードの視覚指示・画像を生成し、保存先へ公開する。
+
+    失敗したら例外を投げず SINGLE への降格を返す。カード1枚を諦めても
+    その日の投稿は出したいため（呼び出し元の `plan_daily_posts` が
+    1件の生成失敗で1日を落とさない、という方針と同じ）。
+
+    Args:
+        article: 元記事
+        card_generator: 視覚指示の生成器
+        image_generator: 画像の生成器
+        artifacts: 生成した画像の保存先
+        jobs: 動画生成ジョブ表（None なら判定を省略する）
+        output_dir: 画像を生成する作業ディレクトリ（None なら降格する）
+
+    Returns:
+        tuple[PostKind, str | None, str | None]:
+            (最終的な型, 画像の保存先キー, 投稿本文に渡すキャプション)
+    """
+    if jobs is not None and jobs.has_active_jobs():
+        # gpt-image-2 のクォータはリージョン単位で上限4という律速で、
+        # 動画パイプラインと共有している。動画生成中にカードを作ると
+        # 動画側の完了を遅らせるので、その日は SINGLE に降格する。
+        log_step("動画生成が進行中のため画像カードを SINGLE に降格します", "⏭️")
+        return PostKind.SINGLE, None, None
+
+    if output_dir is None:
+        log_error("画像カードの作業ディレクトリが未設定のため SINGLE に降格します")
+        return PostKind.SINGLE, None, None
+
+    try:
+        visual = card_generator.generate(article)
+        prompt = build_card_prompt(visual)
+        paths = image_generator.generate_batch([prompt], output_dir, size=CARD_IMAGE_SIZE)
+        # キーに group_id は使えない（group_id は NewPost 構築後に
+        # SocialPostRepository.enqueue が振るため）。article_id は URL の
+        # 16文字ハッシュで安定しているので、同じ記事の再ドラフトはキーを
+        # 上書きするだけで、孤立ファイルが積み重ならない。
+        key = f"social/cards/{article.id}.png"
+        artifacts.publish(paths[0], key)
+    except ContentFilterError as e:
+        # コンテンツフィルタの拒否は再試行しても結果が変わらない設計
+        # （ImageGenerator 側の判断）なので、ここでも再試行せず即座に降格する。
+        log_error(f"画像カードがコンテンツフィルタに拒否されました。SINGLE に降格します: {e}")
+        return PostKind.SINGLE, None, None
+    except Exception as e:
+        log_error(f"画像カードの生成に失敗しました。SINGLE に降格します: {e}")
+        return PostKind.SINGLE, None, None
+
+    return PostKind.CARD, key, visual.caption_ja
 
 
 def _resolve_schedule(times: list[str], now: datetime, timezone: str) -> list[datetime]:

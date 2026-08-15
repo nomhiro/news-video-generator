@@ -193,6 +193,8 @@ class ImageGenerator:
         output_dir: Path,
         language: str = "ja",
         video_format: str = "short",
+        *,
+        size: str | None = None,
     ) -> list[Path]:
         """複数のプロンプトから画像を生成する。
 
@@ -205,6 +207,9 @@ class ImageGenerator:
             output_dir: 出力ディレクトリ
             language: 言語コード ("ja" or "en")
             video_format: 動画形式 ("short", "tiktok", "long")
+            size: 生成サイズを直接指定する。画像カードのような
+                video_format という概念を持たない呼び出し元向け。
+                省略時は video_format から導出する（既定動作は変えない）
 
         Returns:
             List[Path]: 生成された画像ファイルのパスリスト（prompts と同じ順序）
@@ -215,7 +220,7 @@ class ImageGenerator:
         if not prompts:
             raise ImageGenerationError("画像生成プロンプトが空です")
 
-        size = self._size_for_format(video_format)
+        size = size or self._size_for_format(video_format)
         validate_size(size)  # 定数の取り違えを起動時に検出する
 
         format_labels = {

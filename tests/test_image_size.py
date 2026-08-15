@@ -101,3 +101,47 @@ def test_upper_case_x_is_accepted() -> None:
 def test_size_for_format(video_format: str, expected: str) -> None:
     generator = ImageGenerator.__new__(ImageGenerator)  # API 接続なしでメソッドだけ検証
     assert generator._size_for_format(video_format) == expected
+
+
+def _stub_generator(monkeypatch: pytest.MonkeyPatch) -> tuple[ImageGenerator, list[str]]:
+    """`_generate_single` を差し替えて、渡された size だけを記録する。
+
+    `generate_batch` は ThreadPoolExecutor 経由で `_generate_single` を呼ぶため、
+    実 API を呼ばずに「どの size が使われたか」だけを確かめられる。
+    """
+    generator = ImageGenerator.__new__(ImageGenerator)  # API 接続なしで組み立てる
+    generator.max_concurrency = 1
+    captured: list[str] = []
+
+    def fake_generate_single(self: ImageGenerator, prompt: str, output_path, size: str, index: int):
+        captured.append(size)
+        output_path.write_bytes(b"fake")
+        return output_path
+
+    monkeypatch.setattr(ImageGenerator, "_generate_single", fake_generate_single)
+    return generator, captured
+
+
+def test_generate_batch_は_video_format_からサイズを導出する(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """既定動作（size 省略時）を変えていないことを確かめる。"""
+    generator, captured = _stub_generator(monkeypatch)
+
+    generator.generate_batch(["p"], tmp_path, video_format="long")
+
+    assert captured == [SPECS[VideoFormat.LONG].image_size]
+
+
+def test_generate_batch_は_size_指定を_video_format_より優先する(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """画像カードは video_format という概念を持たないため、
+    直接サイズを渡せる必要がある（video_format の既定値 "short" が
+    有効になってはいけない）。
+    """
+    generator, captured = _stub_generator(monkeypatch)
+
+    generator.generate_batch(["p"], tmp_path, size="1024x1024")
+
+    assert captured == ["1024x1024"]
