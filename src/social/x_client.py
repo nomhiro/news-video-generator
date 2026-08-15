@@ -54,6 +54,18 @@ class XClient(Protocol):
         """投稿の指標を返す（tweet_id -> 指標）。"""
         ...
 
+    def close(self) -> None:
+        """接続を閉じる。
+
+        `PostWorker` は `client_factory` をポーリングごとに呼んで新しい
+        クライアントを作る（アクセストークンの更新に追随するため）。
+        作ったら必ずこれを呼んで閉じる責務は呼び出し側にあり、Protocol に
+        含めているのはその契約を型で強制するため。忘れると
+        `httpx.Client` の接続プールがポーリングごとに（既定30秒に1回）
+        漏れ続ける。
+        """
+        ...
+
 
 class HttpXClient:
     """httpx による XClient の実装。

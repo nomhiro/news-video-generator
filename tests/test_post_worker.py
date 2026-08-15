@@ -7,6 +7,7 @@ import pytest
 
 from src.jobs.post_worker import PostWorker, post_due_once
 from src.models.social import NewPost, PostKind, PostStatus
+from src.social.x_auth import XTokenExpiredError
 from src.social.x_client import XSendUncertainError
 from src.storage.db import create_db_engine, create_session_factory
 from src.storage.schema import upgrade_to_head
@@ -19,6 +20,7 @@ class FakeClient:
     def __init__(self, fail_with: Exception | None = None) -> None:
         self.posted: list[tuple[str, str | None]] = []
         self.uploaded: list[Path] = []
+        self.closed = False
         self._fail_with = fail_with
 
     def create_post(self, text, reply_to=None, media_ids=None) -> str:
@@ -33,6 +35,40 @@ class FakeClient:
 
     def fetch_metrics(self, tweet_ids):
         return {}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class CountingFactory:
+    """呼ばれた回数を数えるだけの client_factory。
+
+    スイッチが無効なときにクライアントが**作られていない**ことを
+    証明するのに使う（作ってしまうと httpx.Client の接続が漏れる）。
+    """
+
+    def __init__(self, client: FakeClient) -> None:
+        self._client = client
+        self.calls = 0
+
+    def __call__(self) -> FakeClient:
+        self.calls += 1
+        return self._client
+
+
+class FailingFactory:
+    """常に `XTokenExpiredError` を投げる client_factory。
+
+    未認証・失効状態を再現する（Task 7 の認証画面ができるまでの
+    全デプロイの既定状態でもある）。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> FakeClient:
+        self.calls += 1
+        raise XTokenExpiredError("未認証です")
 
 
 class EnabledSwitch:
@@ -192,3 +228,68 @@ def test_遅れすぎた投稿はワーカーの1周で見送られる(repositor
     assert posted is False  # 掃いただけで、出すものは無かった
     assert client.posted == []
     assert repository.list_upcoming() == []  # SCHEDULED のまま残っていない
+
+
+def test_スイッチが無効ならクライアントを作らない(repository: SocialPostRepository) -> None:
+    """無効な間、毎ポーリング httpx.Client を作って捨てると接続が漏れる。
+
+    掴む前にスイッチを見て、無効なら `client_factory` に触らないことを
+    確認する。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _enqueue(repository, now)
+    factory = CountingFactory(FakeClient())
+    worker = PostWorker(repository, client_factory=factory, switch=DisabledSwitch())
+
+    posted = worker._run_one()
+
+    assert posted is False
+    assert factory.calls == 0
+
+
+def test_送信できたクライアントは閉じられる(repository: SocialPostRepository) -> None:
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _enqueue(repository, now)
+    client = FakeClient()
+    worker = PostWorker(repository, client_factory=lambda: client, switch=EnabledSwitch())
+
+    worker._run_one()
+
+    assert client.posted == [("本文0", None)]
+    assert client.closed is True
+
+
+def test_送信が例外で終わってもクライアントは閉じられる(
+    repository: SocialPostRepository,
+) -> None:
+    """finally で閉じないと、送信失敗のたびに接続が漏れる。"""
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _enqueue(repository, now)
+    client = FakeClient(fail_with=XSendUncertainError("timeout"))
+    worker = PostWorker(repository, client_factory=lambda: client, switch=EnabledSwitch())
+
+    worker._run_one()
+
+    assert client.closed is True
+
+
+def test_認証エラーは状態が変わるまで繰り返しログしない(
+    repository: SocialPostRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未認証は珍しい異常ではない（再認証されるまで続く既定状態）。
+
+    30秒ごとに同じ行をログへ出し続けると、本当に見るべきエラーが
+    埋もれる。最初の1回だけ記録し、以降は状態が変わるまで黙る。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _enqueue(repository, now)
+    calls: list[str] = []
+    monkeypatch.setattr("src.jobs.post_worker.log_error", lambda message: calls.append(message))
+    factory = FailingFactory()
+    worker = PostWorker(repository, client_factory=factory, switch=EnabledSwitch())
+
+    for _ in range(3):
+        worker._run_one()
+
+    assert factory.calls == 3  # 毎回試すのは正しい（回復を見逃さないため）
+    assert len(calls) == 1  # ログは1回だけ

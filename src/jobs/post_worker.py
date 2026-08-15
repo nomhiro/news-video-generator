@@ -59,6 +59,11 @@ def post_due_once(
 
     # 無効なら掴まない。掴んでから止めると POSTING の行が残り、
     # 次の起動で NEEDS_REVIEW に落ちてしまう。
+    #
+    # **この判定は `PostWorker._run_one` の判定と意図的に重複している。**
+    # `post_due_once` はテストから直接呼ばれる関数なので、単体で
+    # 安全でなければならない。`_run_one` 側の判定（クライアントを
+    # 作る前に無効なら帰る）を「重複しているから」と削らないこと。
     if not switch.is_enabled():
         return False
 
@@ -151,6 +156,9 @@ class PostWorker:
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # 未認証/失効の状態が変わったときだけログを出すためのフラグ。
+        # `_run_one` の docstring を参照。
+        self._needs_reauth = False
 
     def start(self) -> None:
         """ワーカースレッドを起動する。
@@ -206,7 +214,7 @@ class PostWorker:
         log_step("投稿ワーカーを停止しました", "🐦")
 
     def _run_one(self) -> bool:
-        """1回分のループ本体（掃く→出す）。
+        """1回分のループ本体（掃く→判定→作る→出す→閉じる）。
 
         テストがスレッドを起動せずに1周ぶんだけ検証できるように、
         `_loop` から切り出している。
@@ -224,11 +232,42 @@ class PostWorker:
             if discarded:
                 log_error(f"予定時刻から遅れすぎた投稿 {discarded}件を見送りました")
 
-        client = self._client_factory()
-        return post_due_once(
-            self._repository,
-            client,
-            self._switch,
-            fetch_image=self._fetch_image,
-            on_posted=self._on_posted,
-        )
+        # スイッチが無効ならここで終える。`post_due_once` にも同じ判定が
+        # あるが（意図的な重複。あちらの docstring 参照）、ここで先に
+        # 判定する目的は別にある: クライアントを作らない・接続を開かない。
+        # ここで判定せずに毎ポーリング（既定30秒ごと）クライアントを
+        # 作って渡すと、無効な間（開発中や、Task 7 の認証画面ができるまで
+        # の全デプロイの既定状態）ずっと `httpx.Client` を開いて捨てる
+        # ことになり、接続プールが漏れ続ける。
+        if not self._switch.is_enabled():
+            return False
+
+        try:
+            client = self._client_factory()
+        except XTokenExpiredError as e:
+            # 未認証・失効は珍しい異常ではない（再認証されるまで続く）。
+            # 毎ポーリング同じ行をログに出し続けると、本当に見るべき
+            # エラーがログに埋もれる。**止めるのは繰り返しだけで、
+            # 最初の1回は必ずエラーとして記録する。**
+            if not self._needs_reauth:
+                log_error(f"X の認証が必要です。再認証されるまで投稿を保留します: {e}")
+                self._needs_reauth = True
+            return False
+
+        if self._needs_reauth:
+            log_step("X の認証が回復しました。投稿を再開します", "🐦")
+            self._needs_reauth = False
+
+        try:
+            return post_due_once(
+                self._repository,
+                client,
+                self._switch,
+                fetch_image=self._fetch_image,
+                on_posted=self._on_posted,
+            )
+        finally:
+            # 掴めなかった場合・送信が例外で終わった場合を含め、
+            # 作ったクライアントは必ず閉じる。閉じないと接続プールが
+            # ポーリングごとに漏れる。
+            client.close()
