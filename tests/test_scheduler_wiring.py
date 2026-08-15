@@ -22,6 +22,7 @@ import pytest
 
 import src.web.dependencies as dependencies
 from config import Config
+from src.jobs.post_planner import DailyPostPlan
 from src.social.card_visual import CardVisualGenerator
 from tests.test_config import REQUIRED_VALUES
 
@@ -51,8 +52,12 @@ def captured_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     calls: dict[str, Any] = {}
 
-    def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> None:
+    def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
         calls.update(kwargs)
+        # 実物と同じ型を返す。呼び出し元は `skipped_reason` を読んで
+        # ログに出すので、None を返すフェイクだと本物では起きない
+        # AttributeError が `except Exception` に飲まれてしまう。
+        return DailyPostPlan(group_ids=[])
 
     async def fake_plan_daily_batch(*args: Any, **kwargs: Any) -> None:
         return None
@@ -82,5 +87,51 @@ def test_定期実行はplan_daily_postsに画像カードの5点セットを渡
         assert captured_kwargs["artifacts"] is context.artifact_store
         assert captured_kwargs["jobs"] is context.jobs
         assert captured_kwargs["output_dir"] == context.config.output_dir / "cards"
+    finally:
+        context.aggregator.close()
+
+
+def test_動画ジョブを積んでもカードは作られる(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """定期実行は X の計画を動画より**先に**立てる（C1 の回帰）。
+
+    `plan_daily_posts` はカードを作る前に `jobs.has_active_jobs()` を見て、
+    実行待ち・実行中の動画ジョブがあれば CARD を SINGLE に降格する。
+    動画を先に積むとこの判定が**常に True** になり、画像カードの機能全体が
+    本番で一度も動かない。
+
+    上のテストが `plan_daily_batch` を no-op のフェイクにしていたため、
+    この不具合はテストからは見えなかった。ここでは
+    **実際にジョブ表へ行を積むフェイク**を使い、その状態でも
+    `plan_daily_posts` が CARD を作れることを確認する。
+    """
+    enqueued_before_posts: list[bool] = []
+
+    async def fake_plan_daily_batch(*args: Any, **kwargs: Any) -> None:
+        # 実物と同じことをする: ジョブ表に QUEUED の行を積む。
+        # no-op にするとこの回帰は再現しない。
+        context.jobs.enqueue_batch([("a1", "記事")], video_format="short")
+
+    def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
+        jobs = kwargs["jobs"]
+        enqueued_before_posts.append(jobs.has_active_jobs())
+        return DailyPostPlan(group_ids=[])
+
+    monkeypatch.setattr(dependencies, "plan_daily_batch", fake_plan_daily_batch)
+    monkeypatch.setattr(dependencies, "plan_daily_posts", fake_plan_daily_posts)
+
+    context = dependencies.AppContext.build(_config(tmp_path))
+    try:
+        assert context.scheduler is not None
+
+        asyncio.run(context.scheduler._task())
+
+        # 投稿計画の時点でジョブ表が空であること。True だと
+        # `_build_card_image` が必ず SINGLE に降格する。
+        assert enqueued_before_posts == [False]
+        # 動画側も走っていること（順序を直しただけで、片方を
+        # 止めてしまっていないことの確認）。
+        assert context.jobs.has_active_jobs() is True
     finally:
         context.aggregator.close()

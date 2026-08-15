@@ -32,7 +32,7 @@ from src.storage.social import SocialPostRepository
 from src.storage.tokens import TokenStore, build_token_store
 from src.uploaders.tiktok_uploader import TikTokUploader
 from src.uploaders.youtube_uploader import YouTubeUploader
-from src.utils.logger import log_error
+from src.utils.logger import log_error, log_step
 
 
 @dataclass
@@ -290,19 +290,32 @@ def _build_scheduler(
         return None
 
     async def task() -> object:
-        video_plan = await plan_daily_batch(
-            aggregator,
-            jobs,
-            formats=config.schedule_formats,
-            search_queries=config.ai_search_queries,
-            ai_limit_per_query=config.ai_news_limit_per_query,
-            articles_per_format=config.schedule_articles_per_format,
-        )
+        # **X の計画を動画より先に立てる。順序を入れ替えないこと。**
+        #
+        # `plan_daily_batch` は動画ジョブをジョブ表に積む。`plan_daily_posts`
+        # はカードを作る前に `jobs.has_active_jobs()` を見て、実行待ち・
+        # 実行中のジョブが1件でもあれば CARD を SINGLE に降格する
+        # （`gpt-image-2` のクォータはリージョン単位で上限4で、動画
+        # パイプラインと共有しているため）。動画を先に積むと、この判定は
+        # **常に True** になり、画像カードの機能全体（視覚指示・画像生成・
+        # Blob への保存・メディア添付）が本番で一度も動かない。
+        #
+        # カードは画像1枚、動画は6枚以上使う。X を先にしても動画側の
+        # 待ちはほぼ増えないので、クォータの譲り合いとしても X が先で正しい。
+        #
+        # 「ニュース取得の処理をまとめる」といった理由でこの2行を並べ替えると
+        # 同じバグが黙って戻る（`tests/test_scheduler_wiring.py` の
+        # `test_動画ジョブを積んでもカードは作られる` が見張っている）。
+        #
+        # 引き換え: `plan_daily_posts` はニュースを取得しない（取得は
+        # `plan_daily_batch` の中）。そのため X はこのサイクルで取得する
+        # 記事ではなく、前回までに取得済みの未消費記事から選ぶ。
+        #
         # 動画の計画が失敗しても X の計画は独立して試す（逆も同様）。
         # 1つの記事取得トラブルで両方が止まると、原因の切り分けが
         # しづらくなる。
         try:
-            plan_daily_posts(
+            post_plan = plan_daily_posts(
                 aggregator,
                 posts,
                 post_generator,
@@ -324,9 +337,23 @@ def _build_scheduler(
                 # `artifacts` で差し替わる。
                 output_dir=config.output_dir / "cards",
             )
+            # 積まなかった理由をログに出す。以前は戻り値を捨てていたため、
+            # 「予算上限で止まった」「X で未使用の記事が無い」といった
+            # 判断が画面にもログにも一切残らず、投稿が出ない日と
+            # 「そもそも計画が走っていない」日を区別できなかった。
+            if post_plan.skipped_reason:
+                log_step(f"X 投稿を積みませんでした: {post_plan.skipped_reason}", "⏭️")
         except Exception as e:
             log_error(f"X 投稿の計画に失敗しました（次回は予定どおり走ります）: {e}")
-        return video_plan
+
+        return await plan_daily_batch(
+            aggregator,
+            jobs,
+            formats=config.schedule_formats,
+            search_queries=config.ai_search_queries,
+            ai_limit_per_query=config.ai_news_limit_per_query,
+            articles_per_format=config.schedule_articles_per_format,
+        )
 
     return DailyScheduler(
         task,
