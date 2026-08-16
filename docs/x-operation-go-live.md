@@ -12,16 +12,36 @@
 - [ ] X 開発者ポータルでアプリを作る（対象アカウント: `ri.innovate.shirokuma@gmail.com`）
 - [ ] **従量課金の実単価を確認する。** 実装は「投稿 $0.015 / リンク付き投稿 $0.20 /
       読み取り $0.005」を前提にしているが、根拠は二次情報。違えば
-      `X_COST_PER_POST_USD` / `X_COST_PER_POST_WITH_LINK_USD` を直す
+      `X_COST_PER_POST_USD` / `X_COST_PER_POST_WITH_LINK_USD` を直す。
+
+      **この確認は手作業でしかできない。** 開発者コンソールへのログインは
+      Google SSO で、Google は自動化制御されたブラウザからのログインを拒否する
+      （「このブラウザまたはアプリは安全でない可能性があります」）。回避すべき
+      ものではないので、コンソールの操作は人が行う。
+
+      単価が読めない場合の代替: **最初の数日の実請求額と画面の概算を突き合わせる。**
+      画面は「概算 $X.XX / $20」を出しているので、コンソールの実請求と比べれば
+      ずれが分かる。単価そのものが分からなくても、ずれていること自体は検出できる。
+      実単価が設定より高いと概算が過小になり、`X_MONTHLY_BUDGET_USD` の停止が
+      効くべきところで効かないので、放置してよい項目ではない。
 - [ ] **weighted length の仕様を確認する。** CJK が2カウント・上限280（日本語140字）を
       前提に `BUDGETS` を組んでいる。違えば `src/social/post_generator.py` の予算を直す
 - [ ] スコープに `tweet.read` / `tweet.write` / `users.read` / `media.write` /
       `offline.access` を含める。`offline.access` が無いと refresh token が発行されない
 - [ ] リダイレクト URI に `http://127.0.0.1:8091/callback` を登録する
       （`X_REDIRECT_URI` の既定値。変えるなら両方揃える）
-- [ ] **メディアアップロードのエンドポイントを確認する。** `src/social/x_client.py` の
-      `UPLOAD_URL` は未検証のままコメントで明示してある。画像カードは毎日1件出るので、
-      間違っているとその1件が毎日失敗する（画面の「失敗」に出る）
+- [x] **メディアアップロードのエンドポイントを確認した**（2026-08-17）。
+      `https://api.x.com/2/media/upload`、multipart のフィールド名は `media`、
+      **`media_category=tweet_image` が必須**（省略すると 400
+      `Missing media_category field`）。PNG を送ると X 側で JPEG に再エンコードされ、
+      `media_id` の有効期限は 86,400 秒。
+
+      このとき実バグ2件を見つけて直した（commit `a0c6d0d`）。どちらもユニットテストが
+      全部通っている状態で壊れていた。(1) 既定ヘッダーに `Content-Type` を固定していて
+      multipart が送れなかった。(2) `media_category` を送っていなかった。
+      **偽の `XClient` を差し込むテストは「送る直前の組み立て」を通らない**ため、
+      実 API を叩くまで気付けなかった。`tests/test_x_client.py` を新設して
+      `httpx.MockTransport` でその層を検査するようにした
 
 ## 2. 認証（ローカルで1回だけ）
 
@@ -33,8 +53,9 @@ uv run python -m scripts.push_tokens     # 保存先（Blob）へ送る
 PKCE はブラウザのリダイレクトを要求するのでコンテナ内では完了できない。
 画面には認証状態と手順が出るだけで、フローは実行しない。
 
-- [ ] `authorize_x` が成功する（トークンの値は表示されない。表示されたら異常）
-- [ ] 画面の X ステータスが「認証済み」になる
+- [x] `authorize_x` が成功した（2026-08-17）。`GET /2/users/me` が 200 を返し、
+      `@NORRTechLab` として認証されていることを確認。トークンの値は表示されなかった
+- [ ] 画面の X ステータスが「認証済み」になる（未確認。Web を起動して見る）
 
 ## 3. 下書き生成の疎通（2026-08-16 に確認済み）
 
