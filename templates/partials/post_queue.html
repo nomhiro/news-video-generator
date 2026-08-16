@@ -52,7 +52,7 @@
             <article class="rounded border border-vermilion/20 bg-vermilion/5 p-3">
                 <div class="flex items-center justify-between text-xs text-ink/60 mb-1">
                     <span class="tnum">
-                        {{ post.scheduled_at.strftime('%m/%d %H:%M') if post.scheduled_at else "未定" }}
+                        {{ post.scheduled_at.astimezone(zone).strftime('%m/%d %H:%M') if post.scheduled_at else "未定" }}
                     </span>
                     <span>{{ post.article_title }}</span>
                 </div>
@@ -71,7 +71,7 @@
             <article class="rounded border border-ink/10 p-3">
                 <div class="flex items-center justify-between text-xs text-ink/60 mb-1">
                     <span class="tnum">
-                        {{ post.scheduled_at.strftime('%m/%d %H:%M') if post.scheduled_at else "未定" }}
+                        {{ post.scheduled_at.astimezone(zone).strftime('%m/%d %H:%M') if post.scheduled_at else "未定" }}
                     </span>
                     <span>{{ post.article_title }}</span>
                     <span class="tnum">{{ post.weighted_length }}/{{ max_weighted }}</span>

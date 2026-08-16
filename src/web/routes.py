@@ -919,6 +919,7 @@ async def x_band(
 async def x_queue(
     request: Request,
     posts: SocialPostRepository = Depends(get_posts),
+    config: Config = Depends(get_config),
     message: str | None = None,
 ) -> HTMLResponse:
     """投稿キュー。要確認を先に、次にこれから出るものを並べる。
@@ -945,6 +946,11 @@ async def x_queue(
             "failed": posts.list_recent_failed(since),
             "upcoming": posts.list_upcoming(limit=20),
             "max_weighted": X_MAX_WEIGHTED_LENGTH,
+            # 予定時刻は運用者のタイムゾーンで出す。行が持っているのは UTC で、
+            # そのまま strftime すると帯（`/x/band` は astimezone している）と
+            # 9時間ずれた時刻が並ぶ。「何がいつ出るか」を読む場所で時刻が
+            # 2種類あるのは、単なる表示の粗さではなく誤読の原因になる。
+            "zone": ZoneInfo(config.schedule_timezone),
             "message": message,
             # `list_upcoming` は POSTING（送信中）も含める。送信中の行に
             # 取り消しボタンを出すと、押した結果が二重投稿になりうるので
@@ -1056,6 +1062,7 @@ async def x_cancel_post(
     request: Request,
     post_id: int,
     posts: SocialPostRepository = Depends(get_posts),
+    config: Config = Depends(get_config),
 ) -> HTMLResponse:
     """予約を取り消す。
 
@@ -1073,6 +1080,6 @@ async def x_cancel_post(
         posts.cancel(post_id, "取り消しました")
     except InvalidPostTransition:
         return await x_queue(
-            request, posts, message="送信中または送信済みのため取り消せませんでした"
+            request, posts, config, message="送信中または送信済みのため取り消せませんでした"
         )
-    return await x_queue(request, posts, message="取り消しました")
+    return await x_queue(request, posts, config, message="取り消しました")

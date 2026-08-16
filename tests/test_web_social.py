@@ -268,6 +268,26 @@ def test_文字数が出る(client: TestClient, fake_posts: FakeSocialPosts) -> 
     assert "/280" in response.text
 
 
+def test_キューの予定時刻は運用者のタイムゾーンで出る(
+    client: TestClient, fake_posts: FakeSocialPosts
+) -> None:
+    """行は UTC を持っているので、変換しないと帯と9時間ずれた時刻が並ぶ。
+
+    「何がいつ出るか」を読む場所で時刻が2種類あるのは、表示の粗さではなく
+    誤読の原因になる（実際にローカルで確認して見つけた）。
+    """
+    utc_noon = datetime(2026, 8, 16, 3, 42, tzinfo=UTC)
+    fake_posts._upcoming = [
+        _post(1, PostStatus.SCHEDULED, "本文", scheduled_at=utc_noon),
+    ]
+
+    response = client.get("/x/queue")
+
+    # Asia/Tokyo は UTC+9。03:42 UTC は 12:42 JST
+    assert "12:42" in response.text
+    assert "03:42" not in response.text
+
+
 def test_スイッチを画面から有効にできる(client: TestClient, fake_switch: FakeSwitch) -> None:
     response = client.post("/x/enabled", data={"enabled": "true"})
 
