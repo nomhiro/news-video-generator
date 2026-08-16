@@ -47,6 +47,60 @@ class SupportsNewsFetching(Protocol):
         ...
 
 
+class SupportsNewsRefresh(Protocol):
+    """取得だけを行うのに必要な部分。
+
+    `SupportsNewsFetching` から取得の2メソッドだけを抜いたもの。
+    `fetch_daily_news` は記事を選ばないので `pick_unconsumed` も
+    `scrape_articles` も要らない。
+    """
+
+    async def fetch_and_store(
+        self, limit_per_category: int = ...
+    ) -> dict[NewsCategory, list[NewsArticle]]:
+        """カテゴリ別にニュースを取得して保存する。"""
+        ...
+
+    async def fetch_ai_news_and_store(
+        self, search_queries: list[str], limit_per_query: int = ...
+    ) -> list[NewsArticle]:
+        """AI関連ニュースを取得して保存する。"""
+        ...
+
+
+async def fetch_daily_news(
+    news: SupportsNewsRefresh,
+    *,
+    search_queries: list[str],
+    ai_limit_per_query: int = 5,
+) -> None:
+    """その日のニュースを取得してストアに入れる。
+
+    **`plan_daily_batch` から切り出してある。** 動画の計画の中に取得が
+    埋まっていると、X の計画を動画より先に走らせた瞬間に
+    「X はこのサイクルで取得した記事を見られない」状態になる
+    （前回のサイクルで取得した記事しか選べず、毎日1日古いニュースを
+    投稿することになる）。呼び出し順の全体像は
+    `src/web/dependencies.py` の日次タスクを参照。
+
+    **取得の失敗で例外を投げない。** 一時的なネットワーク障害で
+    丸一日を落とさないため、ログに残して帰る。呼び出し元は既に
+    ストアにある記事で計画を続けられる（動画も X も）。ここで投げると、
+    後続の X の計画まで巻き込んで止まる。
+
+    Args:
+        news: ニュースストア
+        search_queries: AI ニュースの検索クエリ
+        ai_limit_per_query: クエリごとの取得件数
+    """
+    log_step("定期実行: ニュースを取得します", "🗓️")
+    try:
+        await news.fetch_and_store()
+        await news.fetch_ai_news_and_store(search_queries, ai_limit_per_query)
+    except Exception as e:
+        log_error(f"ニュースの取得に失敗しました（既存の記事で続行します）: {e}")
+
+
 class SupportsEnqueue(Protocol):
     """ジョブ表の必要な部分だけ。"""
 
@@ -88,6 +142,7 @@ async def plan_daily_batch(
     ai_limit_per_query: int = 5,
     articles_per_format: int = 1,
     language: str = "ja",
+    fetch: bool = True,
 ) -> DailyPlan:
     """ニュースを取得し、形式ごとにジョブを投入する。
 
@@ -99,6 +154,11 @@ async def plan_daily_batch(
         ai_limit_per_query: クエリごとの取得件数
         articles_per_format: 形式ごとに何件の記事を対象にするか
         language: 言語コード
+        fetch: 自分でニュースを取得するか。**Web の日次タスクは False**
+            （取得を先に1回だけ済ませ、X の計画にも同じ記事を見せるため。
+            `fetch_daily_news` の docstring を参照）。既定を True に
+            しているのは、CLI などの単独呼び出しがこの関数だけで
+            完結できるようにするため
 
     Returns:
         DailyPlan: 投入したバッチ、または投入しなかった理由
@@ -109,14 +169,11 @@ async def plan_daily_batch(
         log_step("実行中のジョブがあるため、今回の定期実行は見送ります", "⏭️")
         return DailyPlan(batch_ids={}, skipped_reason="実行中のジョブがあります")
 
-    log_step(f"定期実行: ニュースを取得します（形式: {', '.join(formats)}）", "🗓️")
-    try:
-        await news.fetch_and_store()
-        await news.fetch_ai_news_and_store(search_queries, ai_limit_per_query)
-    except Exception as e:
-        # 取得に失敗しても、既にストアにある記事で続行できる。
-        # ここで諦めると、一時的なネットワーク障害で丸一日が飛ぶ。
-        log_error(f"ニュースの取得に失敗しました（既存の記事で続行します）: {e}")
+    if fetch:
+        await fetch_daily_news(
+            news, search_queries=search_queries, ai_limit_per_query=ai_limit_per_query
+        )
+    log_step(f"定期実行: 動画のジョブを組みます（形式: {', '.join(formats)}）", "🗓️")
 
     needed = articles_per_format * len(formats)
     candidates = news.pick_unconsumed(CHANNEL_VIDEO, needed)

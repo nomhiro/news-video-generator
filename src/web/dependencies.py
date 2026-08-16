@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Request
 
 from config import Config
 from src.generators.image_generator import ImageGenerator
-from src.jobs.planner import plan_daily_batch
+from src.jobs.planner import fetch_daily_news, plan_daily_batch
 from src.jobs.post_planner import plan_daily_posts
 from src.jobs.post_worker import PostWorker
 from src.jobs.runner import PipelineJobRunner
@@ -298,30 +298,41 @@ def _build_scheduler(
         return None
 
     async def task() -> object:
-        # **X の計画を動画より先に立てる。順序を入れ替えないこと。**
+        # **3段の順序: 取得 → X の計画 → 動画の投入。並べ替えないこと。**
+        # 2つの理由が別々にこの順序を要求している。片方だけを覚えて直すと、
+        # もう片方が守っていたバグが戻る。
         #
-        # `plan_daily_batch` は動画ジョブをジョブ表に積む。`plan_daily_posts`
-        # はカードを作る前に `jobs.has_active_jobs()` を見て、実行待ち・
-        # 実行中のジョブが1件でもあれば CARD を SINGLE に降格する
-        # （`gpt-image-2` のクォータはリージョン単位で上限4で、動画
-        # パイプラインと共有しているため）。動画を先に積むと、この判定は
-        # **常に True** になり、画像カードの機能全体（視覚指示・画像生成・
-        # Blob への保存・メディア添付）が本番で一度も動かない。
+        # 理由1: **X の計画は動画の投入より先。** `plan_daily_batch` は動画
+        # ジョブをジョブ表に積む。`plan_daily_posts` はカードを作る前に
+        # `jobs.has_active_jobs()` を見て、実行待ち・実行中のジョブが1件でも
+        # あれば CARD を SINGLE に降格する（`gpt-image-2` のクォータは
+        # リージョン単位で上限4で、動画パイプラインと共有しているため）。
+        # 動画を先に積むとこの判定が**常に True** になり、画像カードの機能
+        # 全体（視覚指示・画像生成・Blob への保存・メディア添付）が本番で
+        # 一度も動かない。カードは画像1枚・動画は6枚以上なので、X を先に
+        # しても動画側の待ちはほぼ増えず、クォータの譲り合いとしても正しい。
         #
-        # カードは画像1枚、動画は6枚以上使う。X を先にしても動画側の
-        # 待ちはほぼ増えないので、クォータの譲り合いとしても X が先で正しい。
+        # 理由2: **取得は両方の計画より先。** 取得は元々
+        # `plan_daily_batch` の中にあった。理由1のために X を先に回すと、
+        # その位置では X が「このサイクルで取得した記事」を見られなくなり、
+        # 前回のサイクルの記事しか選べない（毎日1日古いニュースを投稿する
+        # ことになる）。だから取得を `fetch_daily_news` に切り出して先頭で
+        # 1回だけ行い、`plan_daily_batch` には `fetch=False` を渡す。
         #
-        # 「ニュース取得の処理をまとめる」といった理由でこの2行を並べ替えると
-        # 同じバグが黙って戻る（`tests/test_scheduler_wiring.py` の
-        # `test_動画ジョブを積んでもカードは作られる` が見張っている）。
+        # 取得の失敗はここで止めない（`fetch_daily_news` が内部でログに
+        # 残して帰る）。一時的なネットワーク障害で、既にストアにある記事で
+        # できるはずの計画まで落とさないため。**X の計画も巻き込まれない。**
         #
-        # 引き換え: `plan_daily_posts` はニュースを取得しない（取得は
-        # `plan_daily_batch` の中）。そのため X はこのサイクルで取得する
-        # 記事ではなく、前回までに取得済みの未消費記事から選ぶ。
-        #
+        # `tests/test_scheduler_wiring.py` の
+        # `test_動画ジョブを積んでもカードは作られる` が両方を見張っている。
+        await fetch_daily_news(
+            aggregator,
+            search_queries=config.ai_search_queries,
+            ai_limit_per_query=config.ai_news_limit_per_query,
+        )
+
         # 動画の計画が失敗しても X の計画は独立して試す（逆も同様）。
-        # 1つの記事取得トラブルで両方が止まると、原因の切り分けが
-        # しづらくなる。
+        # 1つのトラブルで両方が止まると、原因の切り分けがしづらくなる。
         try:
             post_plan = plan_daily_posts(
                 aggregator,
@@ -361,6 +372,8 @@ def _build_scheduler(
             search_queries=config.ai_search_queries,
             ai_limit_per_query=config.ai_news_limit_per_query,
             articles_per_format=config.schedule_articles_per_format,
+            # 取得は上で1回だけ済ませてある（理由2）。
+            fetch=False,
         )
 
     return DailyScheduler(
