@@ -15,12 +15,16 @@ import httpx
 from src.social.x_auth import XTokenExpiredError
 
 API_BASE = "https://api.x.com/2"
-# **未検証。** v1.1 の `media/upload` から v2 への移行が進行中で、公式ドキュメントの
-# 該当ページが本タスクの調査時点で確認できなかった（404）。X_POSTING_ENABLED は
-# 既定 false で実際に叩かれないため実害は無いが、有効化する前に
-# https://docs.x.com/x-api/media/ 配下で URL とフィールド名（`media`）を
-# 確認すること。
+# 実 API で確認済み（2026-08-17、@NORRTechLab のアプリで 200 を確認）。
+# multipart のフィールド名は `media`、`media_category` が必須。
+# 応答は `data.id`（= media_id）と `media_key` を返し、PNG を送っても X 側で
+# JPEG に再エンコードされる（1.5MB の PNG が 153KB の JPEG になった）。
+# media_id の有効期限は 86,400 秒。
 UPLOAD_URL = "https://api.x.com/2/media/upload"
+
+# メディアの用途。`/2/media/upload` は必須項目として要求する
+# （省略すると 400 "Missing media_category field"。実 API で確認済み）。
+MEDIA_CATEGORY_IMAGE = "tweet_image"
 
 
 class XClientError(Exception):
@@ -80,12 +84,17 @@ class HttpXClient:
     """
 
     def __init__(self, access_token: str, timeout: float = 30.0):
+        # **Content-Type を既定ヘッダーに入れない。**
+        # httpx は `json=` のとき application/json、`files=` のとき
+        # multipart/form-data（境界文字列付き）を自動で付ける。既定に
+        # application/json を固定すると、メディアアップロードの multipart が
+        # 壊れる。以前はここで固定し、`upload_media` 側で `None` を渡して
+        # 打ち消そうとしていたが、httpx は None のヘッダー値を受け付けず
+        # `Header value must be str or bytes` で必ず失敗していた
+        # （実際に呼ぶテストが無かったため気付かなかった）。
         self._client = httpx.Client(
             timeout=timeout,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
+            headers={"Authorization": f"Bearer {access_token}"},
         )
 
     def close(self) -> None:
@@ -157,20 +166,28 @@ class HttpXClient:
         Raises:
             XClientError: アップロードに失敗した
         """
+        response: httpx.Response | None = None
         try:
             with path.open("rb") as f:
+                # Content-Type は指定しない。httpx が multipart の境界文字列を
+                # 含めて組み立てる（手で書くと境界が合わず本文が壊れる）。
+                #
+                # `media_category` は必須。省略すると 400 で
+                # "Missing media_category field" が返る（実 API で確認）。
                 response = self._client.post(
                     UPLOAD_URL,
                     files={"media": (path.name, f, "image/png")},
-                    # multipart なので Content-Type をヘッダーから外す
-                    # （httpx は値 None のヘッダーをデフォルトの上書きとして
-                    # 解釈するが、型スタブは str 以外の値を許さない）
-                    headers={"Content-Type": None},  # type: ignore[arg-type]
+                    data={"media_category": MEDIA_CATEGORY_IMAGE},
                 )
             response.raise_for_status()
             return str(response.json()["data"]["id"])
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as e:
-            raise XClientError(f"メディアのアップロードに失敗しました: {e}") from e
+            # **応答本文を添える。** `raise_for_status()` の文言はステータスと
+            # URL だけで、X が返す理由（どのフィールドが足りないか）は本文にある。
+            # 本文を捨てていたため `media_category` の欠落に気付くまで
+            # 実 API を手で叩き直す必要があった。
+            detail = f" 応答: {response.text[:300]}" if response is not None else ""
+            raise XClientError(f"メディアのアップロードに失敗しました: {e}{detail}") from e
 
     def fetch_metrics(self, tweet_ids: list[str]) -> dict[str, dict[str, int]]:
         """投稿の指標を返す。
