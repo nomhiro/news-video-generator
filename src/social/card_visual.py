@@ -84,8 +84,12 @@ class CardVisual(BaseModel):
     """
 
     subject: str = Field(description="1枚で説明する概念を英語1文で（画像モデルへの指示）")
+    # **ちょうど2個。** 3個許すとモデルは3個使い、図が3グループに割れる。
+    # 実測で最も明快だったのは「2要素 + 名札 + 要点1行」の構図だった
+    # （output/cards/card-sample-ja-labels-only.png）。範囲を与えると上限まで
+    # 使われるので、幅を持たせずに固定する。
     key_details: list[str] = Field(
-        min_length=2, max_length=3, description="描く視覚要素とその関係（英語の短い句）"
+        min_length=2, max_length=2, description="描く視覚要素とその関係（英語の短い句を2つ）"
     )
     labels: list[str] = Field(
         default_factory=list, max_length=4, description="画像に入れる短い日本語ラベル"
@@ -200,11 +204,13 @@ SYSTEM_PROMPT_CARD_VISUAL = """<role>
 <content_rules>
 - subject: 1枚で説明する概念を英語1文で（記事のトーンではなく、
   図として描ける具体物に翻訳する）
-- key_details: 描く視覚要素とその関係を2〜3個、英語の**短い句**で（各120文字以内）
+- key_details: 描く視覚要素とその関係を**ちょうど2個**、英語の**短い句**で（各120文字以内）
   （例: "a funnel narrowing", "two arrows returning to a store"）
   **場面やパネルの説明を書かないこと。** 1項目に複数の要素・吹き出し・小見出しを
   詰めると、モデルはそれをコマ1枚として描き、図がコマ割りになって
   スマホでは読めなくなる。1項目 = 図の中の1要素。
+  2個に絞るのは、要素が増えるとそれぞれが小さくなって縮小表示で読めなくなるため。
+  「対比する2つ」または「原因と結果の2つ」を選ぶと図として成立しやすい。
 - labels: 画像内に入れる短い**日本語**のラベルを0〜4個。各8文字以内
   （名札として使う。長い説明はここに入れず caption_ja に持たせる。
   読み手は日本語話者なので、英語ラベルは「読めるが分からない」だけになる）

@@ -177,10 +177,16 @@ def test_視覚要素が長すぎると弾く():
         _visual(key_details=["a funnel narrowing", panel])
 
 
-def test_視覚要素は3個まで():
-    """4個あるとコマ割りになりやすい。図の要素は絞る。"""
+def test_視覚要素はちょうど2個():
+    """範囲を与えると上限まで使われ、図がグループに割れる。
+
+    実測で最も明快だったのは「2要素 + 名札 + 要点1行」の構図
+    （output/cards/card-sample-ja-labels-only.png）。3個許すと3グループになった。
+    """
     with pytest.raises(ValueError):
-        _visual(key_details=["one", "two", "three", "four"])
+        _visual(key_details=["one", "two", "three"])
+    with pytest.raises(ValueError):
+        _visual(key_details=["one"])
 
 
 def test_検証に失敗したら理由を伝えて引き直す() -> None:
