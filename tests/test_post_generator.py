@@ -228,3 +228,66 @@ def test_全ての型に予算が定義されている():
     assert set(BUDGETS) == set(PostKind)
     for kind, (low, high) in BUDGETS.items():
         assert 0 < low < high, kind
+
+
+def test_引き直しでは同じプロンプトを送り直さない(
+    generator: PostGenerator, article: NewsArticle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """フィードバックが効いている唯一の仕組みなので、消えたら気付けるようにする。
+
+    実測（記事1本で3回ずつ）: 同じプロンプトを送り直す実装では 70 / 80 / 70 字で
+    下限105を割り続けた。同じ入力なら同じ長さが返るので、引き直しても結果は
+    変わらず、投稿は毎回破棄されてアカウントが沈黙する。
+    """
+    prompts: list[str] = []
+
+    def record(system_prompt: str, user_prompt: str, schema: object) -> str:
+        prompts.append(user_prompt)
+        # わざと短い本文を返し続けて、引き直しの経路を通す
+        return json.dumps(
+            {
+                "body": "短すぎる本文。",
+                "practical_use": "同じ入力を繰り返すバッチ処理を持つ開発者が、推論費用をそのまま下げられる。",
+                "why_now": "推論需要が急増し、コスト構造が事業継続の制約として表面化してきたため。",
+            }
+        )
+
+    monkeypatch.setattr(generator, "_complete", record)
+
+    with pytest.raises(PostGenerationError):
+        generator.generate(article, PostKind.SINGLE, hashtags=["#AI"])
+
+    assert len(prompts) >= 2, "引き直していない"
+    assert prompts[0] != prompts[1], "同じプロンプトを送り直している"
+    # 前回の字数と、どちらへ何字動かすかが入っていること
+    assert "7字だった" in prompts[1]
+    assert "足して" in prompts[1]
+    assert "115字程度" in prompts[1]
+
+
+def test_長すぎたときは削る指示になる(
+    generator: PostGenerator, article: NewsArticle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上限125に対して127字という2字超過で3回とも外れた実測がある。
+
+    何字削るかを伝えないと、範囲の端を狙わせることになって収束しない。
+    """
+    prompts: list[str] = []
+
+    def record(system_prompt: str, user_prompt: str, schema: object) -> str:
+        prompts.append(user_prompt)
+        return json.dumps(
+            {
+                "body": "あ" * 200,
+                "practical_use": "同じ入力を繰り返すバッチ処理を持つ開発者が、推論費用をそのまま下げられる。",
+                "why_now": "推論需要が急増し、コスト構造が事業継続の制約として表面化してきたため。",
+            }
+        )
+
+    monkeypatch.setattr(generator, "_complete", record)
+
+    with pytest.raises(PostGenerationError):
+        generator.generate(article, PostKind.SINGLE, hashtags=["#AI"])
+
+    assert "200字だった" in prompts[1]
+    assert "削って" in prompts[1]

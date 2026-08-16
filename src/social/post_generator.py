@@ -102,7 +102,15 @@ class _ThreadPayload(BaseModel):
 
 
 # 各プロンプトが必ず含む禁則事項。定数化して4種類に重複させない。
+#
+# 「何を含めるか」で書いているのは実測の結果。字数だけを指示した版は
+# 記事タイトルの言い換え1文（70〜80字）で返ってきて、下限105字を割り続けた。
+# 文数（「2文以上」など）で縛る書き方も試したが、カードの予算（60〜90字）とは
+# 衝突する。含めるべき要素を挙げるのが、型ごとの予算と喧嘩しない書き方だった。
 _COMMON_RULES_JA = """- 各投稿は単独で文として言い切ること（断片にしない）
+- 本文には「何が起きたか」と「誰がどの作業でどう使えるか」の両方を含めること。
+  記事タイトルの言い換えで終わらせないこと（引用元の要約をなぞるだけの投稿は
+  伸びないうえ、元記事の価値を横取りするだけになる）
 - 記事本文に無い数値・固有名詞を書かないこと
 - 出典表記とハッシュタグはこちらで付けるので書かないこと"""
 
@@ -227,10 +235,17 @@ _SYSTEM_PROMPTS: dict[PostKind, str] = {
 # API 呼び出しの通信エラー・レートリミット・5xx に対する試行回数。
 API_RETRIES = 4
 
-# スキーマ違反や予算超過で引き直す回数。ブロックしすぎないよう1回だけ
-# （テストは _complete を定数応答に固定するため、無限に近いループは
-# そのままハングする）。
-VALIDATION_ATTEMPTS = 2
+# スキーマ違反や予算超過で引き直す回数。
+#
+# 3回にしている理由は実測。同じプロンプトを送り直す実装では
+# 70 / 80 / 70 字（下限105）と外れ続け、投稿が毎回破棄されていた。
+# 再生成時に前回の字数と直す方向を伝えると1回で予算内に入ったが、
+# 1回目で必ず外れる型（構成の指示が効いて長めに出る）もあるため、
+# 「初回 + フィードバック2回」の余裕を持たせる。
+#
+# 無限にはしない。テストは `_complete` を定数応答に固定するので、
+# 上限が無いとそのままハングする。
+VALIDATION_ATTEMPTS = 3
 
 
 class PostGenerator:
@@ -309,8 +324,9 @@ class PostGenerator:
         source_text = f"{article.title}\n{article.content}"
 
         last_error: PostGenerationError | None = None
+        attempt_prompt = user_prompt
         for _attempt in range(VALIDATION_ATTEMPTS):
-            raw = self._complete(system_prompt, user_prompt, schema)
+            raw = self._complete(system_prompt, attempt_prompt, schema)
             try:
                 bodies, insights = self._parse_payload(kind, raw)
                 for body in bodies:
@@ -319,11 +335,55 @@ class PostGenerator:
                 self._validate_final_length(posts)
             except PostGenerationError as e:
                 last_error = e
+                # **同じプロンプトを送り直さない。** 実測（記事1本で3回ずつ）:
+                # 現状のプロンプトは 70 / 80 / 70 字で下限105を割り続け、
+                # 構成の指示を足すと 162 / 163 / 140 字で今度は上限を超えた。
+                # どちらも同じ入力なら同じ長さが返るので、再生成しても
+                # 結果は変わらず、投稿は毎回破棄されてアカウントが沈黙する。
+                # 前回の実測値とどちらへ直すかを伝えると 118 / 109 / 112 字で
+                # 3回とも予算内に入った。効いているのはこのフィードバック。
+                attempt_prompt = self._with_length_feedback(user_prompt, bodies, kind)
                 continue
             return posts
 
         assert last_error is not None  # ループを抜けるのは例外時のみ
         raise last_error
+
+    def _with_length_feedback(self, user_prompt: str, bodies: list[str], kind: PostKind) -> str:
+        """前回の本文の長さと直す方向をユーザープロンプトに足す。
+
+        文字数そのものを守らせるのは LLM に不得手な仕事なので、
+        「何字だったか」と「増やすのか減らすのか」を渡して寄せていく。
+
+        Args:
+            user_prompt: 元のユーザープロンプト
+            bodies: 前回生成された本文（解析に失敗していれば空）
+            kind: 投稿の型
+
+        Returns:
+            str: フィードバックを足したプロンプト。長さが分からなければ元のまま
+        """
+        if not bodies:
+            return user_prompt
+
+        low, high = BUDGETS[kind]
+        # スレッドは投稿ごとに予算を見るので、外れているものを代表に使う。
+        length = next((len(b) for b in bodies if not low <= len(b) <= high), len(bodies[0]))
+
+        # **不足・超過の字数と、狙う1つの値まで伝える。**
+        # 「長すぎる。削る」だけを返した版では、上限125に対して127字という
+        # 2字超過で3回とも外れた。範囲の端を狙わせるのは難しいので、
+        # 何字動かすかと中央値を渡す。
+        target = (low + high) // 2
+        if length < low:
+            direction = f"あと{low - length}字以上足して、{target}字程度を狙う"
+        else:
+            direction = f"あと{length - high}字以上削って、{target}字程度に収める"
+        return (
+            f"{user_prompt}\n\n"
+            f"直前の生成では本文が{length}字だった。{low}〜{high}字に収める必要がある。"
+            f"{direction}こと。"
+        )
 
     def _build_system_prompt(self, kind: PostKind) -> str:
         """型に応じたシステムプロンプトを組む（予算を文字列で埋め込む）。
