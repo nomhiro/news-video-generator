@@ -6,10 +6,31 @@ import { Flow } from "./scenes/Flow";
 import { Statement } from "./scenes/Statement";
 import { COLORS } from "./theme";
 
+/**
+ * 各レイアウトが受け取る props。`layout` によって使わないフィールドが
+ * あるが（`statement` は `items` / `relation` を使わない等）、3つの
+ * レイアウトを同じ型で扱えるようにあえて統一している
+ * （`LAYOUTS[scene.layout]` を単一の型で呼べる）。
+ */
+export type LayoutProps = {
+  /** 見出し。Script.text_overlays[i] */
+  headline: string;
+  /** compare/flow は2要素、statement は空配列。 */
+  items: string[];
+  /** compare/flow の2要素の関係を表す短い語（例: "1/10"）。statement は "" */
+  relation: string;
+  /** 章ラベル（例: "仕組み"）。空文字列なら ChapterTag は何も描かない。 */
+  chapter: string;
+  /** 手描き図形の seed のベース。シーンごとに固有の値（シーン index）を渡す。 */
+  seed: number;
+  durationInFrames: number;
+};
+
 export type SceneProps = {
   layout: "statement" | "compare" | "flow";
   items: string[];
-  /** 見出し。Script.text_overlays[i] */
+  relation: string;
+  chapter: string;
   headline: string;
   /** 字幕。Script.segment_narrations[i] */
   subtitle: string;
@@ -47,7 +68,17 @@ export const NewsVideo: React.FC<VideoProps> = ({ scenes }) => (
           from={scene.fromFrame}
           durationInFrames={scene.durationInFrames}
         >
-          <Layout headline={scene.headline} items={scene.items} />
+          <Layout
+            headline={scene.headline}
+            items={scene.items}
+            relation={scene.relation}
+            chapter={scene.chapter}
+            // シーンごとに固有の seed にする。同じ seed を全シーンで使うと、
+            // 手描き線の揺れ方が全図で同一になり、逆に「型で作った」感が
+            // 出てしまう（roughjs は seed が違えば違う揺れを返す）。
+            seed={i}
+            durationInFrames={scene.durationInFrames}
+          />
           <Subtitle text={scene.subtitle} />
         </Sequence>
       );
@@ -68,6 +99,8 @@ export const SAMPLE_PROPS: VideoProps = {
     {
       layout: "statement",
       items: [],
+      relation: "",
+      chapter: "",
       headline: "推論コストが桁で下がる",
       subtitle: "推論のコストが一桁下がる、という話です。",
       fromFrame: 0,
@@ -76,6 +109,8 @@ export const SAMPLE_PROPS: VideoProps = {
     {
       layout: "compare",
       items: ["従来", "新方式"],
+      relation: "1/10",
+      chapter: "事実",
       headline: "何が変わったのか",
       subtitle: "変わったのは、動かす範囲を絞ったことでした。",
       fromFrame: 30,
@@ -83,7 +118,9 @@ export const SAMPLE_PROPS: VideoProps = {
     },
     {
       layout: "flow",
-      items: ["入力", "選択"],
+      items: ["入力", "専門家選択"],
+      relation: "切替",
+      chapter: "仕組み",
       headline: "仕組み",
       subtitle: "入力ごとに、使う専門家を切り替えています。",
       fromFrame: 60,
