@@ -25,6 +25,7 @@ from pathlib import Path
 from src.generators.video_composer import _available_cpus, _tail, mux_audio
 from src.models.formats import get_spec
 from src.models.scene import SceneVisual
+from src.utils.line_break import insert_break_opportunities
 from src.utils.logger import log_error, log_step, log_success
 
 
@@ -159,7 +160,8 @@ class RemotionRenderer:
             text_overlays: 各シーンの見出し
             segment_narrations: 各シーンの字幕
             segment_timings: 各セグメントの開始秒（末尾は音声の終了秒）
-            language: 使わない（フォントはシステムのものを font-family で選ぶ）
+            language: 日本語の折り返し位置（ZWSP）を挿入するかの判定に使う
+                （フォントはシステムのものを font-family で選ぶため未使用）
             video_format: 形式名。解像度は formats.py が持つ
 
         Returns:
@@ -201,8 +203,11 @@ class RemotionRenderer:
                 {
                     "layout": scene.layout.value,
                     "items": scene.items,
-                    "headline": headline,
-                    "subtitle": subtitle,
+                    # ZWSP の挿入はここ（レンダリング直前）で行う。
+                    # `MAX_HEADLINE_CHARS` は script.py が生成時点の文字数を
+                    # 検証しており、この挿入より前に済んでいるので文字数には影響しない。
+                    "headline": insert_break_opportunities(headline, language),
+                    "subtitle": insert_break_opportunities(subtitle, language),
                     "fromFrame": start,
                     "durationInFrames": duration,
                 }

@@ -15,6 +15,7 @@ from src.generators.remotion_renderer import (
     resolve_frame_spans,
 )
 from src.models.scene import SceneLayout, SceneVisual
+from src.utils.line_break import ZWSP
 
 
 def test_spans_cover_the_whole_audio_without_gaps() -> None:
@@ -127,6 +128,52 @@ def test_props_carry_resolved_frame_spans(captured, tmp_path) -> None:
     assert [s["headline"] for s in props["scenes"]] == ["見出し1", "見出し2", "見出し3"]
     assert [s["subtitle"] for s in props["scenes"]] == ["字幕1", "字幕2", "字幕3"]
     assert props["scenes"][1]["items"] == ["従来", "新方式"]
+
+
+def test_props_get_line_break_opportunities_for_japanese(captured, tmp_path) -> None:
+    """日本語なら見出し・字幕に ZWSP（フレーズ境界）が入ること。
+
+    短すぎる文字列は BudouX が1フレーズとみなし ZWSP が入らないので、
+    複数フレーズに割れる長さの文を使う。
+    """
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"audio")
+    headline = "変わったのは、動かす範囲を絞ったことでした"
+    subtitle = "変わったのは、動かす範囲を絞ったことでした"
+    RemotionRenderer().render(
+        audio_path=audio,
+        output_path=tmp_path / "out.mp4",
+        image_paths=[],
+        scenes=_scenes(),
+        text_overlays=[headline] * 3,
+        segment_narrations=[subtitle] * 3,
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
+        language="ja",
+        video_format="short",
+    )
+    props = captured["props"]
+    assert all(ZWSP in s["headline"] for s in props["scenes"])
+    assert all(ZWSP in s["subtitle"] for s in props["scenes"])
+
+
+def test_props_have_no_line_break_opportunities_for_english(captured, tmp_path) -> None:
+    """英語はスペースで折り返せるため、ZWSP を混ぜない。"""
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"audio")
+    RemotionRenderer().render(
+        audio_path=audio,
+        output_path=tmp_path / "out.mp4",
+        image_paths=[],
+        scenes=_scenes(),
+        text_overlays=["headline 1", "headline 2", "headline 3"],
+        segment_narrations=["subtitle 1", "subtitle 2", "subtitle 3"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
+        language="en",
+        video_format="short",
+    )
+    props = captured["props"]
+    assert all(ZWSP not in s["headline"] for s in props["scenes"])
+    assert all(ZWSP not in s["subtitle"] for s in props["scenes"])
 
 
 def test_concurrency_is_always_explicit(captured, tmp_path) -> None:
