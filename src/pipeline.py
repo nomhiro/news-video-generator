@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 from config import Config
 from src.generators.image_generator import ImageGenerator
-from src.generators.remotion_renderer import build_illustration_prompt
+from src.generators.remotion_renderer import ILLUSTRATION_SIZE, build_illustration_prompt
 from src.generators.script_generator import ScriptGenerator
 from src.generators.video_renderer import VideoRenderer, build_video_renderer
 from src.generators.voice_generator import VoiceGenerator
@@ -241,6 +241,11 @@ class Pipeline:
                         image_dir,
                         language=first_lang,
                         video_format=video_format,
+                        # 挿絵は動画のアスペクト比（9:16 / 16:9）ではなく、
+                        # 表示先の帯（`remotion/src/zones.ts` の
+                        # `shared.illustration`）のアスペクト比で生成する。
+                        # `ILLUSTRATION_SIZE` の根拠は `remotion_renderer.py` を参照。
+                        size=ILLUSTRATION_SIZE,
                         enhance=False,
                     )
                     illustration_path = illustration_paths[0]

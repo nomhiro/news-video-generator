@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from config import Config
+from src.generators.remotion_renderer import ILLUSTRATION_SIZE
 from src.generators.video_renderer import FfmpegRenderer, RemotionRenderer
 from src.pipeline import Pipeline
 
@@ -180,6 +181,7 @@ def test_pipeline_generates_one_shared_illustration_when_renderer_needs_one(
 
     captured_prompts: list[list[str]] = []
     captured_enhance: list[bool] = []
+    captured_size: list[str | None] = []
 
     def fake_generate_batch(
         prompts: list[str],
@@ -192,6 +194,7 @@ def test_pipeline_generates_one_shared_illustration_when_renderer_needs_one(
     ) -> list[Path]:
         captured_prompts.append(prompts)
         captured_enhance.append(enhance)
+        captured_size.append(size)
         output_dir.mkdir(parents=True, exist_ok=True)
         path = output_dir / "illustration.png"
         path.write_bytes(b"fake png")
@@ -206,6 +209,11 @@ def test_pipeline_generates_one_shared_illustration_when_renderer_needs_one(
     assert len(captured_prompts[0]) == 1
     # enhance=False: 挿絵のプロンプトは完結済みなので _enhance_prompt を重ねない
     assert captured_enhance == [False]
+    # 挿絵は動画のアスペクト比（`FormatSpec.image_size`、9:16 の 1152x2048）
+    # ではなく、表示先の帯（`remotion/src/zones.ts` の `shared.illustration`）
+    # のアスペクト比で生成する。以前は動画側のサイズを流用していて、帯に収める
+    # 際に縦の45%を捨てていた（実物で確認して気付いた）。
+    assert captured_size == [ILLUSTRATION_SIZE]
     assert renderer.received_illustration_path is not None
     assert renderer.received_illustration_path.exists()
 

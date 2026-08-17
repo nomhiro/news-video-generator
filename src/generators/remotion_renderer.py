@@ -55,14 +55,32 @@ Palette: dark slate ground (#242226), off-white chalk linework (#f3ecdf),
   (#c98a4c). Flat fills only — no gradients, no glossy 3D render, no
   photorealism.
 Composition: a single explanatory illustration, the subject centred with
-  generous margins on all sides. It will be displayed as a wide band
-  cropped from this square image, so keep the subject readable within a
-  horizontal crop through the centre.
+  generous margins on all sides, filling a wide (roughly 6:5) frame.
 Constraints: absolutely no text, letters, numerals, or captions anywhere in
   the image (all text is drawn separately by the video renderer — any text
   baked into the image would duplicate or contradict it). No watermarks, no
   logos, no UI chrome. Do not depict any real, identifiable person; use
   simple silhouettes if a figure is needed."""
+
+# 挿絵の生成サイズ。**動画の出力解像度（`FormatSpec.image_size`）とは無関係に
+# 固定する。** 挿絵は縦画面（short/tiktok）でも横画面（long）でも同じ帯
+# （`remotion/src/zones.ts` の `shared.illustration`、1080x920 ≒ 1.174:1）に
+# 表示するので、生成サイズもその帯のアスペクト比に合わせるべきで、動画の
+# アスペクト比（9:16 や 16:9）に合わせるべきではない。
+#
+# 以前は `FormatSpec.image_size`（9:16 の 1152x2048）で生成していた。
+# 帯（1080x920）に収めるには縦方向の55%しか使わず、残り45%は捨てていた。
+# たまたま被写体が画像の中央55%に収まっていたので破綻していなかったが、
+# それは運であって保証ではない（実物で確認して気付いた）。
+#
+# `gpt-image-2` の制約（`validate_size()` 参照: 両辺16の倍数、長辺3840以下、
+# アスペクト比3:1以下、総ピクセル数655,360〜8,294,400）を満たしつつ、
+# 帯のアスペクト比（1080/920 ≈ 1.1739）に最も近い値を選んでいる
+# （1216/1040 ≈ 1.1692）。**帯の寸法を変えたら、この値も一緒に見直す**
+# （ここが単一の情報源では無いので、`zones.ts` の値とは別々にメンテする
+# 必要がある——`illustration_subject` の主題自体は言語モデルに出させているため、
+# ビルド時に TS 側の値をここへ自動で伝える手段が無い）。
+ILLUSTRATION_SIZE = "1216x1040"
 
 
 def build_illustration_prompt(subject: str) -> str:
