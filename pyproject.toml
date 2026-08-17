@@ -43,6 +43,11 @@ dependencies = [
     "azure-identity>=1.19",
     "sqlalchemy>=2.0",
     "alembic>=1.14",
+    # 字幕の折り返し位置を決めるのに、実際のフォントの送り幅を測るため。
+    # 文字数で折り返すと半角英数が混じった行が短くなる（実測: 全角14文字で
+    # 881px に対し "Anthropicが最強AI" の14文字は 551px）。
+    # ffmpeg に幅を問う口が無いので、drawtext と同じ TTF を読んで測る。
+    "pillow>=10.0",
 ]
 
 [dependency-groups]
@@ -50,7 +55,6 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.8",
     "mypy>=1.13",
-    "pillow>=10.0", # 生成画像の寸法を検証するため
     "pytest-asyncio>=1.4.0",
 ]
 

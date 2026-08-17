@@ -28,6 +28,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from src.generators.video_composer import VideoComposer
 
@@ -171,6 +172,83 @@ def test_intermediate_file_is_removed(inputs: tuple[Path, list[Path]], tmp_path:
     assert output.exists()
     assert not (tmp_path / "out_silent.mp4").exists()
     assert sorted(p.name for p in tmp_path.glob("*.mp4")) == ["out.mp4"]
+
+
+def test_wrapped_overlay_lines_do_not_overlap(
+    inputs: tuple[Path, list[Path]], tmp_path: Path
+) -> None:
+    """折り返した字幕の行が重ならないこと。
+
+    `line_spacing` は drawtext の**行送りに加算される**値なので、
+    フォントサイズに近い負の値を入れると2行が同じ位置に重なって描かれ、
+    字幕が読めなくなる（実測: `line_spacing=-70` / `fontsize=64` で
+    2行が完全に重なった）。合成は成功し、解像度も尺も音声も正しいので、
+    既存の検査はどれも気付かない。ffprobe でも分からないため、
+    実際のフレームの画素を見る。
+    """
+    audio, images = inputs
+    output = tmp_path / "out.mp4"
+    composer = VideoComposer()
+
+    # 折り返しが必ず2行になる長さにする。
+    text = "あ" * (composer.TEXT_MAX_CHARS_PER_LINE + 4)
+    composer.compose(
+        audio,
+        images,
+        output,
+        text_overlays=[text, text, text],
+        segment_timings=[0.0, 1.0, 2.0, AUDIO_SECONDS],
+        video_format="short",
+    )
+
+    frame = tmp_path / "frame.png"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            "0.5",
+            "-i",
+            str(output),
+            "-frames:v",
+            "1",
+            str(frame),
+        ],
+        check=True,
+    )
+
+    # 文字色（黄）の画素が縦にどれだけ広がっているかを測る。
+    # 2行ぶんなら行送り1つぶん以上の高さになる。重なると1行ぶんに縮む。
+    with Image.open(frame) as img:
+        rgb = img.convert("RGB")
+        rows = [
+            y
+            for y in range(rgb.height)
+            for x in range(0, rgb.width, 4)
+            if _is_text_color(rgb.getpixel((x, y)))
+        ]
+    assert rows, "字幕が1画素も描かれていない"
+    band_height = max(rows) - min(rows) + 1
+    assert band_height >= composer.TEXT_FONT_SIZE * 1.5, (
+        f"2行の字幕が {band_height}px に収まっている。"
+        f"line_spacing={composer.TEXT_LINE_SPACING} で行が重なっている疑いがある"
+    )
+
+
+def _is_text_color(pixel: object) -> bool:
+    """字幕の文字色（黄）とみなせる画素か。
+
+    アンチエイリアスと縁取り（黒）が混ざるので厳密一致では拾えない。
+
+    `Image.getpixel` の戻り値型は画像のモードで変わるため object で受ける。
+    """
+    if not isinstance(pixel, tuple):
+        return False
+    r, g, b = pixel[:3]
+    return bool(r > 180 and g > 180 and b < 100)
 
 
 def test_overlay_text_files_are_cleaned_up(inputs: tuple[Path, list[Path]], tmp_path: Path) -> None:
