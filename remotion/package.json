@@ -1,0 +1,15 @@
+{
+  "name": "news-video-remotion",
+  "private": true,
+  "description": "動画のレンダラ。CSS 用の ../package.json とは別物で、こちらは実行時依存。",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts NewsVideo out/preview.mp4"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.512",
+    "remotion": "4.0.512",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  }
+}
