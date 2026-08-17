@@ -110,19 +110,28 @@ def chapter_labels(segment_count: int, language: str) -> list[str]:
     LLM に出させる必要は無い。章がどのセグメントかは segment_index から
     一意に決まる構造的な事実であり、モデルの出力ではないため。
 
+    **`segment_allocation` が ValueError を投げる短さでも例外にしない。**
+    章ラベルは装飾であり、動画に描かれなくても動画自体は成立する
+    （`SceneVisual.relation` や見出しとは違う）。装飾のために本体である
+    レンダリングを丸ごと落とすのは本末転倒なので、配分できない短さでは
+    空文字列で埋めて呼び出し元に「描く文字が無い」と伝える。production の
+    形式（short/tiktok=6, long=10）は常に配分できる長さなので、実際に
+    劣化が起きるのはテストの小さいダミーデータだけである。
+
     Args:
         segment_count: 形式のセグメント数
         language: 言語コード（"ja" or "en"）
 
     Returns:
-        list[str]: セグメントごとのラベル。要素数は segment_count に一致する。
+        list[str]: セグメントごとのラベル。要素数は常に segment_count に一致する。
             1パートが複数セグメントを占める場合、同じラベルが繰り返される
-            （例: 6セグメントの仕組みが2つなら ["...", "仕組み", "仕組み", ...]）
-
-    Raises:
-        ValueError: セグメント数が構成パート数を下回る場合
-            （`segment_allocation` がそのまま伝える）
+            （例: 6セグメントの仕組みが2つなら ["...", "仕組み", "仕組み", ...]）。
+            `segment_count` が構成パート数（5）未満なら、配分できないので
+            全て空文字列になる
     """
+    if segment_count < len(_STRUCTURE_PARTS):
+        return [""] * segment_count
+
     labels = _CHAPTER_LABELS["ja" if language == "ja" else "en"]
     allocation = segment_allocation(segment_count)
     result: list[str] = []
