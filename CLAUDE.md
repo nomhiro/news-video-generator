@@ -704,10 +704,13 @@ tenant level resource provider` という原因の分からないエラーにな
 ### チェックは pre-push に寄せている
 
 lint / 型 / テストは GitHub Actions ではなく `.githooks/pre-push` で走る。
-ローカルで数十秒（実測: 全体で約58秒。Remotion 導入前は約30秒だった）で
+ローカルで数十秒（実測 約60秒（58〜67秒）。Remotion 導入前は約30秒だった）で
 終わるものを、push のたびに ubuntu ランナーで再実行しても遅くなるだけだった。
 増えた約30秒は実際の Remotion レンダリング（2秒ぶんのフレーム）1回分で、
 Node + Chrome + `mux_audio` の統合を検査する唯一の自動実行経路がこれである。
+**この数値はマシン依存で、他プロセス（並行する Docker ビルドや別の pytest 実行）と
+競合すると2倍以上に伸びる。** 1回だけ遅い測定を見ても hook 自体が遅くなったとは
+判断しない。
 
 ```bash
 git config core.hooksPath .githooks   # clone した直後に一度だけ
