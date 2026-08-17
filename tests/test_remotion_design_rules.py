@@ -46,7 +46,9 @@ def test_no_blur_filter_anywhere() -> None:
     """
     offenders = [
         path.relative_to(REMOTION_SRC).as_posix()
-        for path in REMOTION_SRC.rglob("*.tsx")
+        # `.tsx` だけを見ると、`theme.ts` のような `.ts` に置いた共有ヘルパが
+        # 検査をすり抜ける。Web フォントの検査と同じ範囲にそろえる。
+        for path in REMOTION_SRC.rglob("*.ts*")
         if "blur(" in _strip_comments(path.read_text(encoding="utf-8"))
     ]
     assert offenders == [], f"filter: blur() を使っているファイル: {offenders}"

@@ -24,7 +24,10 @@ export const Compare: React.FC<{ headline: string; items: string[] }> = ({
           });
           return (
             <div
-              key={item}
+              // ラベルではなく index を key にする。`SceneVisual` は items の
+              // 重複を禁じていない（["従来","従来"] は検証を通る）ため、
+              // ラベルを key にすると React が重複キーで片方を落とす。
+              key={i}
               style={{
                 width: 380,
                 height: 380,

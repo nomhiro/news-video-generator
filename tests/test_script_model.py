@@ -28,9 +28,10 @@ from tests.factories import make_draft
 def _draft(**overrides: object) -> ScriptDraft:
     """検証を通る最小の下書きを作る。payload の実体は `tests.factories.make_draft`。
 
-    Task 4 で別のテストファイルが同じ payload を必要とするようになったため、
-    共通部分はファクトリへ移した。このファイルの既存呼び出しはすべて
-    そのまま動く薄い委譲にしてある。
+    payload をファクトリに置いているのは、複数のテストファイルが同じ
+    「検証を通る最小の下書き」を必要とするため（ここに置いたままだと、
+    `scenes` のような必須フィールドを足すたびに同じ ~25行を複製することになる）。
+    このファイルの既存呼び出しがそのまま動くよう、薄い委譲だけ残してある。
     """
     return make_draft(**overrides)
 
