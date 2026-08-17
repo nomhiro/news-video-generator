@@ -11,6 +11,8 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field, model_validator
 
+from src.models.scene import SceneLayout, SceneVisual
+
 
 def _join_narration(segments: list[str], language: str) -> str:
     """セグメントを連結して完全なナレーションを作る。
@@ -30,7 +32,7 @@ def _join_narration(segments: list[str], language: str) -> str:
 
 
 class _HasAlignedSegments(Protocol):
-    """整合性検証が必要とする3フィールドだけを表す構造的な型。
+    """整合性検証が必要とする4フィールドだけを表す構造的な型。
 
     ScriptDraft と Script の両方がこれを満たす。
     """
@@ -38,6 +40,7 @@ class _HasAlignedSegments(Protocol):
     segment_narrations: list[str]
     image_prompts: list[str]
     text_overlays: list[str]
+    scenes: list[SceneVisual]
 
 
 class _HasInsights(Protocol):
@@ -104,6 +107,7 @@ def _validate_aligned_segments(model: _HasAlignedSegments) -> None:
         "segment_narrations": len(segments),
         "image_prompts": len(model.image_prompts),
         "text_overlays": len(model.text_overlays),
+        "scenes": len(model.scenes),
     }
     if len(set(counts.values())) != 1:
         detail = ", ".join(f"{k}={v}" for k, v in counts.items())
@@ -136,6 +140,29 @@ def _validate_insights(model: _HasInsights) -> None:
             raise ValueError(
                 f"{field_name} が短すぎます: {len(stripped)}文字 (最低{MIN_INSIGHT_CHARS}文字)"
             )
+
+
+def _validate_scenes(scenes: list[SceneVisual]) -> None:
+    """図を持たないシーンが多すぎないか検証する。
+
+    `statement` は図を持たない。モデルが全部これを選べば図が1枚も出ず、
+    **静止画スライドショーだった頃と同じ紙芝居に戻る**。これは実在する
+    劣化経路で、モデルは常に楽な選択肢に寄る。`check_length_budget` と
+    同じ判断で、指示ではなく検査で抑える。
+
+    Args:
+        scenes: 検証するシーン
+
+    Raises:
+        ValueError: statement が半数を超える場合
+    """
+    limit = len(scenes) // 2
+    statements = sum(1 for scene in scenes if scene.layout is SceneLayout.STATEMENT)
+    if statements > limit:
+        raise ValueError(
+            f"図を持たない statement が多すぎます: {statements}個"
+            f"（{len(scenes)}シーン中 最大{limit}個）"
+        )
 
 
 def _with_source(description: str, source_url: str, language: str) -> str:
@@ -180,6 +207,10 @@ class ScriptDraft(BaseModel):
       記事のタイトルと本文だけ）。出させれば捏造する。`language` と同じく
       呼び出し元が権威を持つ値として `to_script` で受ける。
 
+    `image_prompts` は Remotion レンダラでは使わないが**残してある**。
+    `VIDEO_RENDERER=ffmpeg` への退路を生かすため、両レンダラが同じ台本から
+    動く状態を保つ。
+
     `technical_insight` / `practical_impact` を必須にしている理由:
     ニュースをなぞるだけの出力は埋もれるうえ、YouTube の
     「再利用されたコンテンツ」ポリシーに抵触するリスクがある。
@@ -199,6 +230,7 @@ class ScriptDraft(BaseModel):
         text_overlays: 各画像に表示するテキスト
         estimated_duration: 推定秒数
         segment_narrations: 各画像に対応するナレーションセグメント
+        scenes: 各セグメントの図解の構造（レンダラが読む）
     """
 
     title: str
@@ -213,13 +245,14 @@ class ScriptDraft(BaseModel):
     text_overlays: list[str]
     estimated_duration: int
     segment_narrations: list[str]
+    scenes: list[SceneVisual]
 
     @model_validator(mode="after")
     def _check_content(self) -> "ScriptDraft":
         """セグメントの整合性と独自解説の実質を検証する。
 
         音声のタイミング同期と動画合成が
-        「segment_narrations / image_prompts / text_overlays の
+        「segment_narrations / image_prompts / text_overlays / scenes の
         要素数が一致していること」に依存しているため、ここで担保する。
 
         Returns:
@@ -227,10 +260,11 @@ class ScriptDraft(BaseModel):
 
         Raises:
             ValueError: 要素数が一致しない、空要素がある、
-                または独自解説が空・短すぎる場合
+                独自解説が空・短すぎる、または statement が多すぎる場合
         """
         _validate_aligned_segments(self)
         _validate_insights(self)
+        _validate_scenes(self.scenes)
         return self
 
     def narration_length(self, language: str) -> int:
@@ -333,6 +367,7 @@ class Script(BaseModel):
         text_overlays: 各画像に表示するテキスト
         estimated_duration: 推定秒数
         segment_narrations: 各画像に対応するナレーションセグメント（音声タイミング同期用）
+        scenes: 各セグメントの図解の構造（レンダラが読む）
     """
 
     language: str
@@ -350,6 +385,7 @@ class Script(BaseModel):
     text_overlays: list[str]
     estimated_duration: int
     segment_narrations: list[str]
+    scenes: list[SceneVisual]
 
     @model_validator(mode="after")
     def _check_content(self) -> "Script":
@@ -360,10 +396,11 @@ class Script(BaseModel):
 
         Raises:
             ValueError: 要素数が一致しない、空要素がある、
-                または独自解説が空・短すぎる場合
+                独自解説が空・短すぎる、または statement が多すぎる場合
         """
         _validate_aligned_segments(self)
         _validate_insights(self)
+        _validate_scenes(self.scenes)
         return self
 
     def to_dict(self) -> dict:

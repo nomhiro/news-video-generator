@@ -21,32 +21,17 @@ from src.models.script import (
     _join_narration,
     estimate_duration_sec,
 )
+from tests.factories import make_draft
 
 
 def _draft(**overrides: object) -> ScriptDraft:
-    """検証を通る最小の下書きを作り、必要な項目だけ差し替える。"""
-    payload: dict[str, object] = {
-        "title": "テストタイトル",
-        "description": "テスト説明",
-        "hashtags": ["shorts", "test"],
-        "hook": "冒頭のフック",
-        "main_points": ["ポイント1", "ポイント2"],
-        "conclusion": "締めの一言",
-        "technical_insight": (
-            "内部では既存モデルの推論結果をキャッシュして再利用する仕組みになっているため、"
-            "2回目以降の応答が速い。"
-        ),
-        "practical_impact": (
-            "現場では手作業だったレビュー工程を自動化でき、日次の運用コストが下がる。"
-            "レビュー担当は判断だけに集中できる。"
-        ),
-        "image_prompts": ["Scene 1", "Scene 2", "Scene 3"],
-        "text_overlays": ["overlay 1", "overlay 2", "overlay 3"],
-        "estimated_duration": 35,
-        "segment_narrations": ["文A。", "文B。", "文C。"],
-    }
-    payload.update(overrides)
-    return ScriptDraft.model_validate(payload)
+    """検証を通る最小の下書きを作る。payload の実体は `tests.factories.make_draft`。
+
+    Task 4 で別のテストファイルが同じ payload を必要とするようになったため、
+    共通部分はファクトリへ移した。このファイルの既存呼び出しはすべて
+    そのまま動く薄い委譲にしてある。
+    """
+    return make_draft(**overrides)
 
 
 def test_valid_draft_passes() -> None:
@@ -398,3 +383,38 @@ def test_to_script_without_source_leaves_description_untouched() -> None:
     script = draft.to_script("ja")
     assert script.description == "要約文"
     assert script.source_url == ""
+
+
+# --------------------------------------------------------------------------
+# scenes（Remotion レンダラ向けの図解構造）
+# --------------------------------------------------------------------------
+
+
+def test_scenes_must_match_segment_count() -> None:
+    """scenes も他の3配列と同じ数でなければならない。
+
+    シーンの数が合わないと、レンダラが参照するインデックスが範囲外になる。
+    """
+    with pytest.raises(ValidationError, match="配列長の不一致"):
+        _draft(scenes=[{"layout": "compare", "items": ["前", "後"]}])
+
+
+def test_too_many_statement_scenes_is_rejected() -> None:
+    """figure を持たない statement ばかりだと、静止画スライドショーに戻る。
+
+    モデルは楽な選択肢に寄るので、指示ではなく検査で抑える。
+    """
+    with pytest.raises(ValidationError, match="statement が多すぎます"):
+        _draft(
+            scenes=[
+                {"layout": "statement", "items": []},
+                {"layout": "statement", "items": []},
+                {"layout": "compare", "items": ["前", "後"]},
+            ]
+        )
+
+
+def test_scenes_survive_to_script() -> None:
+    """to_script が scenes をそのまま引き継ぐこと。"""
+    script = _draft().to_script("ja")
+    assert [s.layout.value for s in script.scenes] == ["compare", "flow", "statement"]
