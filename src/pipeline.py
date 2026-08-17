@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 from config import Config
 from src.generators.image_generator import ImageGenerator
 from src.generators.script_generator import ScriptGenerator
-from src.generators.video_composer import VideoComposer
+from src.generators.video_renderer import VideoRenderer, build_video_renderer
 from src.generators.voice_generator import VoiceGenerator
 from src.models.formats import get_spec
 from src.models.script import Script
@@ -32,7 +32,7 @@ class Pipeline:
         script_generator: 台本生成器
         voice_generator: 音声生成器
         image_generator: 画像生成器
-        video_composer: 動画合成器
+        video_renderer: 動画レンダラ（ffmpeg または remotion。設定で差し替える）
     """
 
     def __init__(self, config: Config, artifact_store: ArtifactStore | None = None):
@@ -72,7 +72,8 @@ class Pipeline:
             deployment=config.azure_openai_image_deployment,
             max_concurrency=config.image_max_concurrency,
         )
-        self.video_composer = VideoComposer()
+        # レンダラは設定で差し替える。既定は ffmpeg（今日動いている方式）。
+        self.video_renderer: VideoRenderer = build_video_renderer(config.video_renderer)
 
     def _sanitize_filename(self, name: str, max_length: int = 50) -> str:
         """ファイル名として安全な文字列に変換する。
@@ -203,16 +204,25 @@ class Pipeline:
                 script.to_json_file(script_path)
                 script_paths[lang] = script_path
 
-            # 2. Generate images (use first language's prompts)
-            log_step("画像を生成中...", "🎨")
-            first_lang = languages[0]
-            image_dir = self.config.output_dir / "images" / base_name
-            image_paths = self.image_generator.generate_batch(
-                scripts[first_lang].image_prompts,
-                image_dir,
-                language=first_lang,
-                video_format=video_format,
-            )
+            # 2. 画像を生成する（レンダラが必要とする場合のみ）
+            #
+            # Remotion レンダラは図解を React で描くので画像を使わない。
+            # 飛ばすと gpt-image-2 のクォータ（リージョン単位で上限4、
+            # 1本6枚で1分以上）を一切消費しなくなり、X の画像カードとの
+            # 共食いも消える。
+            image_paths: list[Path] = []
+            if self.video_renderer.needs_images:
+                log_step("画像を生成中...", "🎨")
+                first_lang = languages[0]
+                image_dir = self.config.output_dir / "images" / base_name
+                image_paths = self.image_generator.generate_batch(
+                    scripts[first_lang].image_prompts,
+                    image_dir,
+                    language=first_lang,
+                    video_format=video_format,
+                )
+            else:
+                log_step("画像生成は不要です（レンダラが図解を描きます）", "🎨")
 
             # 3. Generate voices for each language (with timing if available)
             log_step("音声を生成中...", "🎙️")
@@ -246,13 +256,15 @@ class Pipeline:
 
             for lang in languages:
                 video_path = self.config.output_dir / "videos" / f"{base_name}_{lang}.mp4"
-                self.video_composer.compose(
-                    audio_paths[lang],
-                    image_paths,
-                    video_path,
+                self.video_renderer.render(
+                    audio_path=audio_paths[lang],
+                    output_path=video_path,
+                    image_paths=image_paths,
+                    scenes=scripts[lang].scenes,
                     text_overlays=scripts[lang].text_overlays,
+                    segment_narrations=scripts[lang].segment_narrations,
+                    segment_timings=segment_timings.get(lang, []),
                     language=lang,
-                    segment_timings=segment_timings.get(lang),
                     video_format=video_format,
                 )
                 video_paths[lang] = video_path

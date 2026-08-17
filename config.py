@@ -126,6 +126,20 @@ class Config(BaseSettings):
     azure_speech_voice_ja: str = Field(default="ja-JP-NanamiNeural")
     azure_speech_voice_en: str = Field(default="en-US-AvaNeural")
 
+    # --- 動画のレンダラ ---
+    #
+    # ffmpeg: 静止画（gpt-image-2）を並べる現行の方式。
+    # remotion: React で図解を描く方式。画像生成 API を使わない。
+    #
+    # **既定は ffmpeg。** これは今日動いているパイプラインで、クラウドで
+    # 問題が出たときの退路になる。切り替えは人が明示的に行う
+    # （自動フォールバックは作っていない。理由は
+    # src/generators/video_renderer.py の docstring）。
+    #
+    # remotion には Node 22 と Chrome Headless Shell が必要。
+    # ローカルでは `cd remotion && npm install` を一度実行する。
+    video_renderer: Literal["ffmpeg", "remotion"] = Field(default="ffmpeg")
+
     # --- 出力 ---
     #
     # output_dir は「生成の作業場所」。ffmpeg は subprocess で動く外部
