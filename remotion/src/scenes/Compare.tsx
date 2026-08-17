@@ -1,22 +1,33 @@
 import { useVideoConfig } from "remotion";
 import { beatStart, useReveal } from "../beats";
 import { ChapterTag } from "../ChapterTag";
+import { fitFontSize } from "../fitText";
 import { RoughConnector } from "../Rough";
 import { Subtitle } from "../Subtitle";
 import { COLORS, FONT_STACK } from "../theme";
 import type { LayoutProps } from "../Video";
 import { useZones } from "../zones";
-import { DiagramBox } from "./DiagramBox";
+import { DEFAULT_LABEL_SIZE, DiagramBox, LABEL_INSET } from "./DiagramBox";
 import { Headline } from "./Headline";
 
-/** コネクタ（横線）の帯の幅。関係ラベルを線の上に離して置く余白を含む。 */
-const CONNECTOR_WIDTH = 100;
-/** 箱どうし・箱とコネクタの間の隙間。 */
+/**
+ * 関係ラベルの列の幅。
+ *
+ * 100px から広げた。**関係こそが図の主張**で、箱はその両端に過ぎないのに、
+ * 大きなハッチングの箱2つに挟まれた 30px のラベルは付け足しに見えていた
+ * （実測）。ラベルに専用の幅を与え、そのぶん箱を狭める。
+ */
+const RELATION_WIDTH = 220;
+/** 箱どうし・箱と関係ラベルの間の隙間。 */
 const GAP = 32;
 /** 図のゾーンの左右に残す余白。 */
-const SIDE_PADDING = 64;
+const SIDE_PADDING = 48;
 /** 箱の縦の余白（ラベルが枠にぶつからないよう少し引く）。 */
 const BOX_MARGIN = 24;
+/** 関係ラベルの上限サイズ。実際は文字数から下に丸める。 */
+const RELATION_MAX_SIZE = 52;
+/** 関係ラベルのプレートの左右パディング。 */
+const RELATION_PLATE_PADDING_X = 16;
 
 /**
  * 対比する2つを左右に並べる。
@@ -54,9 +65,25 @@ export const Compare: React.FC<LayoutProps> = ({
   const boxB = useReveal(boxBStart);
   const relationReveal = useReveal(relationStart);
 
-  const boxWidth = (width - SIDE_PADDING * 2 - CONNECTOR_WIDTH - GAP * 2) / 2;
+  const boxWidth = (width - SIDE_PADDING * 2 - RELATION_WIDTH - GAP * 2) / 2;
   const boxHeight = zones.diagram.height - BOX_MARGIN * 2;
+  // **2つの箱のラベルは同じサイズにする。** 箱ごとに文字数から独立に決めると、
+  // `従来モデル`（5字→53px）と `新方式`（3字→84px）のように左右で
+  // 大きさが揃わず、対比すべき2つが対等に見えない（実測）。
+  // 短い側を長い側に合わせる（小さい方を採る）。
+  const labelCap = Math.min(
+    ...items.map((item) => fitFontSize(item, boxWidth - LABEL_INSET, DEFAULT_LABEL_SIZE)),
+  );
   const connectorHeight = 40;
+  // ラベルは左右の GAP にはみ出してよいが、**箱の内側には入らない**。
+  // プレートのパディングを引いてから文字幅に配ること。引き忘れると
+  // プレートが箱に重なる（8文字の実測で両側の箱に重なった）。
+  // GAP は片側ぶんだけ使い、残り半分は箱との間の空きとして残す。
+  const relationSize = fitFontSize(
+    relation,
+    RELATION_WIDTH + GAP - RELATION_PLATE_PADDING_X * 2,
+    RELATION_MAX_SIZE,
+  );
 
   return (
     <>
@@ -85,17 +112,18 @@ export const Compare: React.FC<LayoutProps> = ({
           color={COLORS.accent}
           seed={seed * 10 + 2}
           reveal={boxA}
+          fontSize={labelCap}
         />
         <div
           style={{
             position: "relative",
-            width: CONNECTOR_WIDTH,
+            width: RELATION_WIDTH,
             height: connectorHeight,
             opacity: relationReveal.opacity,
           }}
         >
           <RoughConnector
-            width={CONNECTOR_WIDTH}
+            width={RELATION_WIDTH}
             height={connectorHeight}
             seed={seed * 10 + 3}
             stroke={COLORS.subtle}
@@ -103,20 +131,22 @@ export const Compare: React.FC<LayoutProps> = ({
             arrow={false}
             drawProgress={relationReveal.drawProgress}
           />
-          {/* 線の真上ではなく上に離して置く（線とラベルが重なっていた不具合）。 */}
+          {/* 線の真上ではなく上に離して置く（線とラベルが重なっていた不具合）。
+              離す距離はサイズに比例させる。固定値だと大きくした文字が線に
+              かぶる。 */}
           <span
             style={{
               position: "absolute",
-              top: -34,
+              top: -relationSize * 1.15,
               left: "50%",
               transform: "translateX(-50%)",
               fontFamily: FONT_STACK,
-              fontSize: 30,
-              fontWeight: 700,
+              fontSize: relationSize,
+              fontWeight: 900,
               color: COLORS.text,
               backgroundColor: COLORS.plate,
-              padding: "2px 10px",
-              borderRadius: 6,
+              padding: `4px ${RELATION_PLATE_PADDING_X}px`,
+              borderRadius: 8,
               whiteSpace: "nowrap",
             }}
           >
@@ -130,6 +160,7 @@ export const Compare: React.FC<LayoutProps> = ({
           color={COLORS.accent2}
           seed={seed * 10 + 4}
           reveal={boxB}
+          fontSize={labelCap}
         />
       </div>
       <Subtitle text={subtitle} zone={zones.subtitle} />

@@ -1,6 +1,7 @@
 import { useVideoConfig } from "remotion";
 import { beatStart, useReveal } from "../beats";
 import { ChapterTag } from "../ChapterTag";
+import { fitFontSize } from "../fitText";
 import { RoughConnector } from "../Rough";
 import { Subtitle } from "../Subtitle";
 import { COLORS, FONT_STACK } from "../theme";
@@ -13,6 +14,19 @@ import { Headline } from "./Headline";
 const ARROW_HEIGHT = 130;
 /** 図のゾーンの左右に残す余白。 */
 const SIDE_PADDING = 64;
+/** 矢印の帯の幅。ラベルはこの右側に置く。 */
+const ARROW_WIDTH = 220;
+/**
+ * 関係ラベルの上限サイズ。
+ *
+ * 縦並びの `flow` は矢印の右に横幅が丸ごと余っているので、`compare` より
+ * 大きくできる。**関係が図の主張**であって箱の付属物ではない。
+ */
+const RELATION_MAX_SIZE = 56;
+/** 関係ラベルのプレートの左右パディング。 */
+const RELATION_PLATE_PADDING_X = 16;
+/** 矢印の右端からラベルまでの距離。 */
+const RELATION_OFFSET_X = 24;
 
 /**
  * 原因 → 結果を矢印で繋ぐ。上から下に流す（縦画面なので縦に並べる）。
@@ -48,6 +62,13 @@ export const Flow: React.FC<LayoutProps> = ({
 
   const boxWidth = width - SIDE_PADDING * 2;
   const boxHeight = (zones.diagram.height - ARROW_HEIGHT) / 2;
+  // ラベルは矢印の右端から画面右の余白までに収める。プレートのパディングと
+  // 矢印からの距離を先に引く（引き忘れるとプレートが画面外にはみ出す）。
+  const relationSize = fitFontSize(
+    relation,
+    (width - ARROW_WIDTH) / 2 - SIDE_PADDING - RELATION_OFFSET_X - RELATION_PLATE_PADDING_X * 2,
+    RELATION_MAX_SIZE,
+  );
 
   return (
     <>
@@ -77,10 +98,15 @@ export const Flow: React.FC<LayoutProps> = ({
           fontSize={76}
         />
         <div
-          style={{ position: "relative", width: 220, height: ARROW_HEIGHT, opacity: arrow.opacity }}
+          style={{
+            position: "relative",
+            width: ARROW_WIDTH,
+            height: ARROW_HEIGHT,
+            opacity: arrow.opacity,
+          }}
         >
           <RoughConnector
-            width={220}
+            width={ARROW_WIDTH}
             height={ARROW_HEIGHT}
             seed={seed * 10 + 3}
             stroke={COLORS.subtle}
@@ -88,20 +114,22 @@ export const Flow: React.FC<LayoutProps> = ({
             arrow
             drawProgress={arrow.drawProgress}
           />
-          {/* 矢印線の右に離して置く（以前は線の真上に重なっていた不具合）。 */}
+          {/* 矢印線の右に離して置く（以前は線の真上に重なっていた不具合）。
+              `left` は矢印の右端の少し外側。割合ではなく px で置くのは、
+              文字を大きくしても線に近づかないようにするため。 */}
           <span
             style={{
               position: "absolute",
               top: "50%",
-              left: "64%",
+              left: ARROW_WIDTH / 2 + RELATION_OFFSET_X,
               transform: "translateY(-50%)",
               fontFamily: FONT_STACK,
-              fontSize: 30,
-              fontWeight: 700,
+              fontSize: relationSize,
+              fontWeight: 900,
               color: COLORS.text,
               backgroundColor: COLORS.plate,
-              padding: "2px 10px",
-              borderRadius: 6,
+              padding: `4px ${RELATION_PLATE_PADDING_X}px`,
+              borderRadius: 8,
               whiteSpace: "nowrap",
             }}
           >
