@@ -1,5 +1,6 @@
 import { AbsoluteFill, Sequence } from "remotion";
 import { Background } from "./Background";
+import { Illustration } from "./Illustration";
 import { Compare } from "./scenes/Compare";
 import { Flow } from "./scenes/Flow";
 import { Statement } from "./scenes/Statement";
@@ -55,6 +56,14 @@ export type VideoProps = {
   height: number;
   fps: number;
   durationInFrames: number;
+  /**
+   * 動画全体で共有する挿絵のファイル名（`remotion/public/` からの相対名）。
+   * 空文字列なら地のみで描く（挿絵の生成に失敗した場合もここに空文字列が
+   * 渡る。装飾的な要素の欠落で動画本体を失敗させない、という Python 側の
+   * 判断をそのまま受ける——ここで代替の図形を描いて「壊れて見える」ように
+   * しない）。
+   */
+  illustration: string;
   scenes: SceneProps[];
 };
 
@@ -64,9 +73,14 @@ const LAYOUTS = {
   flow: Flow,
 } as const;
 
-export const NewsVideo: React.FC<VideoProps> = ({ scenes }) => (
+export const NewsVideo: React.FC<VideoProps> = ({ illustration, scenes }) => (
   <AbsoluteFill style={{ backgroundColor: COLORS.bg }}>
     <Background />
+    {/* すべての `<Sequence>` の外（トップレベル）で描く。`Illustration.tsx`
+        のコメント参照——ここに置くことで、絶対フレームを基準にした
+        ドリフトがシーン切替をまたいで続く（シーンの内側に置くと
+        `useCurrentFrame()` がシーケンス相対になり、切替ごとにリセットされる）。 */}
+    <Illustration filename={illustration} />
     {scenes.map((scene, i) => {
       const Layout = LAYOUTS[scene.layout];
       return (
@@ -102,6 +116,9 @@ export const SAMPLE_PROPS: VideoProps = {
   height: 1920,
   fps: 30,
   durationInFrames: 90,
+  // Studio 上での見た目確認用。実運用では Pipeline が `remotion/public/` に
+  // 置いたファイル名を渡す（`RemotionRenderer._place_illustration`）。
+  illustration: "",
   scenes: [
     {
       layout: "statement",

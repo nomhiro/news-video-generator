@@ -138,19 +138,36 @@ export const RoughConnector: React.FC<{
       const end = height - (arrow ? 22 : 4);
       return generator.line(width / 2, 4, width / 2, Math.max(end, 4), options);
     }
-    return generator.line(4, height / 2, Math.max(width - 4, 4), height / 2, options);
+    const end = width - (arrow ? 22 : 4);
+    return generator.line(4, height / 2, Math.max(end, 4), height / 2, options);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [width, height, seed, stroke, orientation, arrow]);
 
+  // 矢先は縦・横どちらでも描ける。`flow` の関係ストリップが横並びの矢印に
+  // 変わったため（以前は縦の矢印しか使っていなかった）、横向きの矢先を
+  // 追加した。縦は下向き固定、横は右向き固定（両方とも「原因→結果」の
+  // 進む方向に合わせてある。逆方向の矢印は今のところ使わない）。
   const head = useMemo(() => {
-    if (!arrow || orientation !== "vertical") return null;
-    const cx = width / 2;
-    const tip = height - 4;
+    if (!arrow) return null;
+    if (orientation === "vertical") {
+      const cx = width / 2;
+      const tip = height - 4;
+      return generator.linearPath(
+        [
+          [cx - 16, tip - 26],
+          [cx, tip],
+          [cx + 16, tip - 26],
+        ],
+        { ...options, seed: seed + 1 },
+      );
+    }
+    const cy = height / 2;
+    const tip = width - 4;
     return generator.linearPath(
       [
-        [cx - 16, tip - 26],
-        [cx, tip],
-        [cx + 16, tip - 26],
+        [tip - 26, cy - 16],
+        [tip, cy],
+        [tip - 26, cy + 16],
       ],
       { ...options, seed: seed + 1 },
     );

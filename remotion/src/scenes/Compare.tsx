@@ -1,51 +1,19 @@
 import { useVideoConfig } from "remotion";
 import { beatStart, useReveal } from "../beats";
 import { ChapterTag } from "../ChapterTag";
-import { fitFontSize } from "../fitText";
-import { RoughConnector } from "../Rough";
 import { Subtitle } from "../Subtitle";
-import { COLORS, FONT_STACK } from "../theme";
 import type { LayoutProps } from "../Video";
 import { useZones } from "../zones";
-import { DEFAULT_LABEL_SIZE, DiagramBox, LABEL_INSET } from "./DiagramBox";
 import { Headline } from "./Headline";
+import { RelationStrip } from "./RelationStrip";
 
 /**
- * 関係ラベルの文字に許す最大幅。これより長い関係は字を縮める。
- *
- * **関係こそが図の主張**で、箱はその両端に過ぎないのに、大きなハッチングの
- * 箱2つに挟まれた 30px のラベルは付け足しに見えていた（実測）。
- */
-const RELATION_MAX_TEXT_WIDTH = 220;
-
-/**
- * 中央列の最小幅。コネクタの線が「線」として読める長さを残す。
- *
- * `切替` のような短い関係ではラベルの幅がこれを下回るので、下回った分は
- * 箱に回る（短い関係のときは箱が広くなる）。
- */
-const MIN_RELATION_WIDTH = 140;
-/** 箱どうし・箱と関係ラベルの間の隙間。 */
-const GAP = 32;
-/** 図のゾーンの左右に残す余白。 */
-const SIDE_PADDING = 48;
-/** 箱の縦の余白（ラベルが枠にぶつからないよう少し引く）。 */
-const BOX_MARGIN = 24;
-/** 関係ラベルの上限サイズ。実際は文字数から下に丸める。 */
-const RELATION_MAX_SIZE = 52;
-/** 関係ラベルのプレートの左右パディング。 */
-const RELATION_PLATE_PADDING_X = 16;
-
-/**
- * 対比する2つを左右に並べる。
+ * 対比する2つを、挿絵の下の1行ストリップで示す。
  *
  * 要素は「章タグ → 見出し → A → 関係ラベル → B」の順に出る（章が空なら
- * 見出しから）。一度に spring で出す旧実装は、図が「説明」ではなく
- * 「装飾」になってしまっていた。
- *
- * 図の大きさは `zones.diagram` から逆算する。以前は 380x380 の固定値で、
- * 見出しと字幕の間に余っていた空間を使っていなかった
- * （ゾーン導入前は誰もその空間の所有者ではなかった）。
+ * 見出しから）。以前は箱2つ＋関係ラベルを図の帯（720px）いっぱいに描いて
+ * いたが、その帯は共有の挿絵に譲った（`zones.ts` 参照）。概念は
+ * `RelationStrip`（120px）に圧縮して引き継ぐ。
  */
 export const Compare: React.FC<LayoutProps> = ({
   headline,
@@ -57,7 +25,7 @@ export const Compare: React.FC<LayoutProps> = ({
   durationInFrames,
 }) => {
   const { width } = useVideoConfig();
-  const zones = useZones("diagram");
+  const zones = useZones("strip");
 
   const hasChapter = chapter !== "";
   const totalBeats = (hasChapter ? 1 : 0) + 4; // 見出し・A・関係・B
@@ -72,105 +40,24 @@ export const Compare: React.FC<LayoutProps> = ({
   const boxB = useReveal(boxBStart);
   const relationReveal = useReveal(relationStart);
 
-  // **横方向にも予算を作る。** 縦のゾーンと同じ考え方で、まず関係ラベルの
-  // 実寸を出して中央列として確保し、**残りを2つの箱で分ける**。
-  // 箱の幅を先に決めて「ラベルは間に入るはず」と期待する順序だと、
-  // ラベルを大きくした瞬間に両側の箱へ重なった（8文字で実測）。
-  // この順序なら、8文字までのどの長さでも重なりは起こりえない。
-  const relationSize = fitFontSize(relation, RELATION_MAX_TEXT_WIDTH, RELATION_MAX_SIZE);
-  const relationWidth = Math.max(
-    MIN_RELATION_WIDTH,
-    relation.length * relationSize + RELATION_PLATE_PADDING_X * 2,
-  );
-  const boxWidth = (width - SIDE_PADDING * 2 - relationWidth - GAP * 2) / 2;
-  const boxHeight = zones.diagram.height - BOX_MARGIN * 2;
-  // **2つの箱のラベルは同じサイズにする。** 箱ごとに文字数から独立に決めると、
-  // `従来モデル`（5字→53px）と `新方式`（3字→84px）のように左右で
-  // 大きさが揃わず、対比すべき2つが対等に見えない（実測）。
-  // 短い側を長い側に合わせる（小さい方を採る）。
-  const labelCap = Math.min(
-    ...items.map((item) => fitFontSize(item, boxWidth - LABEL_INSET, DEFAULT_LABEL_SIZE)),
-  );
-  const connectorHeight = 40;
-
   return (
     <>
       {hasChapter && (
         <ChapterTag text={chapter} seed={seed * 10 + 1} startFrame={chapterStart} zone={zones.chapter} />
       )}
       <Headline text={headline} startFrame={headlineStart} zone={zones.headline} />
-      <div
-        style={{
-          position: "absolute",
-          top: zones.diagram.top + BOX_MARGIN,
-          left: 0,
-          right: 0,
-          height: boxHeight,
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-          gap: GAP,
-        }}
-      >
-        {/* items は schema が常に2要素であることを保証しているので固定 index。 */}
-        <DiagramBox
-          text={items[0]}
-          width={boxWidth}
-          height={boxHeight}
-          color={COLORS.accent}
-          seed={seed * 10 + 2}
-          reveal={boxA}
-          fontSize={labelCap}
-        />
-        <div
-          style={{
-            position: "relative",
-            width: relationWidth,
-            height: connectorHeight,
-            opacity: relationReveal.opacity,
-          }}
-        >
-          <RoughConnector
-            width={relationWidth}
-            height={connectorHeight}
-            seed={seed * 10 + 3}
-            stroke={COLORS.subtle}
-            orientation="horizontal"
-            arrow={false}
-            drawProgress={relationReveal.drawProgress}
-          />
-          {/* 線の真上ではなく上に離して置く（線とラベルが重なっていた不具合）。
-              離す距離はサイズに比例させる。固定値だと大きくした文字が線に
-              かぶる。 */}
-          <span
-            style={{
-              position: "absolute",
-              top: -relationSize * 1.15,
-              left: "50%",
-              transform: "translateX(-50%)",
-              fontFamily: FONT_STACK,
-              fontSize: relationSize,
-              fontWeight: 900,
-              color: COLORS.text,
-              backgroundColor: COLORS.plate,
-              padding: `4px ${RELATION_PLATE_PADDING_X}px`,
-              borderRadius: 8,
-              whiteSpace: "nowrap",
-            }}
-          >
-            {relation}
-          </span>
-        </div>
-        <DiagramBox
-          text={items[1]}
-          width={boxWidth}
-          height={boxHeight}
-          color={COLORS.accent2}
-          seed={seed * 10 + 4}
-          reveal={boxB}
-          fontSize={labelCap}
-        />
-      </div>
+      <RelationStrip
+        items={items}
+        relation={relation}
+        // 対比は対称（方向が無い）ので矢印は付けない——`Flow` との違いはここだけ。
+        arrow={false}
+        seed={seed * 10 + 3}
+        zone={zones.relation}
+        frameWidth={width}
+        boxA={boxA}
+        boxB={boxB}
+        relationReveal={relationReveal}
+      />
       <Subtitle text={subtitle} zone={zones.subtitle} />
     </>
   );

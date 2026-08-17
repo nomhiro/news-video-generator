@@ -5,48 +5,45 @@ export type Zone = { top: number; height: number };
 /**
  * 縦方向のレイアウトを「ゾーン」として一箇所で定義する。
  *
- * 章タグ・見出し・図・字幕をそれぞれ独立に位置決めしていたときは、
- * 「上1/3が空く」「字幕が図の下端と重なる」のように、誰も責任を持たない
- * 隙間と重なりが両方発生し得た（実測で両方確認した）。ゾーンの高さの
- * 合計でフレームの縦を分け、各要素は自分のゾーンの内側にしか描かないと
- * 決めれば、重なりは構造的に起こらず、余白も意図した配分になる。
+ * **共有の挿絵が上半分（52%）を占める構成に変えた。** 手描きの箱2つで
+ * 対比/因果を説明していた版は「地味で観られない」というオーナーの判断で
+ * 退役し、代わりに動画全体で共有する1枚の挿絵を主役に据える。
+ * 図（箱・矢印）が持っていた「概念を示す」役割は、挿絵の下の
+ * 120px の1行ストリップ（`RelationStrip`）に圧縮して引き継ぐ。
  *
- * 比率（0〜1、フレーム高さに対する割合）で持つ。ピクセル固定にすると
- * 長尺（1920x1080、横長）でそのまま使ったときに範囲がフレーム外に出る。
- * 数値そのものは縦画面（1920 高）でレンダリングした実フレームを見て
- * 決めている（下記コメント参照）。長尺のような別アスペクト比では
- * 同じ比率が最適とは限らないが、現状「長尺は当面作らない」
- * （CLAUDE.md）ため優先していない。
+ * ゾーンの重なり防止という設計そのものは変えていない——各要素は自分の
+ * ゾーンの内側にしか描かない。
+ *
+ * 比率（0〜1、フレーム高さに対する割合）で持つ理由は変わらず、ピクセル
+ * 固定だと長尺（1920x1080）でそのまま使ったときに範囲外に出るため。
+ * 数値は縦画面（1920 高）の実フレームを見て決めている（下記コメント参照）。
  */
 const RATIOS = {
-  diagram: {
-    // 章タグ。3レイアウト共通の帯。
-    chapter: { top: 120 / 1920, height: 140 / 1920 },
-    // compare/flow の見出し。図が下に控えている分、statement より狭い。
-    headline: { top: 300 / 1920, height: 380 / 1920 },
-    // compare/flow の図。以前は見出しと字幕の間の余白に埋もれていた領域を
-    // ここに明示的に割り当てる——スマホでは図が大きい方が読める。
-    //
-    // 下端を 1340 から 1440 に下げた。字幕は下端寄せで描かれるため、
-    // 字幕ゾーンの上端を上げても文字は上がらない（スクリムが伸びるだけ）。
-    // 箱の下端と字幕1行目の間に約290pxの空白が残っていたので、
-    // **空いた分は図に配る**（元の不満はまさにこの空白だった）。
-    diagram: { top: 720 / 1920, height: 720 / 1920 },
-    // 字幕は**フレーム下端まで**を持つ。スクリム（下端のグラデーション）は
-    // 必ず下端まで伸びるので、ここに 340 のような「実際に描く範囲より
-    // 狭い高さ」を書くと、ゾーンの値がレイアウトの実態を表さなくなる
-    // （ゾーンで重なりを防ぐという仕組みが、値を信じられない時点で崩れる）。
-    //
-    // 上端は図の下端（1440）より下。高さ440は、字幕が4行に伸びても
-    // （54px × 1.45 × 4 ≒ 313px ＋ 下パディング96px）ゾーン内に収まる値。
-    // これより下げると4行目が `overflow: hidden` で切れる。
-    subtitle: { top: 1480 / 1920, height: 440 / 1920 },
+  // 挿絵と章タグは compare/flow/statement の3レイアウトで共通。
+  // 挿絵自体の描画は `Video.tsx` がシーケンスの外（トップレベル）で行うが、
+  // 「挿絵がどこまでの帯を占めるか」は各シーンも知る必要がある
+  // （章タグをその帯の下端に置くため）。
+  shared: {
+    // 挿絵の帯。フレームの上52%、四辺フルブリードで描く。
+    illustration: { top: 0, height: 1000 / 1920 },
+    // 章タグはこの帯（挿絵の下端寄り180px）の中に左寄せで置く。
+    // 全幅ではなく挿絵の中に重ねるので、独立したゾーンとして持つ。
+    chapter: { top: 820 / 1920, height: 180 / 1920 },
   },
-  // statement には図が無いので、見出しがフレームのほぼ全体を持つ。
+  // compare/flow のゾーン。挿絵の下に見出し・関係ストリップ・字幕が続く。
+  strip: {
+    headline: { top: 1050 / 1920, height: 320 / 1920 },
+    // 対比/因果の2要素を1行で示すストリップ。図（箱・矢印）が退役した後も
+    // `items` / `relation` はスキーマ上必須のままなので、描く場所を残す
+    // （LLM に出させて誰も描かないデータを放置すると腐る）。
+    relation: { top: 1410 / 1920, height: 120 / 1920 },
+    subtitle: { top: 1570 / 1920, height: 350 / 1920 },
+  },
+  // statement には items/relation が無い（契約上つねに空）ので、
+  // ストリップとその前後の余白を見出しに譲る。
   statement: {
-    chapter: { top: 120 / 1920, height: 140 / 1920 },
-    headline: { top: 320 / 1920, height: 1080 / 1920 },
-    subtitle: { top: 1460 / 1920, height: 460 / 1920 },
+    headline: { top: 1050 / 1920, height: 520 / 1920 },
+    subtitle: { top: 1570 / 1920, height: 350 / 1920 },
   },
 } as const;
 
@@ -55,34 +52,35 @@ function toPx(ratio: { top: number; height: number }, frameHeight: number): Zone
 }
 
 /** 3レイアウトに共通のゾーン。 */
-export type Zones = { chapter: Zone; headline: Zone; subtitle: Zone };
+export type Zones = { illustration: Zone; chapter: Zone; headline: Zone; subtitle: Zone };
 
-/** `compare` / `flow` のゾーン。図の帯を必ず持つ。 */
-export type DiagramZones = Zones & { diagram: Zone };
+/** `compare` / `flow` のゾーン。関係ストリップの帯を必ず持つ。 */
+export type StripZones = Zones & { relation: Zone };
 
 /**
  * `layout` に応じたゾーンをまとめて返す。
  *
- * **返り値の型を overload で分ける。** 単一の型で `diagram?: Zone` を返すと、
- * 図を持つレイアウト側が `zones.diagram!` と書くことになり、
- * 「図の帯が必ずある」ことを型で言えなくなる（`!` は将来ゾーンの構成を
+ * **返り値の型を overload で分ける。** 単一の型で `relation?: Zone` を返すと、
+ * ストリップを持つレイアウト側が `zones.relation!` と書くことになり、
+ * 「ストリップの帯が必ずある」ことを型で言えなくなる（`!` は将来ゾーンの構成を
  * 変えたときに実行時エラーへ化ける）。overload なら
- * `useZones("diagram").diagram` が `Zone` として通る。
+ * `useZones("strip").relation` が `Zone` として通る。
  *
  * `useVideoConfig()` は分岐の外で1回だけ呼ぶ（Hooks のルール）。分岐は
  * その結果（`height`）を使ったプレーンな JS の分岐であり、呼ぶフック自体を
  * 切り替えているわけではない。
  */
-export function useZones(layout: "diagram"): DiagramZones;
+export function useZones(layout: "strip"): StripZones;
 export function useZones(layout: "statement"): Zones;
-export function useZones(layout: "diagram" | "statement"): Zones | DiagramZones {
+export function useZones(layout: "strip" | "statement"): Zones | StripZones {
   const { height } = useVideoConfig();
   const ratios = RATIOS[layout];
   const common: Zones = {
-    chapter: toPx(ratios.chapter, height),
+    illustration: toPx(RATIOS.shared.illustration, height),
+    chapter: toPx(RATIOS.shared.chapter, height),
     headline: toPx(ratios.headline, height),
     subtitle: toPx(ratios.subtitle, height),
   };
   if (layout === "statement") return common;
-  return { ...common, diagram: toPx(RATIOS.diagram.diagram, height) };
+  return { ...common, relation: toPx(RATIOS.strip.relation, height) };
 }
