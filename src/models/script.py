@@ -92,6 +92,21 @@ MIN_INSIGHT_CHARS = 40
 MAX_HEADLINE_CHARS = 45
 
 
+# 動画全体で共有する挿絵1枚の主題（`illustration_subject`）の最大文字数。
+#
+# `CardVisual.subject`（画像カードの1枚）と同じ「何を描くか」の1文だが、
+# こちらは構図（センタリング・余白）まで含めて指示するため、名札1つの
+# `MAX_LABEL_CHARS`（8字）や視覚要素1つの `MAX_DETAIL_CHARS`（120字）より
+# 広く取る必要がある。一方で「1文」を超えて場面description（パネル）を
+# 書き始めると、`CardVisual.key_details` で実際に踏んだ劣化
+# （長い記述ほどパネル的な描写になり、スタイル文の指示が負ける）と
+# 同じことが起きる。`MAX_DETAIL_CHARS` の実測知見を踏まえ、
+# 「2つの視覚要素ぶん（120字 × 2 弱）に収まる1文」を目安に置く。
+# `MAX_LABEL_CHARS` / `MAX_HEADLINE_CHARS` と同じく、実物を見て決め直す
+# 前提の暫定値。
+MAX_ILLUSTRATION_SUBJECT_CHARS = 200
+
+
 # 話速 1.1〜1.25 での実測に基づく読み上げ速度。
 # 42.82秒 / 255文字 ≒ 6.0 文字/秒（日本語, 話速1.25）
 # 英語は 1語 ≒ 2.6 語/秒 相当。
@@ -215,6 +230,28 @@ def _validate_scenes(scenes: list[SceneVisual]) -> None:
         )
 
 
+def _validate_illustration_subject(text: str) -> None:
+    """動画全体で共有する挿絵の主題が実質を持つか検証する。
+
+    `_validate_insights` と同じ理由で strip 後の長さを見る
+    （空白だけの文字列を `Field(min_length=...)` では弾けない）。
+
+    Args:
+        text: `illustration_subject` の値
+
+    Raises:
+        ValueError: 空、空白のみ、または長すぎる場合
+    """
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("illustration_subject が空です")
+    if len(stripped) > MAX_ILLUSTRATION_SUBJECT_CHARS:
+        raise ValueError(
+            f"illustration_subject が長すぎます: "
+            f"{len(stripped)}文字 (最大{MAX_ILLUSTRATION_SUBJECT_CHARS}文字)"
+        )
+
+
 def _with_source(description: str, source_url: str, language: str) -> str:
     """説明文に出典 URL を追記する。
 
@@ -281,6 +318,11 @@ class ScriptDraft(BaseModel):
         estimated_duration: 推定秒数
         segment_narrations: 各画像に対応するナレーションセグメント
         scenes: 各セグメントの図解の構造（レンダラが読む）
+        illustration_subject: 動画全体で共有する挿絵1枚の主題（英語1文）。
+            Remotion レンダラが1本につき1枚だけ生成する挿絵の「何を描くか」。
+            `CardVisual.subject` と同じ二段構え（LLM が主題、コード側が
+            スタイルを前置）の *what* 側で、スタイルの語（medium / palette /
+            rendering technique）は含めない
     """
 
     title: str
@@ -296,6 +338,7 @@ class ScriptDraft(BaseModel):
     estimated_duration: int
     segment_narrations: list[str]
     scenes: list[SceneVisual]
+    illustration_subject: str
 
     @model_validator(mode="after")
     def _check_content(self) -> "ScriptDraft":
@@ -310,12 +353,14 @@ class ScriptDraft(BaseModel):
 
         Raises:
             ValueError: 要素数が一致しない、空要素がある、見出しが長すぎる、
-                独自解説が空・短すぎる、または statement が多すぎる場合
+                独自解説が空・短すぎる、statement が多すぎる、または
+                illustration_subject が空・長すぎる場合
         """
         _validate_aligned_segments(self)
         _validate_headlines(self.text_overlays)
         _validate_insights(self)
         _validate_scenes(self.scenes)
+        _validate_illustration_subject(self.illustration_subject)
         return self
 
     def narration_length(self, language: str) -> int:
@@ -419,6 +464,7 @@ class Script(BaseModel):
         estimated_duration: 推定秒数
         segment_narrations: 各画像に対応するナレーションセグメント（音声タイミング同期用）
         scenes: 各セグメントの図解の構造（レンダラが読む）
+        illustration_subject: 動画全体で共有する挿絵1枚の主題（英語1文）
     """
 
     language: str
@@ -437,6 +483,7 @@ class Script(BaseModel):
     estimated_duration: int
     segment_narrations: list[str]
     scenes: list[SceneVisual]
+    illustration_subject: str
 
     @model_validator(mode="after")
     def _check_content(self) -> "Script":
@@ -447,12 +494,14 @@ class Script(BaseModel):
 
         Raises:
             ValueError: 要素数が一致しない、空要素がある、見出しが長すぎる、
-                独自解説が空・短すぎる、または statement が多すぎる場合
+                独自解説が空・短すぎる、statement が多すぎる、または
+                illustration_subject が空・長すぎる場合
         """
         _validate_aligned_segments(self)
         _validate_headlines(self.text_overlays)
         _validate_insights(self)
         _validate_scenes(self.scenes)
+        _validate_illustration_subject(self.illustration_subject)
         return self
 
     def to_dict(self) -> dict:

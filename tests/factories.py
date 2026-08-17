@@ -29,6 +29,10 @@ def make_draft(**overrides: object) -> ScriptDraft:
         "image_prompts": ["Scene 1", "Scene 2", "Scene 3"],
         "text_overlays": ["overlay 1", "overlay 2", "overlay 3"],
         "estimated_duration": 35,
+        "illustration_subject": (
+            "A single engineer's hand sketching a glowing neural network diagram "
+            "on a chalkboard, centred with wide margins."
+        ),
         "segment_narrations": ["文A。", "文B。", "文C。"],
         "scenes": [
             {"layout": "compare", "items": ["従来", "新方式"], "relation": "切替"},

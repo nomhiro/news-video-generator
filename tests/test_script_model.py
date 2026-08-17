@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from src.models.script import (
     MAX_HEADLINE_CHARS,
+    MAX_ILLUSTRATION_SUBJECT_CHARS,
     MIN_INSIGHT_CHARS,
     Script,
     ScriptDraft,
@@ -474,4 +475,45 @@ def test_script_also_rejects_too_long_headline() -> None:
     data = _draft().to_script("ja").to_dict()
     data["text_overlays"] = ["あ" * (MAX_HEADLINE_CHARS + 1), "overlay 2", "overlay 3"]
     with pytest.raises(ValidationError, match="長すぎます"):
+        Script.model_validate(data)
+
+
+# --------------------------------------------------------------------------
+# illustration_subject（Remotion レンダラが動画全体で共有する挿絵の主題）
+# --------------------------------------------------------------------------
+
+
+def test_rejects_empty_illustration_subject() -> None:
+    with pytest.raises(ValidationError, match="illustration_subject が空です"):
+        _draft(illustration_subject="")
+
+
+def test_rejects_whitespace_only_illustration_subject() -> None:
+    """空白だけの主題も空として扱うこと（`_validate_insights` と同じ理由）。"""
+    with pytest.raises(ValidationError, match="illustration_subject が空です"):
+        _draft(illustration_subject="   ")
+
+
+def test_rejects_too_long_illustration_subject() -> None:
+    with pytest.raises(ValidationError, match="illustration_subject が長すぎます"):
+        _draft(illustration_subject="a" * (MAX_ILLUSTRATION_SUBJECT_CHARS + 1))
+
+
+def test_accepts_illustration_subject_at_the_limit() -> None:
+    """上限ちょうどは通すこと（境界での off-by-one を防ぐ）。"""
+    draft = _draft(illustration_subject="a" * MAX_ILLUSTRATION_SUBJECT_CHARS)
+    assert len(draft.illustration_subject) == MAX_ILLUSTRATION_SUBJECT_CHARS
+
+
+def test_to_script_preserves_illustration_subject() -> None:
+    draft = _draft(illustration_subject="A single lightbulb glowing above a laptop.")
+    script = draft.to_script("ja")
+    assert script.illustration_subject == draft.illustration_subject
+
+
+def test_script_also_rejects_empty_illustration_subject() -> None:
+    """`Script` 側でも同じ検査が効くこと。JSON から読み直した経路も守る。"""
+    data = _draft().to_script("ja").to_dict()
+    data["illustration_subject"] = ""
+    with pytest.raises(ValidationError, match="illustration_subject が空です"):
         Script.model_validate(data)
