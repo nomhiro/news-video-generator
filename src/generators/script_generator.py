@@ -16,7 +16,7 @@ from tenacity import (
 )
 
 from src.models.formats import FormatSpec, get_spec
-from src.models.scene import ITEMS_PER_LAYOUT, MAX_LABEL_CHARS, SceneLayout
+from src.models.scene import ITEMS_PER_LAYOUT, MAX_LABEL_CHARS, MAX_RELATION_CHARS, SceneLayout
 from src.models.script import MAX_HEADLINE_CHARS, Script, ScriptDraft
 from src.utils.grounding import ungrounded_numbers
 from src.utils.logger import log_error, log_step, log_success, log_warning
@@ -76,6 +76,59 @@ def segment_allocation(segment_count: int) -> dict[str, int]:
         allocation[name] += 1
         remainder -= 1
     return allocation
+
+
+# 構成パート名 → 表示ラベルの対応。ja/en それぞれ1つの辞書に集約する
+# （プロンプトの `_structure_spec` は別の言い回し「フック。冒頭で...」を使うが、
+# ここは画面に描く短いラベルなので分けて持つ）。
+_CHAPTER_LABELS: dict[str, dict[str, str]] = {
+    "ja": {
+        "hook": "フック",
+        "facts": "事実",
+        "mechanism": "仕組み",
+        "impact": "インパクト",
+        "conclusion": "結論",
+    },
+    "en": {
+        "hook": "Hook",
+        "facts": "Facts",
+        "mechanism": "How it works",
+        "impact": "Impact",
+        "conclusion": "Takeaway",
+    },
+}
+
+
+def chapter_labels(segment_count: int, language: str) -> list[str]:
+    """セグメントごとの章ラベル（フック/事実/仕組み/インパクト/結論）を返す。
+
+    `segment_allocation` と同じ構造的事実を、LLM への指示（プロンプト文字列）
+    ではなく画面表示（Remotion の画面上部）向けに見ているだけなので、
+    配分の算出自体は再実装せず `segment_allocation` にそのまま委ねる
+    （`_structure_spec` がスパンを作る手順と同じ、カーソルを進める方式）。
+
+    LLM に出させる必要は無い。章がどのセグメントかは segment_index から
+    一意に決まる構造的な事実であり、モデルの出力ではないため。
+
+    Args:
+        segment_count: 形式のセグメント数
+        language: 言語コード（"ja" or "en"）
+
+    Returns:
+        list[str]: セグメントごとのラベル。要素数は segment_count に一致する。
+            1パートが複数セグメントを占める場合、同じラベルが繰り返される
+            （例: 6セグメントの仕組みが2つなら ["...", "仕組み", "仕組み", ...]）
+
+    Raises:
+        ValueError: セグメント数が構成パート数を下回る場合
+            （`segment_allocation` がそのまま伝える）
+    """
+    labels = _CHAPTER_LABELS["ja" if language == "ja" else "en"]
+    allocation = segment_allocation(segment_count)
+    result: list[str] = []
+    for name in _STRUCTURE_PARTS:
+        result.extend([labels[name]] * allocation[name])
+    return result
 
 
 class ScriptGenerator:
@@ -1079,6 +1132,11 @@ Before output, verify:
                 f"**statement は最大{statement_limit}個まで。** 図が無いシーンばかりだと"
                 f"静止画を並べただけの動画に戻る。フックと結論に使い、"
                 f"本体は compare か flow にする。\n"
+                f"relation は2つの要素の**関係性を表す語**で、"
+                f"各{MAX_RELATION_CHARS}文字以内。"
+                f"「切替」「1/10」「並列化」のような単語1つで、"
+                f"「→」「vs」のような記号や接続語ではない。"
+                f"compare と flow では必須、statement では空文字列にする。\n"
                 f"**items に数値を書くときは、記事本文に出てくる数値だけを使うこと。**"
                 f"価格・割合・日付・バージョン番号・件数を自分で作ってはならない"
                 f"（検査で弾かれて再生成になる）。"
@@ -1094,6 +1152,11 @@ Before output, verify:
             f"**At most {statement_limit} statement scenes.** Too many turns the video "
             f"back into a slideshow. Use them for the hook and the conclusion; "
             f"make the body compare or flow.\n"
+            f"relation is the word for how the two items relate, "
+            f"at most {MAX_RELATION_CHARS} characters. Something like "
+            f'"switch" or "1/10" or "parallelized" — a single word, not a '
+            'connector like "->" or "vs". '
+            "Required for compare and flow, empty string for statement.\n"
             f"**Any number in items MUST appear in the source article.** Never invent "
             f"prices, percentages, dates, version numbers, or counts "
             f"(the check rejects them and forces a regeneration)."
@@ -1117,11 +1180,16 @@ Before output, verify:
         for i in range(n):
             if i == 0 or i == n - 1:
                 # フックと結論は図なしにするのが自然
-                entries.append('        {"layout": "statement", "items": []}')
+                entries.append('        {"layout": "statement", "items": [], "relation": ""}')
             elif i % 2 == 1:
-                entries.append('        {"layout": "compare", "items": ["名札A", "名札B"]}')
+                entries.append(
+                    '        {"layout": "compare", "items": ["名札A", "名札B"], '
+                    '"relation": "対比語"}'
+                )
             else:
-                entries.append('        {"layout": "flow", "items": ["原因", "結果"]}')
+                entries.append(
+                    '        {"layout": "flow", "items": ["原因", "結果"], "relation": "変化語"}'
+                )
         return "[\n" + ",\n".join(entries) + "\n    ]"
 
     @staticmethod

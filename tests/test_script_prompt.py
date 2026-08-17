@@ -16,7 +16,7 @@ import itertools
 
 import pytest
 
-from src.generators.script_generator import ScriptGenerator, segment_allocation
+from src.generators.script_generator import ScriptGenerator, chapter_labels, segment_allocation
 from src.models.formats import SPECS, VideoFormat, get_spec
 from src.models.script import MAX_HEADLINE_CHARS
 
@@ -186,9 +186,9 @@ def test_ungrounded_scene_numbers_flags_invented_figures(draft_factory) -> None:
     """
     draft = draft_factory(
         scenes=[
-            {"layout": "compare", "items": ["50%", "従来"]},
-            {"layout": "flow", "items": ["入力", "選択"]},
-            {"layout": "statement", "items": []},
+            {"layout": "compare", "items": ["50%", "従来"], "relation": "改善"},
+            {"layout": "flow", "items": ["入力", "選択"], "relation": "変換"},
+            {"layout": "statement", "items": [], "relation": ""},
         ]
     )
     assert ScriptGenerator._ungrounded_scene_numbers(draft, "記事本文に数値は無い") == {"50"}
@@ -198,9 +198,66 @@ def test_grounded_scene_numbers_pass(draft_factory) -> None:
     """記事にある数値だけなら合格すること。"""
     draft = draft_factory(
         scenes=[
-            {"layout": "compare", "items": ["50%", "従来"]},
-            {"layout": "flow", "items": ["入力", "選択"]},
-            {"layout": "statement", "items": []},
+            {"layout": "compare", "items": ["50%", "従来"], "relation": "改善"},
+            {"layout": "flow", "items": ["入力", "選択"], "relation": "変換"},
+            {"layout": "statement", "items": [], "relation": ""},
         ]
     )
     assert ScriptGenerator._ungrounded_scene_numbers(draft, "精度は50%向上した") == set()
+
+
+# --------------------------------------------------------------------------
+# chapter_labels（章ラベル。LLM 出力ではなくセグメント番号から導出する）
+# --------------------------------------------------------------------------
+
+
+def test_chapter_labels_for_six_segments() -> None:
+    """短尺・TikTok（6セグメント）の並び。仕組みが2つ占めるので繰り返す。"""
+    assert chapter_labels(6, "ja") == [
+        "フック",
+        "事実",
+        "仕組み",
+        "仕組み",
+        "インパクト",
+        "結論",
+    ]
+
+
+def test_chapter_labels_for_ten_segments() -> None:
+    """長尺（10セグメント）の並び。仕組みとインパクトが3つずつ占める。"""
+    assert chapter_labels(10, "ja") == [
+        "フック",
+        "事実",
+        "事実",
+        "仕組み",
+        "仕組み",
+        "仕組み",
+        "インパクト",
+        "インパクト",
+        "インパクト",
+        "結論",
+    ]
+
+
+def test_chapter_labels_in_english() -> None:
+    assert chapter_labels(6, "en") == [
+        "Hook",
+        "Facts",
+        "How it works",
+        "How it works",
+        "Impact",
+        "Takeaway",
+    ]
+
+
+def test_chapter_labels_length_matches_segment_count() -> None:
+    """要素数が segment_count に一致すること（renderer が zip(strict=True) で
+    使うための前提）。"""
+    for count in (6, 10):
+        assert len(chapter_labels(count, "ja")) == count
+
+
+def test_chapter_labels_rejects_too_few_segments() -> None:
+    """`segment_allocation` の制約をそのまま継承すること。"""
+    with pytest.raises(ValueError, match="構成パート数を下回っています"):
+        chapter_labels(4, "ja")
