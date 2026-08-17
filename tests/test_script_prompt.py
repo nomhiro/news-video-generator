@@ -18,6 +18,7 @@ import pytest
 
 from src.generators.script_generator import ScriptGenerator, segment_allocation
 from src.models.formats import SPECS, VideoFormat, get_spec
+from src.models.script import MAX_HEADLINE_CHARS
 
 FORMATS = ["short", "tiktok", "long"]
 LANGUAGES = ["ja", "en"]
@@ -148,6 +149,33 @@ def test_scenes_spec_states_the_statement_limit() -> None:
     text = ScriptGenerator._scenes_spec("ja", spec)
     limit = spec.segment_count // 2
     assert f"最大{limit}個" in text
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_overlay_instruction_states_the_enforced_limit(video_format: str, language: str) -> None:
+    """見出しの上限が、実際に強制している値としてプロンプトに出ていること。
+
+    以前はプロンプトが「15-25文字」「8-15 words」とだけ言い、モデル側には
+    上限が一切無かった（バリデータも見ていなかった）。指示と検査が食い違うと、
+    モデルが指示どおりに書いても検査で落ちる（またはその逆）。
+    数値はプロンプトに書かず `MAX_HEADLINE_CHARS` から作る。
+    """
+    prompt = _prompt(language, video_format)
+    assert str(MAX_HEADLINE_CHARS) in prompt
+
+
+def test_overlay_examples_do_not_restate_the_limit() -> None:
+    """`<output_format>` の例に別の数値を書かないこと。
+
+    例に「15-25文字」のような第2の値を残すと、上限を変えたときに片方だけ
+    直され、モデルには矛盾した2つの指示が届く（`formats.py` 冒頭の教訓）。
+    """
+    for video_format, language in ALL_COMBINATIONS:
+        prompt = _prompt(language, video_format)
+        example = prompt.split("<output_format>")[1].split("</output_format>")[0]
+        overlays = example.split('"text_overlays"')[1]
+        assert "文字）" not in overlays, f"{language}/{video_format} の例に文字数が残っている"
+        assert "words)" not in overlays, f"{language}/{video_format} の例に語数が残っている"
 
 
 def test_ungrounded_scene_numbers_flags_invented_figures(draft_factory) -> None:

@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.models.script import (
+    MAX_HEADLINE_CHARS,
     MIN_INSIGHT_CHARS,
     Script,
     ScriptDraft,
@@ -418,3 +419,58 @@ def test_scenes_survive_to_script() -> None:
     """to_script が scenes をそのまま引き継ぐこと。"""
     script = _draft().to_script("ja")
     assert [s.layout.value for s in script.scenes] == ["compare", "flow", "statement"]
+
+
+# --------------------------------------------------------------------------
+# text_overlays（Remotion では 92〜112px の見出しとして描かれる）
+# --------------------------------------------------------------------------
+
+
+def test_rejects_too_long_headline() -> None:
+    """長すぎる見出しを弾くこと。
+
+    ffmpeg レンダラは14文字で機械的に折り返していたので、どれだけ長くても
+    症状が出なかった。Remotion の `AbsoluteFill` はスクロールしないため、
+    伸びた見出しは字幕のスクリムに重なるか画面外に切れる。
+    """
+    with pytest.raises(ValidationError, match="text_overlays の2番目が長すぎます"):
+        _draft(
+            text_overlays=[
+                "overlay 1",
+                "あ" * (MAX_HEADLINE_CHARS + 1),
+                "overlay 3",
+            ]
+        )
+
+
+def test_accepts_headline_at_the_limit() -> None:
+    """上限ちょうどは通すこと（境界での off-by-one を防ぐ）。"""
+    draft = _draft(
+        text_overlays=["あ" * MAX_HEADLINE_CHARS, "overlay 2", "overlay 3"],
+    )
+    assert len(draft.text_overlays[0]) == MAX_HEADLINE_CHARS
+
+
+def test_headline_limit_accepts_a_realistic_english_headline() -> None:
+    """英語の見出しが通ること。
+
+    `ScriptDraft` は意図的に `language` を持たないので、上限は言語非依存に
+    なる。日本語だけを見て決めると英語側が壊れる（`Pipeline.run` の既定は
+    `["ja", "en"]` なので EN の動画も実際に作られる）。
+    """
+    headline = "Inference costs drop by an order of magnitude"
+    assert len(headline) <= MAX_HEADLINE_CHARS
+    draft = _draft(text_overlays=[headline, "overlay 2", "overlay 3"])
+    assert draft.text_overlays[0] == headline
+
+
+def test_script_also_rejects_too_long_headline() -> None:
+    """`Script` 側でも同じ検査が効くこと。
+
+    レンダラが読むのは `Script` なので、`ScriptDraft` だけに置くと
+    JSON から読み直した経路が素通りする。
+    """
+    data = _draft().to_script("ja").to_dict()
+    data["text_overlays"] = ["あ" * (MAX_HEADLINE_CHARS + 1), "overlay 2", "overlay 3"]
+    with pytest.raises(ValidationError, match="長すぎます"):
+        Script.model_validate(data)

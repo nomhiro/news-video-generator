@@ -62,6 +62,33 @@ class _HasInsights(Protocol):
 MIN_INSIGHT_CHARS = 40
 
 
+# 見出し（`text_overlays` の1要素）の最大文字数。
+#
+# なぜ必要か: Remotion では `text_overlays[i]` が画面中央の見出しとして
+# 92px（`statement` は112px）で描かれる。`AbsoluteFill` はスクロールしないので、
+# 伸びた見出しは下の字幕スクリムに重なるか画面外に切れる。**ffmpeg レンダラでは
+# 症状が出なかった**（`video_composer._wrap_text` が14文字で機械的に折り返して
+# 吸収していた）ため、この制約が無いことに気付きにくい。
+#
+# 60 の根拠（実測前の見積り）:
+#   - 描画幅は 1080px から左右の padding（64〜72px）を引いた約 952px。
+#     92px の全角文字なら1行に約10字、Latin は平均 advance が約 0.5em なので
+#     1行に約20字入る。
+#   - 縦の余裕が最も少ないのは `compare`（見出し + 88px + 380px の箱を中央寄せ）。
+#     字幕の文字が乗る領域（下端から約330px）に触れない見出しの高さは
+#     約790px = lineHeight 1.28 換算で6行。
+#   - よって 60字は日本語で最悪6行・英語で3行に収まる。日本語の指示は
+#     15〜25字（2〜3行）なので、60 は「目標」ではなく**病的な出力の天井**。
+#   - `ScriptDraft` は意図的に `language` を持たないため、閾値は言語非依存で
+#     なければならない（`MIN_INSIGHT_CHARS` と同じ制約）。英語の妥当な見出し
+#     （例: "Inference costs drop by an order of magnitude" = 44字）が通る値に
+#     してある。文字数ではなく語数で切ると日本語側が表現できない。
+#
+# `MAX_LABEL_CHARS` と同じく**実物を見て決め直す前提の暫定値**。カードでは
+# 上限90字が正常な出力を3回連続で弾いた前例があるので、渋りすぎも害になる。
+MAX_HEADLINE_CHARS = 60
+
+
 # 話速 1.1〜1.25 での実測に基づく読み上げ速度。
 # 42.82秒 / 255文字 ≒ 6.0 文字/秒（日本語, 話速1.25）
 # 英語は 1語 ≒ 2.6 語/秒 相当。
@@ -139,6 +166,26 @@ def _validate_insights(model: _HasInsights) -> None:
         if len(stripped) < MIN_INSIGHT_CHARS:
             raise ValueError(
                 f"{field_name} が短すぎます: {len(stripped)}文字 (最低{MIN_INSIGHT_CHARS}文字)"
+            )
+
+
+def _validate_headlines(overlays: list[str]) -> None:
+    """見出しが画面に収まる長さか検証する。
+
+    空の検査は `_validate_aligned_segments` が持っているので、ここは長さだけ見る。
+    上限の根拠は `MAX_HEADLINE_CHARS` のコメントを参照。
+
+    Args:
+        overlays: 見出しの配列（`text_overlays`）
+
+    Raises:
+        ValueError: 上限を超える要素がある場合
+    """
+    for i, text in enumerate(overlays, 1):
+        if len(text.strip()) > MAX_HEADLINE_CHARS:
+            raise ValueError(
+                f"text_overlays の{i}番目が長すぎます"
+                f"（{len(text.strip())}字、最大{MAX_HEADLINE_CHARS}字）: {text!r}"
             )
 
 
@@ -259,10 +306,11 @@ class ScriptDraft(BaseModel):
             ScriptDraft: 検証済みの自身
 
         Raises:
-            ValueError: 要素数が一致しない、空要素がある、
+            ValueError: 要素数が一致しない、空要素がある、見出しが長すぎる、
                 独自解説が空・短すぎる、または statement が多すぎる場合
         """
         _validate_aligned_segments(self)
+        _validate_headlines(self.text_overlays)
         _validate_insights(self)
         _validate_scenes(self.scenes)
         return self
@@ -395,10 +443,11 @@ class Script(BaseModel):
             Script: 検証済みの自身
 
         Raises:
-            ValueError: 要素数が一致しない、空要素がある、
+            ValueError: 要素数が一致しない、空要素がある、見出しが長すぎる、
                 独自解説が空・短すぎる、または statement が多すぎる場合
         """
         _validate_aligned_segments(self)
+        _validate_headlines(self.text_overlays)
         _validate_insights(self)
         _validate_scenes(self.scenes)
         return self

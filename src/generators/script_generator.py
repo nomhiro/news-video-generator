@@ -17,7 +17,7 @@ from tenacity import (
 
 from src.models.formats import FormatSpec, get_spec
 from src.models.scene import ITEMS_PER_LAYOUT, MAX_LABEL_CHARS, SceneLayout
-from src.models.script import Script, ScriptDraft
+from src.models.script import MAX_HEADLINE_CHARS, Script, ScriptDraft
 from src.utils.grounding import ungrounded_numbers
 from src.utils.logger import log_error, log_step, log_success, log_warning
 
@@ -109,6 +109,11 @@ class ScriptGenerator:
     # プロンプト側には値を書かない（書くと定義とずれる）。
     SCENES_SPEC_TOKEN = "<<SCENES_SPEC>>"
 
+    # プロンプト内で見出し（text_overlays）の指示を差し込む位置。
+    # 上限は models/script.py の MAX_HEADLINE_CHARS が単一の情報源なので、
+    # プロンプト側には値を書かない（書くと検査と指示が食い違う）。
+    OVERLAY_SPEC_TOKEN = "<<OVERLAY_SPEC>>"
+
     # 出力例の scenes 配列を差し込む位置。
     # 要素数は segment_count から作る（short/tiktok は6、long は10）。
     SCENES_EXAMPLE_TOKEN = "<<SCENES_EXAMPLE>>"
@@ -135,7 +140,7 @@ class ScriptGenerator:
 <content_rules>
 - segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: 必ず英語で記述（画像生成モデル用）、各プロンプトに "cinematic, high quality" を含める
-- text_overlays: 各画像に対応する短文（15-25文字）
+- text_overlays: <<OVERLAY_SPEC>>
 - title: 40文字程度（【】や！で注目を集める、数字や疑問形を活用）
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
 - hashtags: 5〜8個（"shorts"は必須）
@@ -175,12 +180,12 @@ class ScriptGenerator:
         "Scene 6: description, cinematic, high quality"
     ],
     "text_overlays": [
-        "画像1用テキスト（15-25文字）",
-        "画像2用テキスト（15-25文字）",
-        "画像3用テキスト（15-25文字）",
-        "画像4用テキスト（15-25文字）",
-        "画像5用テキスト（15-25文字）",
-        "画像6用テキスト（15-25文字）"
+        "画像1用テキスト",
+        "画像2用テキスト",
+        "画像3用テキスト",
+        "画像4用テキスト",
+        "画像5用テキスト",
+        "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 35
@@ -220,7 +225,7 @@ class ScriptGenerator:
 - image_prompts: 必ず英語で記述
   - 1枚目: サムネイル的（cinematic, high quality, eye-catching thumbnail style）
   - 2枚目以降: 解説資料風（infographic style, educational diagram, data visualization）
-- text_overlays: 各画像に対応する短文（20-30文字）
+- text_overlays: <<OVERLAY_SPEC>>
 - title: 50〜60文字程度（【完全解説】【徹底分析】など）
 - description: 要約＋絵文字、タイムスタンプ、📌でポイント、💬でCTA、ハッシュタグ
 - hashtags: 5〜10個
@@ -268,16 +273,16 @@ class ScriptGenerator:
         "Scene 10: description, infographic style"
     ],
     "text_overlays": [
-        "画像1用テキスト（20-30文字）",
-        "画像2用テキスト（20-30文字）",
-        "画像3用テキスト（20-30文字）",
-        "画像4用テキスト（20-30文字）",
-        "画像5用テキスト（20-30文字）",
-        "画像6用テキスト（20-30文字）",
-        "画像7用テキスト（20-30文字）",
-        "画像8用テキスト（20-30文字）",
-        "画像9用テキスト（20-30文字）",
-        "画像10用テキスト（20-30文字）"
+        "画像1用テキスト",
+        "画像2用テキスト",
+        "画像3用テキスト",
+        "画像4用テキスト",
+        "画像5用テキスト",
+        "画像6用テキスト",
+        "画像7用テキスト",
+        "画像8用テキスト",
+        "画像9用テキスト",
+        "画像10用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 300
@@ -315,7 +320,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 <content_rules>
 - segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: In English, include "cinematic, high quality" in each
-- text_overlays: Short text for each image (8-15 words)
+- text_overlays: <<OVERLAY_SPEC>>
 - title: Around 50 characters (use attention-grabbing words like SHOCKING, BREAKING)
 - description: Line 1 summary + emoji, 📌 for bullet points, 💬 for CTA, end with hashtags
 - hashtags: 5-8 tags (must include "shorts")
@@ -355,12 +360,12 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Scene 6: description, cinematic, high quality"
     ],
     "text_overlays": [
-        "Image 1 text (8-15 words)",
-        "Image 2 text (8-15 words)",
-        "Image 3 text (8-15 words)",
-        "Image 4 text (8-15 words)",
-        "Image 5 text (8-15 words)",
-        "Image 6 text (8-15 words)"
+        "Image 1 text",
+        "Image 2 text",
+        "Image 3 text",
+        "Image 4 text",
+        "Image 5 text",
+        "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 35
@@ -400,7 +405,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - image_prompts: In English
   - First image: Thumbnail-style (cinematic, high quality, eye-catching)
   - Second onwards: Educational style (infographic, educational diagram, data visualization)
-- text_overlays: Short text for each image (10-20 words)
+- text_overlays: <<OVERLAY_SPEC>>
 - title: Around 60-70 characters (EXPLAINED, DEEP DIVE, FULL ANALYSIS)
 - description: Summary + emoji, timestamps, 📌 for bullet points, 💬 for CTA, hashtags
 - hashtags: 5-10 tags
@@ -448,16 +453,16 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Scene 10: description, infographic style"
     ],
     "text_overlays": [
-        "Image 1 text (10-20 words)",
-        "Image 2 text (10-20 words)",
-        "Image 3 text (10-20 words)",
-        "Image 4 text (10-20 words)",
-        "Image 5 text (10-20 words)",
-        "Image 6 text (10-20 words)",
-        "Image 7 text (10-20 words)",
-        "Image 8 text (10-20 words)",
-        "Image 9 text (10-20 words)",
-        "Image 10 text (10-20 words)"
+        "Image 1 text",
+        "Image 2 text",
+        "Image 3 text",
+        "Image 4 text",
+        "Image 5 text",
+        "Image 6 text",
+        "Image 7 text",
+        "Image 8 text",
+        "Image 9 text",
+        "Image 10 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 300
@@ -496,7 +501,7 @@ TikTokの収益化には60秒以上の動画が必要です。
 <content_rules>
 - segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: 必ず英語で記述（画像生成モデル用）、各プロンプトに "cinematic, high quality" を含める
-- text_overlays: 各画像に対応する短文（15-25文字）
+- text_overlays: <<OVERLAY_SPEC>>
 - title: 40文字程度（【】や！で注目を集める、数字や疑問形を活用）
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
 - hashtags: 5〜8個（"TikTok"と"ニュース"は必須）
@@ -536,12 +541,12 @@ TikTokの収益化には60秒以上の動画が必要です。
         "Scene 6: description, cinematic, high quality"
     ],
     "text_overlays": [
-        "画像1用テキスト（15-25文字）",
-        "画像2用テキスト（15-25文字）",
-        "画像3用テキスト（15-25文字）",
-        "画像4用テキスト（15-25文字）",
-        "画像5用テキスト（15-25文字）",
-        "画像6用テキスト（15-25文字）"
+        "画像1用テキスト",
+        "画像2用テキスト",
+        "画像3用テキスト",
+        "画像4用テキスト",
+        "画像5用テキスト",
+        "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 75
@@ -581,7 +586,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 <content_rules>
 - segment_narrations: <<NARRATION_SPEC>>
 - image_prompts: In English, include "cinematic, high quality" in each
-- text_overlays: Short text for each image (8-15 words)
+- text_overlays: <<OVERLAY_SPEC>>
 - title: Around 50 characters (use attention-grabbing words like SHOCKING, BREAKING)
 - description: Line 1 summary + emoji, 📌 for bullet points, 💬 for CTA, end with hashtags
 - hashtags: 5-8 tags (must include "TikTok" and "news")
@@ -621,12 +626,12 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Scene 6: description, cinematic, high quality"
     ],
     "text_overlays": [
-        "Image 1 text (8-15 words)",
-        "Image 2 text (8-15 words)",
-        "Image 3 text (8-15 words)",
-        "Image 4 text (8-15 words)",
-        "Image 5 text (8-15 words)",
-        "Image 6 text (8-15 words)"
+        "Image 1 text",
+        "Image 2 text",
+        "Image 3 text",
+        "Image 4 text",
+        "Image 5 text",
+        "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 75
@@ -853,6 +858,10 @@ Before output, verify:
                 cls._structure_spec(language, spec),
             )
             .replace(
+                cls.OVERLAY_SPEC_TOKEN,
+                cls._overlay_spec(language),
+            )
+            .replace(
                 cls.SCENES_SPEC_TOKEN,
                 cls._scenes_spec(language, spec),
             )
@@ -892,6 +901,38 @@ Before output, verify:
             f"({total_low}-{total_high} words total). "
             f"Fill all {n}; never leave a segment empty. "
             f"Do not exceed {total_high} words total — going over forces a regeneration"
+        )
+
+    @staticmethod
+    def _overlay_spec(language: str) -> str:
+        """見出し（text_overlays）の指示を `MAX_HEADLINE_CHARS` から組み立てる。
+
+        上限をプロンプトに直接書かない。以前はプロンプトが目安の字数
+        （15-25文字 / 8-15 words）だけを言い、バリデータ側に上限が無かった。
+        Remotion では見出しが 92px で描かれ、`AbsoluteFill` はスクロールしない
+        ので、長い見出しは字幕に重なる。検査を足したうえで、**指示と検査を
+        同じ値から作る**（食い違うとモデルが指示どおりに書いても弾かれる）。
+
+        形式（short/tiktok/long）で分けない。上限は画面の幅と高さから来る値で、
+        尺とは無関係だからである。
+
+        Args:
+            language: 言語コード
+
+        Returns:
+            str: プロンプトに差し込む1行
+        """
+        if language == "ja":
+            return (
+                f"各シーンの見出し。画面中央に大きく描くので、2〜3行で読み切れる短文にする"
+                f"（目安15〜25文字、**最大{MAX_HEADLINE_CHARS}文字**）。"
+                f"超えると検査で弾かれて再生成になる"
+            )
+        return (
+            f"The headline drawn large in the middle of each scene. Keep it to a short "
+            f"phrase readable in 2-3 lines (aim for 6-10 words, "
+            f"**at most {MAX_HEADLINE_CHARS} characters**). "
+            f"Going over is rejected by the check and forces a regeneration"
         )
 
     @staticmethod
