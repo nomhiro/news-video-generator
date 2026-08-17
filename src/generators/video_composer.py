@@ -97,6 +97,84 @@ def _tail(text: str | None, limit: int = 2000) -> str:
     return f"...(前略 {len(text) - limit}文字)\n{text[-limit:]}"
 
 
+def mux_audio(
+    silent_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    *,
+    timeout_sec: int,
+    audio_codec: str = "aac",
+    audio_bitrate: str = "192k",
+) -> None:
+    """無音の映像に音声を多重化する。**映像は再エンコードしない。**
+
+    なぜ独立した関数か
+    ------------------
+    レンダラが2つ（ffmpeg / Remotion）あり、どちらも「無音の映像を作ってから
+    音声を混ぜる」という同じ2段構えを取る。コピーすると片方だけ直される日が
+    来るので共有する。
+
+    なぜ2段に分けるか
+    ------------------
+    1回で音声ごと合成していた頃、長尺（1920x1080 / 341秒）が OOM killer に
+    殺されていた（終了コード -9）。エンコード速度は 1.04x 出ているのに
+    出力サイズが数百フレームぶん変化せず、子プロセスのピーク RSS が
+    4,077MB に達していた。マクサーが映像パケットを溜め込んでいる。
+    この段は `-c:v copy` なので溜め込む対象が無い（2段構えでピーク617MB）。
+
+    中間ファイルの削除はここでは**行わない**。失敗時に何を残すかは
+    呼び出し側の判断（テキストオーバーレイの一時ファイルなど、
+    ここが知らないものも一緒に片付ける必要がある）。
+
+    Args:
+        silent_path: 音声を持たない映像
+        audio_path: 混ぜる音声
+        output_path: 出力先
+        timeout_sec: ffmpeg を諦めるまでの秒数
+        audio_codec: 音声コーデック
+        audio_bitrate: 音声ビットレート
+
+    Raises:
+        VideoCompositionError: ffmpeg が失敗、またはタイムアウトした場合
+    """
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(silent_path),
+        "-i",
+        str(audio_path),
+        "-c:v",
+        "copy",
+        "-c:a",
+        audio_codec,
+        "-b:a",
+        audio_bitrate,
+        "-shortest",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+            timeout=timeout_sec,
+        )
+    except subprocess.CalledProcessError as e:
+        # 終了コードを必ず残す。負の値はシグナルで殺されたことを意味し
+        # （-9 なら OOM killer の可能性が高い）、stderr の内容だけでは
+        # 「エンコードの失敗」と区別できない。
+        raise VideoCompositionError(
+            f"音声の多重化に失敗しました (終了コード {e.returncode}):\n"
+            f"stdout: {_tail(e.stdout)}\nstderr: {_tail(e.stderr)}"
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        raise VideoCompositionError(f"音声の多重化が {timeout_sec}秒でタイムアウトしました") from e
+
+
 class VideoComposer:
     """FFmpegを使用して動画を合成するクラス。
 
@@ -646,24 +724,6 @@ class VideoComposer:
             str(silent_path),
         ]
 
-        # 第2段: 音声を混ぜるだけ。映像は再エンコードしない。
-        mux_cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(silent_path),
-            "-i",
-            str(audio_path),
-            "-c:v",
-            "copy",
-            "-c:a",
-            self.AUDIO_CODEC,
-            "-b:a",
-            self.AUDIO_BITRATE,
-            "-shortest",
-            str(output_path),
-        ]
-
         try:
             log_step(f"FFmpegフィルター: {video_filter[:200]}...", "🔧")
             log_step(f"FFmpegスレッド数: {_available_cpus()}", "🧵")
@@ -679,16 +739,22 @@ class VideoComposer:
                 timeout=self.FFMPEG_TIMEOUT_SEC,
             )
             log_step("音声を多重化中（映像は再エンコードしない）...", "🔉")
-            subprocess.run(
-                mux_cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=True,
-                timeout=self.FFMPEG_TIMEOUT_SEC,
+            mux_audio(
+                silent_path,
+                audio_path,
+                output_path,
+                timeout_sec=self.FFMPEG_TIMEOUT_SEC,
+                audio_codec=self.AUDIO_CODEC,
+                audio_bitrate=self.AUDIO_BITRATE,
             )
             silent_path.unlink(missing_ok=True)
+        except VideoCompositionError:
+            # mux_audio が投げた場合。メッセージは既に整形されているので
+            # 包み直さず、中間ファイルだけ片付けて上へ流す。
+            for text_file in text_files:
+                text_file.unlink(missing_ok=True)
+            silent_path.unlink(missing_ok=True)
+            raise
         except subprocess.CalledProcessError as e:
             # Cleanup temp files before raising
             for text_file in text_files:
