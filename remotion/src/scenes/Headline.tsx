@@ -31,13 +31,16 @@ const MAX_LINES = 3;
 const MIN_SCALE = 0.5;
 
 /** 見出し。`Script.text_overlays[i]` が入る。 */
-export const Headline: React.FC<{ text: string; size?: number }> = ({
+export const Headline: React.FC<{ text: string; size?: number; startFrame?: number }> = ({
   text,
   size = 92,
+  // ビート演出（chapter → headline → ...）に合わせて出現を遅らせるための
+  // オフセット。既定の0は「シーン開始と同時に出る」旧来の挙動と一致する。
+  startFrame = 0,
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const enter = spring({ frame, fps, config: { damping: 200 } });
+  const enter = spring({ frame: frame - startFrame, fps, config: { damping: 200 } });
 
   // 長い見出しは字数に応じて縮める。
   //

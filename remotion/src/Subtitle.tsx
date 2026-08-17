@@ -14,7 +14,10 @@ export const Subtitle: React.FC<{ text: string }> = ({ text }) => {
     extrapolateRight: "clamp",
   });
   return (
-    <AbsoluteFill style={{ justifyContent: "flex-end", opacity }}>
+    // 画面最下部から約300px持ち上げる。以前は真下に張り付いていて低すぎた。
+    // スクリムの帯自体を持ち上げるので、その下の帯には何も敷かれない
+    // （地がほぼフラットな色のため、そこだけ見えても違和感は出ない）。
+    <AbsoluteFill style={{ justifyContent: "flex-end", opacity, paddingBottom: 300 }}>
       <div
         style={{
           padding: "160px 72px 96px",
