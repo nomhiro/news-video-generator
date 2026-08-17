@@ -1,6 +1,5 @@
 import { AbsoluteFill, Sequence } from "remotion";
 import { Background } from "./Background";
-import { Subtitle } from "./Subtitle";
 import { Compare } from "./scenes/Compare";
 import { Flow } from "./scenes/Flow";
 import { Statement } from "./scenes/Statement";
@@ -11,10 +10,18 @@ import { COLORS } from "./theme";
  * あるが（`statement` は `items` / `relation` を使わない等）、3つの
  * レイアウトを同じ型で扱えるようにあえて統一している
  * （`LAYOUTS[scene.layout]` を単一の型で呼べる）。
+ *
+ * `Subtitle` は各レイアウトが自分のゾーン（`zones.ts`）を使って自分で描く。
+ * 以前は `Video.tsx` が `Layout` と `Subtitle` を並べて置いていたが、それだと
+ * 字幕の位置が図のゾーンと無関係に決まり、図が伸びると重なった
+ * （実測で確認した不具合）。同じゾーン定義を参照させるため、描画も
+ * レイアウト側に持たせる。
  */
 export type LayoutProps = {
   /** 見出し。Script.text_overlays[i] */
   headline: string;
+  /** 字幕。Script.segment_narrations[i] */
+  subtitle: string;
   /** compare/flow は2要素、statement は空配列。 */
   items: string[];
   /** compare/flow の2要素の関係を表す短い語（例: "1/10"）。statement は "" */
@@ -70,6 +77,7 @@ export const NewsVideo: React.FC<VideoProps> = ({ scenes }) => (
         >
           <Layout
             headline={scene.headline}
+            subtitle={scene.subtitle}
             items={scene.items}
             relation={scene.relation}
             chapter={scene.chapter}
@@ -79,7 +87,6 @@ export const NewsVideo: React.FC<VideoProps> = ({ scenes }) => (
             seed={i}
             durationInFrames={scene.durationInFrames}
           />
-          <Subtitle text={scene.subtitle} />
         </Sequence>
       );
     })}

@@ -1,6 +1,7 @@
 import { useReveal } from "./beats";
 import { RoughRect } from "./Rough";
 import { COLORS, FONT_STACK } from "./theme";
+import type { Zone } from "./zones";
 
 /**
  * 画面上部の小さな手描きタグ。`chapter`（例: "仕組み"）を表示する。
@@ -13,11 +14,13 @@ import { COLORS, FONT_STACK } from "./theme";
  * ラベルを付けられない場合に空文字列で「劣化」させて渡す契約になっている
  * （失敗させるのではなく、タグ無しで動画は成立させる）。
  */
-export const ChapterTag: React.FC<{ text: string; seed: number; startFrame: number }> = ({
-  text,
-  seed,
-  startFrame,
-}) => {
+export const ChapterTag: React.FC<{
+  text: string;
+  seed: number;
+  startFrame: number;
+  /** 章タグのゾーン（`zones.ts`）。ゾーンの中央に縦寄せする。 */
+  zone: Zone;
+}> = ({ text, seed, startFrame, zone }) => {
   const { drawProgress, fillProgress, opacity } = useReveal(startFrame);
   if (!text) return null;
 
@@ -28,7 +31,9 @@ export const ChapterTag: React.FC<{ text: string; seed: number; startFrame: numb
     <div
       style={{
         position: "absolute",
-        top: 96,
+        // ゾーンの中央に縦寄せ。ゾーンの外に出ないので、見出し等と
+        // 位置がぶつからないことが構造的に保証される。
+        top: zone.top + (zone.height - height) / 2,
         left: "50%",
         transform: "translateX(-50%)",
         width,
