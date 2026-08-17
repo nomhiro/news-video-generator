@@ -11,13 +11,20 @@ import { DEFAULT_LABEL_SIZE, DiagramBox, LABEL_INSET } from "./DiagramBox";
 import { Headline } from "./Headline";
 
 /**
- * 関係ラベルの列の幅。
+ * 関係ラベルの文字に許す最大幅。これより長い関係は字を縮める。
  *
- * 100px から広げた。**関係こそが図の主張**で、箱はその両端に過ぎないのに、
- * 大きなハッチングの箱2つに挟まれた 30px のラベルは付け足しに見えていた
- * （実測）。ラベルに専用の幅を与え、そのぶん箱を狭める。
+ * **関係こそが図の主張**で、箱はその両端に過ぎないのに、大きなハッチングの
+ * 箱2つに挟まれた 30px のラベルは付け足しに見えていた（実測）。
  */
-const RELATION_WIDTH = 220;
+const RELATION_MAX_TEXT_WIDTH = 220;
+
+/**
+ * 中央列の最小幅。コネクタの線が「線」として読める長さを残す。
+ *
+ * `切替` のような短い関係ではラベルの幅がこれを下回るので、下回った分は
+ * 箱に回る（短い関係のときは箱が広くなる）。
+ */
+const MIN_RELATION_WIDTH = 140;
 /** 箱どうし・箱と関係ラベルの間の隙間。 */
 const GAP = 32;
 /** 図のゾーンの左右に残す余白。 */
@@ -65,7 +72,17 @@ export const Compare: React.FC<LayoutProps> = ({
   const boxB = useReveal(boxBStart);
   const relationReveal = useReveal(relationStart);
 
-  const boxWidth = (width - SIDE_PADDING * 2 - RELATION_WIDTH - GAP * 2) / 2;
+  // **横方向にも予算を作る。** 縦のゾーンと同じ考え方で、まず関係ラベルの
+  // 実寸を出して中央列として確保し、**残りを2つの箱で分ける**。
+  // 箱の幅を先に決めて「ラベルは間に入るはず」と期待する順序だと、
+  // ラベルを大きくした瞬間に両側の箱へ重なった（8文字で実測）。
+  // この順序なら、8文字までのどの長さでも重なりは起こりえない。
+  const relationSize = fitFontSize(relation, RELATION_MAX_TEXT_WIDTH, RELATION_MAX_SIZE);
+  const relationWidth = Math.max(
+    MIN_RELATION_WIDTH,
+    relation.length * relationSize + RELATION_PLATE_PADDING_X * 2,
+  );
+  const boxWidth = (width - SIDE_PADDING * 2 - relationWidth - GAP * 2) / 2;
   const boxHeight = zones.diagram.height - BOX_MARGIN * 2;
   // **2つの箱のラベルは同じサイズにする。** 箱ごとに文字数から独立に決めると、
   // `従来モデル`（5字→53px）と `新方式`（3字→84px）のように左右で
@@ -75,15 +92,6 @@ export const Compare: React.FC<LayoutProps> = ({
     ...items.map((item) => fitFontSize(item, boxWidth - LABEL_INSET, DEFAULT_LABEL_SIZE)),
   );
   const connectorHeight = 40;
-  // ラベルは左右の GAP にはみ出してよいが、**箱の内側には入らない**。
-  // プレートのパディングを引いてから文字幅に配ること。引き忘れると
-  // プレートが箱に重なる（8文字の実測で両側の箱に重なった）。
-  // GAP は片側ぶんだけ使い、残り半分は箱との間の空きとして残す。
-  const relationSize = fitFontSize(
-    relation,
-    RELATION_WIDTH + GAP - RELATION_PLATE_PADDING_X * 2,
-    RELATION_MAX_SIZE,
-  );
 
   return (
     <>
@@ -117,13 +125,13 @@ export const Compare: React.FC<LayoutProps> = ({
         <div
           style={{
             position: "relative",
-            width: RELATION_WIDTH,
+            width: relationWidth,
             height: connectorHeight,
             opacity: relationReveal.opacity,
           }}
         >
           <RoughConnector
-            width={RELATION_WIDTH}
+            width={relationWidth}
             height={connectorHeight}
             seed={seed * 10 + 3}
             stroke={COLORS.subtle}
