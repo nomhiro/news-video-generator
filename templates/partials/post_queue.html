@@ -1,0 +1,102 @@
+<!--
+  投稿キュー。
+
+  本文は畳まない。自動投稿なので運用者の唯一の仕事が「読んで気付く」
+  ことで、開かないと読めない UI では誰も読まない。280（weighted）は
+  短いので全文を出しても場所を取らない。
+-->
+<div id="post-queue" class="rounded-lg bg-raised border border-ink/10 p-4 space-y-4">
+    <div class="flex items-center justify-between">
+        <h2 class="font-display font-semibold text-ink text-sm tracking-wide">投稿キュー</h2>
+        {% if message %}
+        <span aria-live="polite" class="text-xs text-teal">{{ message }}</span>
+        {% else %}
+        <span aria-live="polite" class="sr-only"></span>
+        {% endif %}
+    </div>
+
+    {% if needs_review %}
+    <div>
+        <h3 class="text-xs font-semibold text-vermilion mb-2">要確認</h3>
+        <div class="space-y-2">
+            {% for post in needs_review %}
+            <article class="rounded border border-vermilion/30 bg-vermilion/5 p-3">
+                <div class="flex items-center justify-between text-xs text-ink/60 mb-1">
+                    <span>{{ post.article_title }}</span>
+                    <span class="tnum">{{ post.weighted_length }}/{{ max_weighted }}</span>
+                </div>
+                <p class="text-sm text-ink whitespace-pre-wrap">{{ post.body }}</p>
+                <p class="text-xs text-vermilion mt-1">{{ post.error_message or "理由不明" }}</p>
+                <form hx-post="/x/posts/{{ post.id }}/cancel" hx-target="#post-queue" hx-swap="outerHTML"
+                      class="mt-2">
+                    <button type="submit"
+                            class="text-xs px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
+                                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
+                        取り消す
+                    </button>
+                </form>
+            </article>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if failed %}
+    {# 直近24時間で出せなかった投稿。空のキューだけを見ても
+       「今日は出なかった」ことしか分からず、「出そうとして落ちた」のか
+       「そもそも作られなかった」のかが区別できない。 #}
+    <div>
+        <h3 class="text-xs font-semibold text-vermilion mb-2">出せなかった投稿 {{ failed|length }}件</h3>
+        <div class="space-y-2">
+            {% for post in failed %}
+            <article class="rounded border border-vermilion/20 bg-vermilion/5 p-3">
+                <div class="flex items-center justify-between text-xs text-ink/60 mb-1">
+                    <span class="tnum">
+                        {{ post.scheduled_at.astimezone(zone).strftime('%m/%d %H:%M') if post.scheduled_at else "未定" }}
+                    </span>
+                    <span>{{ post.article_title }}</span>
+                </div>
+                <p class="text-xs text-vermilion">{{ post.error_message or "理由不明" }}</p>
+            </article>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <div>
+        <h3 class="text-xs font-semibold text-ink/60 mb-2">これから出る</h3>
+        {% if upcoming %}
+        <div class="space-y-2">
+            {% for post in upcoming %}
+            <article class="rounded border border-ink/10 p-3">
+                <div class="flex items-center justify-between text-xs text-ink/60 mb-1">
+                    <span class="tnum">
+                        {{ post.scheduled_at.astimezone(zone).strftime('%m/%d %H:%M') if post.scheduled_at else "未定" }}
+                    </span>
+                    <span>{{ post.article_title }}</span>
+                    <span class="tnum">{{ post.weighted_length }}/{{ max_weighted }}</span>
+                </div>
+                <p class="text-sm text-ink whitespace-pre-wrap">{{ post.body }}</p>
+                {# 送信中（POSTING）には取り消しボタンを出さない。押せると、
+                   投稿は X に出たのに行が FAILED になり、記事が消費済みに
+                   ならず翌日もう一度公開される。 #}
+                {% if post.status in cancellable %}
+                <form hx-post="/x/posts/{{ post.id }}/cancel" hx-target="#post-queue" hx-swap="outerHTML"
+                      class="mt-2">
+                    <button type="submit"
+                            class="text-xs px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
+                                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
+                        取り消す
+                    </button>
+                </form>
+                {% else %}
+                <p class="mt-2 text-xs text-ink/50">送信中のため取り消せません</p>
+                {% endif %}
+            </article>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-sm text-ink/40">予定されている投稿はありません</p>
+        {% endif %}
+    </div>
+</div>

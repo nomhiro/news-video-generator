@@ -15,9 +15,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.jobs.planner import plan_daily_batch
+from src.jobs.planner import fetch_daily_news, plan_daily_batch
 from src.jobs.scheduler import DailyScheduler, next_run_at
-from src.models.news import NewsArticle, NewsCategory
+from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -142,15 +142,17 @@ def test_scheduler_survives_a_failing_task() -> None:
 
 
 def _article(article_id: str, title: str, generated: bool = False) -> NewsArticle:
-    return NewsArticle(
+    article = NewsArticle(
         id=article_id,
         title=title,
         url=f"https://example.com/{article_id}",
         source="テスト",
         category=NewsCategory.AI,
         content="本文" * 60,
-        video_generated=generated,
     )
+    if generated:
+        article.mark_consumed(CHANNEL_VIDEO)
+    return article
 
 
 class FakeNews:
@@ -180,8 +182,9 @@ class FakeNews:
         self.scraped.extend(a.id for a in articles)
         return articles
 
-    def get_articles_by_category(self, category: NewsCategory) -> list[NewsArticle]:
-        return [a for a in self.articles if a.category is category]
+    def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
+        picked = [a for a in self.articles if not a.is_consumed_by(channel)]
+        return picked[:needed]
 
     # 定期実行が触ってはいけないもの
     def toggle_selection(self, article_id: str) -> bool | None:  # pragma: no cover
@@ -274,6 +277,54 @@ async def test_continues_when_fetching_fails() -> None:
 
     assert plan.enqueued is True
     assert jobs.batches[0][1] == [("a1", "記事1")]
+
+
+async def test_plan_daily_batch_fetches_by_default() -> None:
+    """取得を切り出しても、`plan_daily_batch` 単体では取得すること。
+
+    取得は `fetch_daily_news` に切り出して Web の日次タスクが先に呼ぶ
+    ようにしたが、既定は `fetch=True` のまま。この検査が無いと、
+    抽出のときに動画側の取得を黙って止めてしまえる。
+    """
+    news = FakeNews([_article("a1", "記事1")])
+    jobs = FakeJobs()
+
+    await plan_daily_batch(news, jobs, formats=["short"], search_queries=["生成AI"])
+
+    assert news.fetch_calls == 1
+
+
+async def test_plan_daily_batch_skips_fetching_when_told_to() -> None:
+    """日次タスクは取得を先に1回だけ済ませてから `fetch=False` で呼ぶ。
+
+    取得が動画の計画の中に埋まっていると、X の計画を先に回した瞬間に
+    X が「このサイクルで取得した記事」を見られなくなる。
+    """
+    news = FakeNews([_article("a1", "記事1")])
+    jobs = FakeJobs()
+
+    plan = await plan_daily_batch(
+        news, jobs, formats=["short"], search_queries=["生成AI"], fetch=False
+    )
+
+    assert news.fetch_calls == 0
+    # 取得しないだけで、計画そのものは通常どおり成立する
+    assert plan.enqueued is True
+    assert jobs.batches[0][1] == [("a1", "記事1")]
+
+
+async def test_fetch_daily_news_never_raises() -> None:
+    """取得の失敗を例外にしない。
+
+    日次タスクは取得を両方の計画より先に呼ぶので、ここで例外が外へ
+    出ると **X の計画も動画の計画も巻き込んで止まる**。一時的な
+    ネットワーク障害で丸一日ぶんが飛ぶ。
+    """
+    news = FakeNews([_article("a1", "記事1")], fetch_fails=True)
+
+    await fetch_daily_news(news, search_queries=["生成AI"])
+
+    assert news.fetch_calls == 1  # 試みてはいる
 
 
 async def test_reports_when_there_is_nothing_to_build() -> None:

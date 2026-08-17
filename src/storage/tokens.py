@@ -47,6 +47,9 @@ if TYPE_CHECKING:  # pragma: no cover - 型のためだけの import
 YOUTUBE_TOKEN = "youtube_token"
 YOUTUBE_CLIENT_SECRETS = "youtube_client_secrets"
 TIKTOK_TOKEN = "tiktok_token"
+# X（旧 Twitter）の OAuth 2.0 トークン。
+# ローカルと Blob で同じ名前を使う（config.token_paths と揃える）。
+X_TOKEN = "x_token"
 
 
 class TokenStoreError(Exception):

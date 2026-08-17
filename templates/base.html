@@ -20,17 +20,35 @@
     <link rel="stylesheet" href="/static/css/app.css">
     <script src="/static/vendor/htmx.min.js" defer></script>
 </head>
-<body class="bg-gray-100 min-h-screen">
-    <!-- Header -->
-    <header class="bg-gradient-to-r from-blue-600 to-blue-800 text-white shadow-lg sticky top-0 z-50">
-        <div class="container mx-auto px-4 py-4">
-            <div class="flex justify-between items-center">
-                <div class="flex items-center gap-3">
-                    <span class="text-3xl">📺</span>
-                    <div>
-                        <h1 class="text-2xl font-bold">News Video Generator</h1>
-                        <p class="text-blue-200 text-sm">ニュースから動画を自動生成</p>
-                    </div>
+<body class="bg-paper text-ink font-body min-h-screen">
+    {#
+      X の自動投稿が入って、この画面の仕事は「操作する」から
+      「見ている間に何が出るかを確認する」に変わった。ヘッダーは
+      濃色（bg-ink）にして、上に浮かぶ帯・キューのカード（bg-raised）と
+      視覚的に区別する。絵文字は外す。状態は色ではなく語で示す。
+    #}
+    <header class="bg-ink text-paper sticky top-0 z-40">
+        <div class="container mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+                <h1 class="font-display font-semibold text-lg tracking-wide">News Video Generator</h1>
+                <p class="text-paper/60 text-xs">自動生成・自動投稿の運用画面</p>
+            </div>
+
+            <div class="flex items-center gap-3">
+                {#
+                  ヘッダーは状態の点と概算コストだけ（/x/status/header）。
+                  本文パネル（/x/status）を入れないこと。両方が同じ
+                  フラグメントを読み込んでいた頃、パネル側が持つ
+                  id="x-status" が文書内に2つ存在し、htmx が最初の一致しか
+                  入れ替えなかったため、停止スイッチを押しても本文の表示が
+                  古いまま残った。
+                #}
+                <div id="header-x-status"
+                     hx-get="/x/status/header"
+                     hx-trigger="load, every 60s"
+                     hx-swap="innerHTML"
+                     class="text-xs">
+                    <div class="text-paper/50">読み込み中...</div>
                 </div>
 
                 <button
@@ -38,31 +56,41 @@
                     hx-target="#category-tabs"
                     hx-swap="outerHTML"
                     hx-indicator="#fetch-indicator"
-                    class="bg-white text-blue-600 px-5 py-2.5 rounded-lg font-semibold
-                           hover:bg-blue-50 transition-colors flex items-center gap-2"
+                    class="bg-raised text-ink px-4 py-2 rounded font-medium text-sm
+                           hover:bg-paper transition-colors flex items-center gap-2
+                           focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal"
                 >
                     <span id="fetch-indicator" class="htmx-indicator">
-                        <svg class="w-5 h-5 spinner" fill="none" viewBox="0 0 24 24">
+                        <svg class="w-4 h-4 spinner" fill="none" viewBox="0 0 24 24">
                             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                         </svg>
                     </span>
-                    <span>🔄 最新ニュースを取得</span>
+                    <span>最新ニュースを取得</span>
                 </button>
             </div>
         </div>
     </header>
 
     <!-- Main Content -->
-    <main class="container mx-auto px-4 py-6">
+    <main class="container mx-auto px-4 py-6 space-y-6">
+        {#
+          今日の時間軸。過ぎた枠・いま・これから出るものを1本の軸に
+          並べる。ポーリングは帯とキューだけに絞る（ページ全体を
+          ポーリングしない）。
+        #}
+        <div id="day-band-wrapper" hx-get="/x/band" hx-trigger="load, every 60s" hx-swap="innerHTML">
+            <div class="rounded-lg bg-raised border border-ink/10 p-4 text-sm text-ink/40">
+                読み込み中...
+            </div>
+        </div>
+
         {% block content %}{% endblock %}
     </main>
 
     <!-- Footer -->
-    <footer class="bg-gray-800 text-gray-400 py-4 mt-8">
-        <div class="container mx-auto px-4 text-center text-sm">
-            News Video Generator - HTMX + FastAPI
-        </div>
+    <footer class="text-ink/40 py-6 text-center text-xs">
+        News Video Generator
     </footer>
 </body>
 </html>

@@ -39,6 +39,17 @@
                         生成済み
                     </span>
                     {% endif %}
+                    {#
+                      チャネル別の消費を丸2つで出す。1本のフラグ
+                      （video_generated）では「動画にはしたが X には
+                      出していない」を表せないため、チャネルごとに見せる。
+                    #}
+                    <span class="inline-flex items-center gap-1 ml-1" title="動画 / X への消費状況">
+                        <span class="w-2 h-2 rounded-full {{ 'bg-teal' if article.is_consumed_by('video') else 'bg-gray-200' }}"
+                              title="動画: {{ '済' if article.is_consumed_by('video') else '未' }}"></span>
+                        <span class="w-2 h-2 rounded-full {{ 'bg-teal' if article.is_consumed_by('x') else 'bg-gray-200' }}"
+                              title="X: {{ '済' if article.is_consumed_by('x') else '未' }}"></span>
+                    </span>
                 </div>
                 {% if article.summary %}
                 <p class="text-gray-600 text-sm mt-2 line-clamp-2">

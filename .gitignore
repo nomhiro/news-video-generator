@@ -55,6 +55,8 @@ output/audio/*
 output/images/*
 output/videos/*
 output/scripts/*
+# 画像カードの生成先（config.output_dir / "cards"）。X 投稿ごとに1枚増える
+output/cards/*
 !output/**/.gitkeep
 
 # Logs

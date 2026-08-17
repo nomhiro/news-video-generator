@@ -193,6 +193,9 @@ class ImageGenerator:
         output_dir: Path,
         language: str = "ja",
         video_format: str = "short",
+        *,
+        size: str | None = None,
+        enhance: bool = True,
     ) -> list[Path]:
         """複数のプロンプトから画像を生成する。
 
@@ -205,6 +208,19 @@ class ImageGenerator:
             output_dir: 出力ディレクトリ
             language: 言語コード ("ja" or "en")
             video_format: 動画形式 ("short", "tiktok", "long")
+            size: 生成サイズを直接指定する。画像カードのような
+                video_format という概念を持たない呼び出し元向け。
+                省略時は video_format から導出する（既定動作は変えない）
+            enhance: `_enhance_prompt` による装飾を適用するか。
+                `_enhance_prompt` は**動画用の1行シーン記述**を飾るための
+                ものであり、「縦長構図で」「テキストは描くな」を付け足す。
+                画像カード（`build_card_prompt`）のように medium / palette /
+                composition / constraints を自分で書き切った完結済みの
+                プロンプトに重ねると、矛盾した指示が1つの文字列に混ざる
+                （例: 1024x1024 を要求しているのに「縦長構図」を付け足す、
+                「このラベルの文字を描け」の直後に「テキストは描くな」を
+                付け足す）。完結済みのプロンプトを渡す呼び出し元は
+                `enhance=False` にする。既定は True（既存動作を変えない）
 
         Returns:
             List[Path]: 生成された画像ファイルのパスリスト（prompts と同じ順序）
@@ -215,7 +231,7 @@ class ImageGenerator:
         if not prompts:
             raise ImageGenerationError("画像生成プロンプトが空です")
 
-        size = self._size_for_format(video_format)
+        size = size or self._size_for_format(video_format)
         validate_size(size)  # 定数の取り違えを起動時に検出する
 
         format_labels = {
@@ -234,9 +250,11 @@ class ImageGenerator:
         # 順序を保つため index を持ち回す
         def task(indexed: tuple[int, str]) -> Path:
             index, prompt = indexed
-            enhanced_prompt = self._enhance_prompt(prompt, language, video_format)
+            final_prompt = (
+                self._enhance_prompt(prompt, language, video_format) if enhance else prompt
+            )
             output_path = output_dir / f"image_{index:03d}.png"
-            return self._generate_single(enhanced_prompt, output_path, size, index)
+            return self._generate_single(final_prompt, output_path, size, index)
 
         workers = min(self.max_concurrency, len(prompts))
         with ThreadPoolExecutor(max_workers=workers) as executor:

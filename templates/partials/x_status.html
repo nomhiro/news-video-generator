@@ -1,0 +1,80 @@
+<!--
+  自動投稿の状態、概算コスト、認証の有無。
+
+  未認証のときに画面から完結する再認証ボタンは出さない。X の PKCE
+  フローはブラウザのリダイレクトを要求し、コンテナの中では完結できない
+  （YouTube の InstalledAppFlow と同じ理由）。代わりに、ローカルで
+  認証してから push_tokens で送る手順を案内する。
+
+  **このフラグメントに id を付けない。** 置き場所（#x-status-panel）は
+  呼び出し側の index.html が持つ。以前はここが x-status という id を持ち、
+  本文の呼び出し側にも同じ id があったため文書内に2つ存在した。htmx は
+  最初の一致にしか入れ替えを行わないので、スイッチを切り替えても本文
+  パネルは古い状態を映したまま残った（非常停止のスイッチが「効いて
+  いないように見える」のが最悪の結果）。
+-->
+<div class="rounded-lg bg-raised border border-ink/10 p-4 space-y-3">
+    <div class="flex items-center justify-between gap-3">
+        <span class="font-display font-semibold text-ink text-sm">自動投稿</span>
+        <div class="flex items-center gap-2 text-xs">
+            {# 予算上限に達している間は、スイッチが有効でもワーカーは
+               送信しない（行は SCHEDULED のまま残る）。スイッチの語だけを
+               見せると「稼働中なのに出ない」ことの説明が画面から消える。 #}
+            <span class="{{ 'text-vermilion' if enabled and over_budget
+                            else ('text-teal' if enabled else 'text-ink/50') }} font-medium">
+                {% if enabled and over_budget %}
+                予算上限で停止中
+                {% else %}
+                {{ "稼働中" if enabled else "停止中" }}
+                {% endif %}
+            </span>
+            <form hx-post="/x/enabled" hx-target="#x-status-panel" hx-swap="innerHTML">
+                <input type="hidden" name="enabled" value="{{ 'false' if enabled else 'true' }}">
+                <button type="submit"
+                        class="px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
+                               focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
+                    {{ "停止する" if enabled else "有効にする" }}
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <div class="text-xs text-ink/70">
+        今月の概算コスト
+        <span class="tnum font-semibold text-ink">${{ "%.2f" | format(spent_usd) }}</span>
+        / ${{ "%.2f" | format(budget_usd) }}
+        {% if over_budget %}
+        <span class="text-vermilion font-semibold ml-1">
+            予算超過（予約は残しています）
+        </span>
+        {% endif %}
+    </div>
+
+    <div class="text-xs">
+        {% if authenticated %}
+        <span class="text-teal">X 認証済み</span>
+        {% else %}
+        <div class="text-vermilion space-y-1">
+            <p>X が未認証です。この画面から再認証はできません。次の手順でお願いします。</p>
+            <ol class="list-decimal list-inside text-ink/70 space-y-0.5">
+                <li>ローカル環境で X の認証を実行する</li>
+                <li>認証できたら次を実行してトークンを送る:
+                    <code class="tnum bg-ink/5 px-1 rounded">uv run python -m scripts.push_tokens</code>
+                </li>
+            </ol>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+{#
+  ヘッダーも同時に書き換える（out-of-band swap）。
+
+  スイッチを切り替えたときにパネルだけが変わってヘッダーが古い状態を
+  映していると、「押したのに効いていない」ように見える。ヘッダーは
+  60秒ポーリングなので放置すると最大1分ずれる。非常停止のスイッチで
+  それは許容できない。
+#}
+<div id="header-x-status" hx-swap-oob="innerHTML">
+    {% include "partials/x_status_header.html" %}
+</div>

@@ -101,3 +101,101 @@ def test_upper_case_x_is_accepted() -> None:
 def test_size_for_format(video_format: str, expected: str) -> None:
     generator = ImageGenerator.__new__(ImageGenerator)  # API 接続なしでメソッドだけ検証
     assert generator._size_for_format(video_format) == expected
+
+
+def _stub_generator(monkeypatch: pytest.MonkeyPatch) -> tuple[ImageGenerator, list[str]]:
+    """`_generate_single` を差し替えて、渡された size だけを記録する。
+
+    `generate_batch` は ThreadPoolExecutor 経由で `_generate_single` を呼ぶため、
+    実 API を呼ばずに「どの size が使われたか」だけを確かめられる。
+    """
+    generator = ImageGenerator.__new__(ImageGenerator)  # API 接続なしで組み立てる
+    generator.max_concurrency = 1
+    captured: list[str] = []
+
+    def fake_generate_single(self: ImageGenerator, prompt: str, output_path, size: str, index: int):
+        captured.append(size)
+        output_path.write_bytes(b"fake")
+        return output_path
+
+    monkeypatch.setattr(ImageGenerator, "_generate_single", fake_generate_single)
+    return generator, captured
+
+
+def test_generate_batch_は_video_format_からサイズを導出する(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """既定動作（size 省略時）を変えていないことを確かめる。"""
+    generator, captured = _stub_generator(monkeypatch)
+
+    generator.generate_batch(["p"], tmp_path, video_format="long")
+
+    assert captured == [SPECS[VideoFormat.LONG].image_size]
+
+
+def test_generate_batch_は_size_指定を_video_format_より優先する(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """画像カードは video_format という概念を持たないため、
+    直接サイズを渡せる必要がある（video_format の既定値 "short" が
+    有効になってはいけない）。
+    """
+    generator, captured = _stub_generator(monkeypatch)
+
+    generator.generate_batch(["p"], tmp_path, size="1024x1024")
+
+    assert captured == ["1024x1024"]
+
+
+def _stub_generator_capturing_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[ImageGenerator, list[str]]:
+    """`_request_image` を差し替えて、実際に API へ渡る最終文字列を記録する。
+
+    `_enhance_prompt` は `_generate_single` の手前（`task()` クロージャの中）で
+    適用されるため、装飾後の文字列を見るには `_generate_single` ではなく
+    `_request_image` の境界で捕まえる必要がある。
+    """
+    generator = ImageGenerator.__new__(ImageGenerator)  # API 接続なしで組み立てる
+    generator.max_concurrency = 1
+    captured: list[str] = []
+
+    def fake_request_image(self: ImageGenerator, prompt: str, size: str, index: int) -> bytes:
+        captured.append(prompt)
+        return b"fake"
+
+    monkeypatch.setattr(ImageGenerator, "_request_image", fake_request_image)
+    return generator, captured
+
+
+def test_generate_batch_は_enhance_False_で動画用の装飾を付けない(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """画像カード（`CARD_STYLE_PROMPT`）は既に完結した指示を持つ。
+
+    `_enhance_prompt` は動画用の1行シーン記述を飾るためのもので、
+    完結済みのプロンプトに重ねると矛盾した指示が1つの文字列に混ざる
+    （縦長構図の指示 vs 1024x1024、「ラベルの文字を描け」vs
+    「テキストは描くな」）。`enhance=False` はこの重ね書きを止める。
+    """
+    generator, captured = _stub_generator_capturing_prompt(monkeypatch)
+    card_prompt = 'Labels: render exactly these words, "CACHE", in a small hand-lettered font.'
+
+    generator.generate_batch([card_prompt], tmp_path, size="1024x1024", enhance=False)
+
+    assert captured == [card_prompt]
+    assert "Do not render any text" not in captured[0]
+    assert "Vertical portrait" not in captured[0]
+    assert "Horizontal landscape" not in captured[0]
+
+
+def test_generate_batch_は_既定で動画用の装飾を付ける(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """既定動作（`enhance` 省略時）を変えていないことの確認。"""
+    generator, captured = _stub_generator_capturing_prompt(monkeypatch)
+
+    generator.generate_batch(["a scene"], tmp_path, video_format="short")
+
+    assert "Do not render any text" in captured[0]
+    assert "Vertical portrait" in captured[0]

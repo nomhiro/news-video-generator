@@ -70,7 +70,23 @@ package = false
 [tool.ruff]
 line-length = 100  # 既存コードの実測: p99=86、100超は27行
 target-version = "py313"
-extend-exclude = [".venv", "output", "data"]
+extend-exclude = [
+    ".venv",
+    "output",
+    "data",
+    # Markdown を整形対象から外す。
+    #
+    # ruff 0.16 は `.md` 内の Python コードブロックを既定で整形する。
+    # このリポジトリの Markdown に載っているコードは**抜粋**で、
+    # クラスのメソッドをインデントごと切り出したものが多い。ruff は各ブロックを
+    # 独立したモジュールとみなすため、`self` を取るメソッドがモジュール関数の形に
+    # de-indent され、ドキュメントの内容が壊れる（実際に docs/superpowers の
+    # 実装計画が書き換えられ、そこから切り出した作業指示が誤ったコードになった）。
+    #
+    # 加えて `ruff format --check .` が必ず失敗するため、.githooks/pre-push が
+    # 通らず push できなくなる。
+    "*.md",
+]
 
 [tool.ruff.lint]
 select = [

@@ -1,0 +1,33 @@
+<!--
+  ヘッダーに出す状態の点と概算コストだけ。
+
+  設計のワイヤーフレームどおり、ヘッダーは「いま動いているか」「いくら
+  使ったか」の2点に絞る。停止ボタンと再認証の手順は本文パネル
+  （partials/x_status.html）に置く。一日中見えている場所に操作を並べても
+  押す機会は無く、信号が埋もれるだけ。
+
+  **このフラグメントに id を付けない。** 置き場所（#header-x-status）は
+  呼び出し側の base.html が持つ。以前はパネル側が x-status という id を持ち、
+  本文の呼び出し側にも同じ id があったため文書内に2つ存在し、
+  htmx が最初の一致だけを入れ替えていた。
+-->
+<div class="flex items-center gap-3 whitespace-nowrap">
+    <span class="flex items-center gap-1.5">
+        <span class="w-2 h-2 rounded-full {{ 'bg-vermilion' if enabled and over_budget
+                                             else ('bg-teal' if enabled else 'bg-paper/40') }}"
+              aria-hidden="true"></span>
+        <span class="{{ 'text-paper' if enabled else 'text-paper/60' }}">
+            {% if enabled and over_budget %}
+            自動投稿 予算上限で停止中
+            {% else %}
+            自動投稿 {{ "稼働中" if enabled else "停止中" }}
+            {% endif %}
+        </span>
+    </span>
+    <span class="tnum {{ 'text-vermilion' if over_budget else 'text-paper/60' }}">
+        概算 ${{ "%.2f" | format(spent_usd) }} / ${{ "%.2f" | format(budget_usd) }}
+    </span>
+    {% if not authenticated %}
+    <span class="text-vermilion">未認証</span>
+    {% endif %}
+</div>
