@@ -113,3 +113,66 @@ def test_allocation_rejects_too_few_segments() -> None:
     """
     with pytest.raises(ValueError, match="構成パート数を下回っています"):
         segment_allocation(4)
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_prompt_has_no_unreplaced_tokens(video_format: str, language: str) -> None:
+    """差し込みトークンが全部置換されていること。
+
+    残ると `<<SCENES_SPEC>>` という文字列がそのままモデルに渡り、
+    シーンの指示が一切効かないまま動く（気付きにくい）。
+    """
+    prompt = _prompt(language, video_format)
+    assert "<<" not in prompt, f"{language}/{video_format} に未置換のトークンがある"
+
+
+def test_scenes_example_has_one_entry_per_segment() -> None:
+    """例の要素数が形式のセグメント数と一致すること。
+
+    プロンプトに個数を直接書くと仕様とずれる（formats.py 冒頭の教訓）。
+    """
+    spec = get_spec("long")
+    example = ScriptGenerator._scenes_example(spec)
+    assert example.count('"layout"') == spec.segment_count
+
+
+def test_scenes_spec_states_the_statement_limit() -> None:
+    """statement の上限が指示文に出ていること。
+
+    `str(segment_count // 2)` を素の数字だけで検査すると、"3つから選ぶ"
+    のような無関係な箇所の数字と衝突して、上限の記述が無くても通ってしまう
+    （short は segment_count // 2 == 3 で、layout の選択肢が3つある）。
+    フレーズ全体で検査する。
+    """
+    spec = get_spec("short")
+    text = ScriptGenerator._scenes_spec("ja", spec)
+    limit = spec.segment_count // 2
+    assert f"最大{limit}個" in text
+
+
+def test_ungrounded_scene_numbers_flags_invented_figures(draft_factory) -> None:
+    """記事に無い数値がラベルに入っていたら検出すること。
+
+    カードでは記事に無い ¥980 が絵に描かれた（880c95f）。あちらは画像なので
+    機械的に検査できなかったが、シーンのラベルはデータなので突き合わせられる。
+    """
+    draft = draft_factory(
+        scenes=[
+            {"layout": "compare", "items": ["50%", "従来"]},
+            {"layout": "flow", "items": ["入力", "選択"]},
+            {"layout": "statement", "items": []},
+        ]
+    )
+    assert ScriptGenerator._ungrounded_scene_numbers(draft, "記事本文に数値は無い") == {"50"}
+
+
+def test_grounded_scene_numbers_pass(draft_factory) -> None:
+    """記事にある数値だけなら合格すること。"""
+    draft = draft_factory(
+        scenes=[
+            {"layout": "compare", "items": ["50%", "従来"]},
+            {"layout": "flow", "items": ["入力", "選択"]},
+            {"layout": "statement", "items": []},
+        ]
+    )
+    assert ScriptGenerator._ungrounded_scene_numbers(draft, "精度は50%向上した") == set()

@@ -16,7 +16,9 @@ from tenacity import (
 )
 
 from src.models.formats import FormatSpec, get_spec
+from src.models.scene import ITEMS_PER_LAYOUT, MAX_LABEL_CHARS, SceneLayout
 from src.models.script import Script, ScriptDraft
+from src.utils.grounding import ungrounded_numbers
 from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
@@ -102,6 +104,15 @@ class ScriptGenerator:
     # （short/tiktok は6、long は10で異なる）。
     STRUCTURE_SPEC_TOKEN = "<<STRUCTURE_SPEC>>"
 
+    # プロンプト内でシーンの指示を差し込む位置。
+    # レイアウトの種類と要素数は models/scene.py が単一の情報源なので、
+    # プロンプト側には値を書かない（書くと定義とずれる）。
+    SCENES_SPEC_TOKEN = "<<SCENES_SPEC>>"
+
+    # 出力例の scenes 配列を差し込む位置。
+    # 要素数は segment_count から作る（short/tiktok は6、long は10）。
+    SCENES_EXAMPLE_TOKEN = "<<SCENES_EXAMPLE>>"
+
     SYSTEM_PROMPT_JA = """<role>
 あなたはYouTube ShortsやTikTok向けのニュース解説動画の台本ライターです。
 </role>
@@ -111,10 +122,11 @@ class ScriptGenerator:
 </task>
 
 <critical_constraints>
-【最重要】以下の3つの配列は必ず6個ずつ生成してください：
+【最重要】以下の4つの配列は必ず6個ずつ生成してください：
 - image_prompts: 6個
 - text_overlays: 6個
 - segment_narrations: 6個
+- scenes: 6個
 
 配列の要素数が1つでも異なると動画生成が失敗します。
 各要素は空文字列("")にしないでください。必ず内容のあるテキストを入れてください。
@@ -127,6 +139,7 @@ class ScriptGenerator:
 - title: 40文字程度（【】や！で注目を集める、数字や疑問形を活用）
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
 - hashtags: 5〜8個（"shorts"は必須）
+- scenes: <<SCENES_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -169,6 +182,7 @@ class ScriptGenerator:
         "画像5用テキスト（15-25文字）",
         "画像6用テキスト（15-25文字）"
     ],
+    "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 35
 }
 </output_format>
@@ -179,6 +193,7 @@ class ScriptGenerator:
 2. image_prompts が正確に6個あること
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
+5. scenes が正確に6個あること
 </verification>"""
 
     SYSTEM_PROMPT_LONG_JA = """<role>
@@ -190,10 +205,11 @@ class ScriptGenerator:
 </task>
 
 <critical_constraints>
-【最重要】以下の3つの配列は必ず10個ずつ生成してください：
+【最重要】以下の4つの配列は必ず10個ずつ生成してください：
 - image_prompts: 10個
 - text_overlays: 10個
 - segment_narrations: 10個
+- scenes: 10個
 
 配列の要素数が1つでも異なると動画生成が失敗します。
 各要素は空文字列("")にしないでください。必ず内容のあるテキストを入れてください。
@@ -208,6 +224,7 @@ class ScriptGenerator:
 - title: 50〜60文字程度（【完全解説】【徹底分析】など）
 - description: 要約＋絵文字、タイムスタンプ、📌でポイント、💬でCTA、ハッシュタグ
 - hashtags: 5〜10個
+- scenes: <<SCENES_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -262,6 +279,7 @@ class ScriptGenerator:
         "画像9用テキスト（20-30文字）",
         "画像10用テキスト（20-30文字）"
     ],
+    "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 300
 }
 </output_format>
@@ -272,6 +290,7 @@ class ScriptGenerator:
 2. image_prompts が正確に10個あること
 3. text_overlays が正確に10個あること
 4. 全ての要素が空文字列でないこと
+5. scenes が正確に10個あること
 </verification>"""
 
     SYSTEM_PROMPT_EN = """<role>
@@ -283,10 +302,11 @@ Create a script for a short video (about 35 seconds) based on the given news top
 </task>
 
 <critical_constraints>
-CRITICAL: The following 3 arrays MUST have exactly 6 elements each:
+CRITICAL: The following 4 arrays MUST have exactly 6 elements each:
 - image_prompts: 6 elements
 - text_overlays: 6 elements
 - segment_narrations: 6 elements
+- scenes: 6 elements
 
 Video generation will FAIL if array counts differ.
 Each element MUST NOT be an empty string. Always include meaningful content.
@@ -299,6 +319,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - title: Around 50 characters (use attention-grabbing words like SHOCKING, BREAKING)
 - description: Line 1 summary + emoji, 📌 for bullet points, 💬 for CTA, end with hashtags
 - hashtags: 5-8 tags (must include "shorts")
+- scenes: <<SCENES_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -341,6 +362,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 5 text (8-15 words)",
         "Image 6 text (8-15 words)"
     ],
+    "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 35
 }
 </output_format>
@@ -351,6 +373,7 @@ Before output, verify:
 2. image_prompts has exactly 6 elements
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
+5. scenes has exactly 6 elements
 </verification>"""
 
     SYSTEM_PROMPT_LONG_EN = """<role>
@@ -362,10 +385,11 @@ Create a script for a long-form video (about 5 minutes) based on the given news 
 </task>
 
 <critical_constraints>
-CRITICAL: The following 3 arrays MUST have exactly 10 elements each:
+CRITICAL: The following 4 arrays MUST have exactly 10 elements each:
 - image_prompts: 10 elements
 - text_overlays: 10 elements
 - segment_narrations: 10 elements
+- scenes: 10 elements
 
 Video generation will FAIL if array counts differ.
 Each element MUST NOT be an empty string. Always include meaningful content.
@@ -380,6 +404,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - title: Around 60-70 characters (EXPLAINED, DEEP DIVE, FULL ANALYSIS)
 - description: Summary + emoji, timestamps, 📌 for bullet points, 💬 for CTA, hashtags
 - hashtags: 5-10 tags
+- scenes: <<SCENES_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -434,6 +459,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 9 text (10-20 words)",
         "Image 10 text (10-20 words)"
     ],
+    "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 300
 }
 </output_format>
@@ -444,6 +470,7 @@ Before output, verify:
 2. image_prompts has exactly 10 elements
 3. text_overlays has exactly 10 elements
 4. No element is an empty string
+5. scenes has exactly 10 elements
 </verification>"""
 
     SYSTEM_PROMPT_TIKTOK_JA = """<role>
@@ -456,10 +483,11 @@ TikTokの収益化には60秒以上の動画が必要です。
 </task>
 
 <critical_constraints>
-【最重要】以下の3つの配列は必ず6個ずつ生成してください：
+【最重要】以下の4つの配列は必ず6個ずつ生成してください：
 - image_prompts: 6個
 - text_overlays: 6個
 - segment_narrations: 6個
+- scenes: 6個
 
 配列の要素数が1つでも異なると動画生成が失敗します。
 各要素は空文字列("")にしないでください。必ず内容のあるテキストを入れてください。
@@ -472,6 +500,7 @@ TikTokの収益化には60秒以上の動画が必要です。
 - title: 40文字程度（【】や！で注目を集める、数字や疑問形を活用）
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
 - hashtags: 5〜8個（"TikTok"と"ニュース"は必須）
+- scenes: <<SCENES_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -514,6 +543,7 @@ TikTokの収益化には60秒以上の動画が必要です。
         "画像5用テキスト（15-25文字）",
         "画像6用テキスト（15-25文字）"
     ],
+    "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 75
 }
 </output_format>
@@ -524,7 +554,8 @@ TikTokの収益化には60秒以上の動画が必要です。
 2. image_prompts が正確に6個あること
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
-5. segment_narrations の合計が500〜650文字の範囲内であること
+5. scenes が正確に6個あること
+6. segment_narrations の合計が500〜650文字の範囲内であること
 </verification>"""
 
     SYSTEM_PROMPT_TIKTOK_EN = """<role>
@@ -537,10 +568,11 @@ TikTok requires videos over 60 seconds for monetization.
 </task>
 
 <critical_constraints>
-CRITICAL: The following 3 arrays MUST have exactly 6 elements each:
+CRITICAL: The following 4 arrays MUST have exactly 6 elements each:
 - image_prompts: 6 elements
 - text_overlays: 6 elements
 - segment_narrations: 6 elements
+- scenes: 6 elements
 
 Video generation will FAIL if array counts differ.
 Each element MUST NOT be an empty string. Always include meaningful content.
@@ -553,6 +585,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - title: Around 50 characters (use attention-grabbing words like SHOCKING, BREAKING)
 - description: Line 1 summary + emoji, 📌 for bullet points, 💬 for CTA, end with hashtags
 - hashtags: 5-8 tags (must include "TikTok" and "news")
+- scenes: <<SCENES_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -595,6 +628,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 5 text (8-15 words)",
         "Image 6 text (8-15 words)"
     ],
+    "scenes": <<SCENES_EXAMPLE>>,
     "estimated_duration": 75
 }
 </output_format>
@@ -605,7 +639,8 @@ Before output, verify:
 2. image_prompts has exactly 6 elements
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
-5. The segment_narrations total 250-350 words
+5. scenes has exactly 6 elements
+6. The segment_narrations total 250-350 words
 </verification>"""
 
     def __init__(self, endpoint: str, api_key: str, deployment: str):
@@ -690,6 +725,21 @@ Before output, verify:
                 # 最終試行でも収まらなければ、生成を止めるより
                 # 長いまま進める方が実用的。警告だけ残す。
                 log_warning(f"分量が範囲外のまま採用します: {problem}")
+
+            # 数値の根拠の検査。**分量と違い、最終試行でも通さない。**
+            # 記事に無い数値が画面に描かれるのは、ニュースを扱う以上
+            # 最も害が大きい種類の誤りで、警告して採用する選択肢が無い。
+            ungrounded = self._ungrounded_scene_numbers(draft, news_topic)
+            if ungrounded:
+                last_problem = f"シーンのラベルに記事にない数値があります: {sorted(ungrounded)}"
+                if remaining:
+                    log_warning(
+                        f"数値の根拠が無い（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
+                        f"再生成します: {last_problem}"
+                    )
+                    continue
+                log_error(f"台本の検証に失敗: {last_problem}")
+                raise ScriptGenerationError(f"生成された台本が不正です: {last_problem}")
 
             # full_narration はセグメントの連結で導出される。
             # estimated_duration はモデルの自己申告ではなく文字数から推定する。
@@ -793,12 +843,23 @@ Before output, verify:
         # 分量と構成の指示はプロンプトに埋め込まず、formats.py から生成する。
         # ハードコードしていると仕様と指示がずれる（実際にずれていた）。
         spec = get_spec(video_format)
-        return template.replace(
-            cls.NARRATION_SPEC_TOKEN,
-            cls._narration_spec(language, spec),
-        ).replace(
-            cls.STRUCTURE_SPEC_TOKEN,
-            cls._structure_spec(language, spec),
+        return (
+            template.replace(
+                cls.NARRATION_SPEC_TOKEN,
+                cls._narration_spec(language, spec),
+            )
+            .replace(
+                cls.STRUCTURE_SPEC_TOKEN,
+                cls._structure_spec(language, spec),
+            )
+            .replace(
+                cls.SCENES_SPEC_TOKEN,
+                cls._scenes_spec(language, spec),
+            )
+            .replace(
+                cls.SCENES_EXAMPLE_TOKEN,
+                cls._scenes_example(spec),
+            )
         )
 
     @staticmethod
@@ -925,3 +986,101 @@ Before output, verify:
             f"two segments (this happens when a segment drops below "
             f"{spec.words_per_segment[0]} words)."
         )
+
+    @staticmethod
+    def _scenes_spec(language: str, spec: FormatSpec) -> str:
+        """シーンの指示文を `models/scene.py` の定義から組み立てる。
+
+        レイアウト名・要素数・statement の上限をプロンプトに直接書かない。
+        書くとスキーマの定義とプロンプトがずれる（`formats.py` の冒頭に
+        書いてある失敗そのもの）。
+
+        Args:
+            language: 言語コード
+            spec: 形式の仕様
+
+        Returns:
+            str: プロンプトに差し込む指示
+        """
+        statement_limit = spec.segment_count // 2
+        compare_items = ITEMS_PER_LAYOUT[SceneLayout.COMPARE]
+
+        if language == "ja":
+            return (
+                f"各セグメントに対応する図解の構造を{spec.segment_count}個。"
+                f"layout は次の3つから選ぶ。\n"
+                f"  - compare: 対比する2つを並べる。items を{compare_items}個\n"
+                f"  - flow: 原因 → 結果を矢印で繋ぐ。items を{compare_items}個\n"
+                f"  - statement: 図なし。見出しだけを見せる。items は空配列\n"
+                f"items は図に入れる**日本語の名札**で、各{MAX_LABEL_CHARS}文字以内。"
+                f"説明文を入れてはならない（名札であって文ではない）。\n"
+                f"**statement は最大{statement_limit}個まで。** 図が無いシーンばかりだと"
+                f"静止画を並べただけの動画に戻る。フックと結論に使い、"
+                f"本体は compare か flow にする。\n"
+                f"**items に数値を書くときは、記事本文に出てくる数値だけを使うこと。**"
+                f"価格・割合・日付・バージョン番号・件数を自分で作ってはならない"
+                f"（検査で弾かれて再生成になる）。"
+            )
+        return (
+            f"Provide {spec.segment_count} scene structures, one per segment. "
+            f"Choose layout from exactly these three:\n"
+            f"  - compare: two things side by side. Exactly {compare_items} items\n"
+            f"  - flow: cause -> effect joined by an arrow. Exactly {compare_items} items\n"
+            f"  - statement: no diagram, headline only. items must be an empty array\n"
+            f"items are short Japanese name tags drawn inside the diagram, "
+            f"each at most {MAX_LABEL_CHARS} characters. Never put a sentence there.\n"
+            f"**At most {statement_limit} statement scenes.** Too many turns the video "
+            f"back into a slideshow. Use them for the hook and the conclusion; "
+            f"make the body compare or flow.\n"
+            f"**Any number in items MUST appear in the source article.** Never invent "
+            f"prices, percentages, dates, version numbers, or counts "
+            f"(the check rejects them and forces a regeneration)."
+        )
+
+    @staticmethod
+    def _scenes_example(spec: FormatSpec) -> str:
+        """出力例の scenes 配列を組み立てる。
+
+        要素数を `segment_count` から作る。プロンプトに固定で書くと、
+        形式ごとに数が違う（short/tiktok は6、long は10）ため必ずずれる。
+
+        Args:
+            spec: 形式の仕様
+
+        Returns:
+            str: JSON 配列の文字列（`<output_format>` に差し込む）
+        """
+        n = spec.segment_count
+        entries: list[str] = []
+        for i in range(n):
+            if i == 0 or i == n - 1:
+                # フックと結論は図なしにするのが自然
+                entries.append('        {"layout": "statement", "items": []}')
+            elif i % 2 == 1:
+                entries.append('        {"layout": "compare", "items": ["名札A", "名札B"]}')
+            else:
+                entries.append('        {"layout": "flow", "items": ["原因", "結果"]}')
+        return "[\n" + ",\n".join(entries) + "\n    ]"
+
+    @staticmethod
+    def _ungrounded_scene_numbers(draft: ScriptDraft, news_topic: str) -> set[str]:
+        """シーンのラベルに、記事に根拠が無い数値が無いか調べる。
+
+        カードでは「画像側は機械的に検査できないのでスタイル文で閉じた」
+        （880c95f。記事に無い ¥980 が絵の小物に描かれた）。Remotion では
+        **描く文字がデータなので突き合わせられる**ので、検査で閉じる。
+
+        スキーマ側（`SceneVisual`）では検査できない。`ScriptDraft` が
+        `language` を持たないのと同じ理由で、記事本文を持たないため。
+
+        Args:
+            draft: 検証する下書き
+            news_topic: モデルに渡した記事のテキスト（タイトル＋本文）
+
+        Returns:
+            set[str]: 根拠の無い数値。空なら合格
+        """
+        labels = " ".join(item for scene in draft.scenes for item in scene.items)
+        if not labels.strip():
+            return set()
+        return ungrounded_numbers(labels, news_topic)
