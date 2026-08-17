@@ -236,3 +236,16 @@ def test_検証に失敗したら理由を伝えて引き直す() -> None:
     assert len(prompts) == 2, "引き直していない"
     assert prompts[0] != prompts[1], "同じプロンプトを送り直している"
     assert "検証を通らなかった" in prompts[1]
+
+
+def test_画像に数値を捏造させない指示が入っている():
+    """数値の grounding 検査は投稿本文だけを見ており、画像内の文字は見ていない。
+
+    実際に踏んだ（2026-08-17 の初回投稿）: 記事に無い「¥980」という価格が
+    ゲームの箱に描かれた。イラストの小物とはいえ、ニュースを扱うアカウントで
+    記事に無い数値が絵に出るのは、本文で厳しく防いでいることの抜け道になる。
+    画像側は検査できないので、プロンプトで閉じるしかない。
+    """
+    assert "Do NOT invent any figure" in CARD_STYLE_PROMPT
+    for word in ("prices", "percentages", "dates", "version"):
+        assert word in CARD_STYLE_PROMPT, word

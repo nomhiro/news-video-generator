@@ -73,7 +73,9 @@ Typography: every word in this image MUST be Japanese, rendered accurately and
   handful of short labels and at most one caption line.
 Constraints: no watermark, no logos, no UI chrome, no photorealism. Do not
   depict any real, identifiable person; use simple silhouettes if a figure is
-  needed."""
+  needed. Do NOT invent any figure: no prices, percentages, dates, version
+  numbers, counts, or statistics beyond the words given in Labels and Caption.
+  If a quantity is not supplied to you, draw the idea without a number."""
 
 
 class CardVisual(BaseModel):
