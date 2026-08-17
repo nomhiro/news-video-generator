@@ -18,7 +18,7 @@ import pytest
 
 from src.generators.script_generator import ScriptGenerator, chapter_labels, segment_allocation
 from src.models.formats import SPECS, VideoFormat, get_spec
-from src.models.script import MAX_HEADLINE_CHARS
+from src.models.script import MAX_HEADLINE_CHARS, MAX_ILLUSTRATION_SUBJECT_CHARS
 
 FORMATS = ["short", "tiktok", "long"]
 LANGUAGES = ["ja", "en"]
@@ -40,6 +40,7 @@ def test_no_placeholder_token_remains(video_format: str, language: str) -> None:
     prompt = _prompt(language, video_format)
     assert ScriptGenerator.NARRATION_SPEC_TOKEN not in prompt
     assert ScriptGenerator.STRUCTURE_SPEC_TOKEN not in prompt
+    assert ScriptGenerator.ILLUSTRATION_SPEC_TOKEN not in prompt
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
@@ -162,6 +163,59 @@ def test_overlay_instruction_states_the_enforced_limit(video_format: str, langua
     """
     prompt = _prompt(language, video_format)
     assert str(MAX_HEADLINE_CHARS) in prompt
+
+
+# --------------------------------------------------------------------------
+# illustration_subject（Remotion レンダラが動画全体で共有する挿絵の主題）
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_illustration_instruction_is_injected(video_format: str, language: str) -> None:
+    """挿絵の主題を出させる指示が実際に入っていること。"""
+    prompt = _prompt(language, video_format)
+    assert "illustration_subject" in prompt
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_illustration_instruction_states_the_enforced_limit(
+    video_format: str, language: str
+) -> None:
+    """上限が、実際に検査している値としてプロンプトに出ていること。
+
+    `_overlay_spec` と同じ理由で、数値をプロンプトに直接書かず
+    `MAX_ILLUSTRATION_SUBJECT_CHARS` から作る。
+    """
+    prompt = _prompt(language, video_format)
+    assert str(MAX_ILLUSTRATION_SUBJECT_CHARS) in prompt
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_illustration_instruction_forbids_style_words(video_format: str, language: str) -> None:
+    """スタイル語（画材・配色・技法）を書かせないこと。
+
+    スタイルは固定のスタイル文（`ILLUSTRATION_STYLE_PROMPT`）としてコード側が
+    前置する。モデルが同時に画材や配色を指示すると、`CardVisual` の
+    `enhance=False` の教訓（1024x1024 を要求しつつ「9:16 縦構図で」と
+    矛盾する指示が1つのプロンプトに混ざった）と同じ壊れ方をする。
+    """
+    prompt = _prompt(language, video_format)
+    illustration_rule = prompt.split("illustration_subject")[1].split("\n")[0]
+    if language == "ja":
+        assert "スタイル" in illustration_rule or "画材" in illustration_rule
+    else:
+        assert "style" in illustration_rule.lower() or "medium" in illustration_rule.lower()
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_output_example_includes_illustration_subject(video_format: str, language: str) -> None:
+    """JSON 例に必須フィールドが載っていること。
+
+    例に無いとモデルは例に寄せた出力をして、スキーマ違反で再試行になる。
+    """
+    prompt = _prompt(language, video_format)
+    example = prompt.split("<output_format>")[1].split("</output_format>")[0]
+    assert '"illustration_subject"' in example
 
 
 def test_overlay_examples_do_not_restate_the_limit() -> None:

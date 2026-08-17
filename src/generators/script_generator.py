@@ -17,7 +17,12 @@ from tenacity import (
 
 from src.models.formats import FormatSpec, get_spec
 from src.models.scene import ITEMS_PER_LAYOUT, MAX_LABEL_CHARS, MAX_RELATION_CHARS, SceneLayout
-from src.models.script import MAX_HEADLINE_CHARS, Script, ScriptDraft
+from src.models.script import (
+    MAX_HEADLINE_CHARS,
+    MAX_ILLUSTRATION_SUBJECT_CHARS,
+    Script,
+    ScriptDraft,
+)
 from src.utils.grounding import ungrounded_numbers
 from src.utils.logger import log_error, log_step, log_success, log_warning
 
@@ -180,6 +185,11 @@ class ScriptGenerator:
     # 要素数は segment_count から作る（short/tiktok は6、long は10）。
     SCENES_EXAMPLE_TOKEN = "<<SCENES_EXAMPLE>>"
 
+    # プロンプト内で挿絵（illustration_subject）の指示を差し込む位置。
+    # 上限は models/script.py の MAX_ILLUSTRATION_SUBJECT_CHARS が単一の
+    # 情報源なので、プロンプト側には値を書かない。
+    ILLUSTRATION_SPEC_TOKEN = "<<ILLUSTRATION_SPEC>>"
+
     SYSTEM_PROMPT_JA = """<role>
 あなたはYouTube ShortsやTikTok向けのニュース解説動画の台本ライターです。
 </role>
@@ -207,6 +217,7 @@ class ScriptGenerator:
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
 - hashtags: 5〜8個（"shorts"は必須）
 - scenes: <<SCENES_SPEC>>
+- illustration_subject: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -250,6 +261,7 @@ class ScriptGenerator:
         "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
+    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
     "estimated_duration": 35
 }
 </output_format>
@@ -261,6 +273,7 @@ class ScriptGenerator:
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に6個あること
+6. illustration_subject が英語1文で、スタイル語（画材・配色・技法）を含まないこと
 </verification>"""
 
     SYSTEM_PROMPT_LONG_JA = """<role>
@@ -292,6 +305,7 @@ class ScriptGenerator:
 - description: 要約＋絵文字、タイムスタンプ、📌でポイント、💬でCTA、ハッシュタグ
 - hashtags: 5〜10個
 - scenes: <<SCENES_SPEC>>
+- illustration_subject: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -347,6 +361,7 @@ class ScriptGenerator:
         "画像10用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
+    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
     "estimated_duration": 300
 }
 </output_format>
@@ -358,6 +373,7 @@ class ScriptGenerator:
 3. text_overlays が正確に10個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に10個あること
+6. illustration_subject が英語1文で、スタイル語（画材・配色・技法）を含まないこと
 </verification>"""
 
     SYSTEM_PROMPT_EN = """<role>
@@ -387,6 +403,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - description: Line 1 summary + emoji, 📌 for bullet points, 💬 for CTA, end with hashtags
 - hashtags: 5-8 tags (must include "shorts")
 - scenes: <<SCENES_SPEC>>
+- illustration_subject: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -430,6 +447,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
+    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
     "estimated_duration": 35
 }
 </output_format>
@@ -441,6 +459,7 @@ Before output, verify:
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
 5. scenes has exactly 6 elements
+6. illustration_subject is a single English sentence with no style words (medium, palette, technique)
 </verification>"""
 
     SYSTEM_PROMPT_LONG_EN = """<role>
@@ -472,6 +491,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - description: Summary + emoji, timestamps, 📌 for bullet points, 💬 for CTA, hashtags
 - hashtags: 5-10 tags
 - scenes: <<SCENES_SPEC>>
+- illustration_subject: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -527,6 +547,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 10 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
+    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
     "estimated_duration": 300
 }
 </output_format>
@@ -538,6 +559,7 @@ Before output, verify:
 3. text_overlays has exactly 10 elements
 4. No element is an empty string
 5. scenes has exactly 10 elements
+6. illustration_subject is a single English sentence with no style words (medium, palette, technique)
 </verification>"""
 
     SYSTEM_PROMPT_TIKTOK_JA = """<role>
@@ -568,6 +590,7 @@ TikTokの収益化には60秒以上の動画が必要です。
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
 - hashtags: 5〜8個（"TikTok"と"ニュース"は必須）
 - scenes: <<SCENES_SPEC>>
+- illustration_subject: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -611,6 +634,7 @@ TikTokの収益化には60秒以上の動画が必要です。
         "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
+    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
     "estimated_duration": 75
 }
 </output_format>
@@ -622,7 +646,8 @@ TikTokの収益化には60秒以上の動画が必要です。
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に6個あること
-6. segment_narrations の合計が500〜650文字の範囲内であること
+6. illustration_subject が英語1文で、スタイル語（画材・配色・技法）を含まないこと
+7. segment_narrations の合計が500〜650文字の範囲内であること
 </verification>"""
 
     SYSTEM_PROMPT_TIKTOK_EN = """<role>
@@ -653,6 +678,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - description: Line 1 summary + emoji, 📌 for bullet points, 💬 for CTA, end with hashtags
 - hashtags: 5-8 tags (must include "TikTok" and "news")
 - scenes: <<SCENES_SPEC>>
+- illustration_subject: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -696,6 +722,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
+    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
     "estimated_duration": 75
 }
 </output_format>
@@ -707,7 +734,8 @@ Before output, verify:
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
 5. scenes has exactly 6 elements
-6. The segment_narrations total 250-350 words
+6. illustration_subject is a single English sentence with no style words (medium, palette, technique)
+7. The segment_narrations total 250-350 words
 </verification>"""
 
     def __init__(self, endpoint: str, api_key: str, deployment: str):
@@ -952,6 +980,10 @@ Before output, verify:
                 cls.SCENES_EXAMPLE_TOKEN,
                 cls._scenes_example(spec),
             )
+            .replace(
+                cls.ILLUSTRATION_SPEC_TOKEN,
+                cls._illustration_spec(language),
+            )
         )
 
     @staticmethod
@@ -1016,6 +1048,49 @@ Before output, verify:
             f"phrase readable in 2-3 lines (aim for 6-10 words, "
             f"**at most {MAX_HEADLINE_CHARS} characters**). "
             f"Going over is rejected by the check and forces a regeneration"
+        )
+
+    @staticmethod
+    def _illustration_spec(language: str) -> str:
+        """挿絵（illustration_subject）の指示を `MAX_ILLUSTRATION_SUBJECT_CHARS` から組み立てる。
+
+        Remotion レンダラは動画1本につき挿絵を**1枚だけ**生成し、画面上部
+        52% に通しで表示する（`image_prompts` のような1シーン1枚とは違う）。
+        `CardVisual` と同じ二段構え（LLM が *what*、コード側が *how* を
+        前置する `ILLUSTRATION_STYLE_PROMPT`）にするため、ここでは主題と
+        構図だけを求め、**画材・配色・技法などのスタイル語は明示的に
+        禁じる**。書かせると、コード側が前置する固定のスタイル文と矛盾した
+        指示が1つのプロンプトに混ざる（`ImageGenerator.generate_batch` の
+        `enhance=False` の項で実際に踏んだ壊れ方と同じ構造）。
+
+        形式（short/tiktok/long）で分けない。挿絵は動画全体で共有する1枚
+        であり、尺とは無関係だからである（`_overlay_spec` と同じ判断）。
+
+        Args:
+            language: 言語コード
+
+        Returns:
+            str: プロンプトに差し込む1行
+        """
+        if language == "ja":
+            return (
+                "動画全体で共有する挿絵1枚の主題を英語1文で。"
+                "画面上部に通しで表示される1枚なので、動画の内容全体を象徴する"
+                "主題と構図（中央に配置し、余白を十分取ること）だけを書く。"
+                f"最大{MAX_ILLUSTRATION_SUBJECT_CHARS}文字。"
+                "**画材・配色・レンダリング技法などのスタイル語は書かないこと**"
+                "（固定のスタイル文をコード側が別途前置するため、書くと矛盾した"
+                "指示になる）"
+            )
+        return (
+            "The subject of the single illustration shared across the whole video, "
+            "in one English sentence. It is shown once at the top of the screen "
+            "throughout, so describe only the subject and composition that "
+            "symbolizes the whole video (centred, with generous margins). "
+            f"At most {MAX_ILLUSTRATION_SUBJECT_CHARS} characters. "
+            "**Do NOT name a medium, palette, or rendering technique/style** "
+            "(code prepends a fixed style prompt separately; naming one here "
+            "produces a contradictory prompt)"
         )
 
     @staticmethod
