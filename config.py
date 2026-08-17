@@ -259,6 +259,9 @@ class Config(BaseSettings):
     x_monthly_budget_usd: float = Field(default=20.0, gt=0)
     x_cost_per_post_usd: float = Field(default=0.015, ge=0)
     x_cost_per_post_with_link_usd: float = Field(default=0.20, ge=0)
+    # 投稿1件の読み取り単価。計測が投稿ごとに2回読むぶんを概算に入れるために要る。
+    # 実請求と突き合わせて、読み取りが概算から丸ごと落ちていることに気付いた。
+    x_cost_per_read_usd: float = Field(default=0.005, ge=0)
 
     # 固定のハッシュタグ。モデルに作らせない
     # （無関係なタグはスパム判定を受ける）。

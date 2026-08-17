@@ -242,7 +242,11 @@ class PostWorker:
         now = datetime.now(UTC)
         plain, with_link = self._repository.monthly_post_counts(now.year, now.month)
         spent = estimate_month_cost(
-            plain, with_link, self._budget.unit_usd, self._budget.unit_with_link_usd
+            plain,
+            with_link,
+            self._budget.unit_usd,
+            self._budget.unit_with_link_usd,
+            self._budget.unit_read_usd,
         )
         over = is_over_budget(spent, self._budget.monthly_usd)
 

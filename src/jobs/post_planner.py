@@ -147,6 +147,7 @@ def plan_daily_posts(
     budget_usd: float,
     unit_usd: float,
     unit_with_link_usd: float,
+    unit_read_usd: float = 0.0,
     now: datetime,
     timezone: str = "Asia/Tokyo",
     card_generator: SupportsCardVisualGeneration | None = None,
@@ -168,6 +169,7 @@ def plan_daily_posts(
         hashtags: 固定のハッシュタグ
         budget_usd: 概算コストの上限
         unit_usd: リンク無しの単価
+        unit_read_usd: 投稿1件の読み取り単価（計測が投稿ごとに2回読む）
         unit_with_link_usd: リンク有りの単価
         now: 現在時刻（UTC aware）
         timezone: times を解釈するタイムゾーン
@@ -210,7 +212,7 @@ def plan_daily_posts(
     # 積んでから投稿側で止めると、上限が戻った月初に古い投稿が
     # 一斉に出る（そのときにはもうニュースとして古い）。
     plain, with_link = posts.monthly_post_counts(now.year, now.month)
-    spent = estimate_month_cost(plain, with_link, unit_usd, unit_with_link_usd)
+    spent = estimate_month_cost(plain, with_link, unit_usd, unit_with_link_usd, unit_read_usd)
     if is_over_budget(spent, budget_usd):
         log_step(f"概算コストが上限に達しています（${spent:.2f} / ${budget_usd:.2f}）", "⏭️")
         return DailyPostPlan(group_ids=[], skipped_reason=f"予算上限（概算 ${spent:.2f}）")

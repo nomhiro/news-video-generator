@@ -174,6 +174,7 @@ class AppContext:
                 monthly_usd=config.x_monthly_budget_usd,
                 unit_usd=config.x_cost_per_post_usd,
                 unit_with_link_usd=config.x_cost_per_post_with_link_usd,
+                unit_read_usd=config.x_cost_per_read_usd,
             ),
         )
 
@@ -345,6 +346,7 @@ def _build_scheduler(
                 budget_usd=config.x_monthly_budget_usd,
                 unit_usd=config.x_cost_per_post_usd,
                 unit_with_link_usd=config.x_cost_per_post_with_link_usd,
+                unit_read_usd=config.x_cost_per_read_usd,
                 now=datetime.now(UTC),
                 timezone=config.schedule_timezone,
                 card_generator=card_generator,

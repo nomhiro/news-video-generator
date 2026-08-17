@@ -976,7 +976,11 @@ def _x_status_context(
     now = datetime.now(UTC)
     plain, with_link = posts.monthly_post_counts(now.year, now.month)
     spent = estimate_month_cost(
-        plain, with_link, config.x_cost_per_post_usd, config.x_cost_per_post_with_link_usd
+        plain,
+        with_link,
+        config.x_cost_per_post_usd,
+        config.x_cost_per_post_with_link_usd,
+        config.x_cost_per_read_usd,
     )
     return {
         "enabled": switch.is_enabled(),

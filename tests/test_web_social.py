@@ -182,6 +182,7 @@ class FakeConfig:
     x_monthly_budget_usd = 20.0
     x_cost_per_post_usd = 0.015
     x_cost_per_post_with_link_usd = 0.20
+    x_cost_per_read_usd = 0.005
 
 
 class FakeTokenStore:
