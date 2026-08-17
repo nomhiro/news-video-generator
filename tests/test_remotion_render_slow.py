@@ -101,14 +101,24 @@ def test_render_produces_a_playable_video(
         audio_path=two_second_audio,
         output_path=output,
         image_paths=[],
+        # 5個にしているのは `chapter_labels` が経由する `segment_allocation` が
+        # 構成パート数（5）未満のセグメント数を拒否するため。
         scenes=[
-            SceneVisual(layout=SceneLayout.STATEMENT, items=[]),
-            SceneVisual(layout=SceneLayout.COMPARE, items=["従来", "新方式"]),
-            SceneVisual(layout=SceneLayout.FLOW, items=["入力", "選択"]),
+            SceneVisual(layout=SceneLayout.STATEMENT, items=[], relation=""),
+            SceneVisual(layout=SceneLayout.COMPARE, items=["従来", "新方式"], relation="切替"),
+            SceneVisual(layout=SceneLayout.FLOW, items=["入力", "選択"], relation="変換"),
+            SceneVisual(layout=SceneLayout.COMPARE, items=["旧案", "新案"], relation="改善"),
+            SceneVisual(layout=SceneLayout.STATEMENT, items=[], relation=""),
         ],
-        text_overlays=["見出し1", "見出し2", "見出し3"],
-        segment_narrations=["字幕1です。", "字幕2です。", "字幕3です。"],
-        segment_timings=[0.0, 0.7, 1.4, 2.0],
+        text_overlays=["見出し1", "見出し2", "見出し3", "見出し4", "見出し5"],
+        segment_narrations=[
+            "字幕1です。",
+            "字幕2です。",
+            "字幕3です。",
+            "字幕4です。",
+            "字幕5です。",
+        ],
+        segment_timings=[0.0, 0.4, 0.8, 1.2, 1.6, 2.0],
         language="ja",
         video_format="short",
     )
@@ -135,10 +145,12 @@ def test_render_uses_the_format_resolution(
         audio_path=two_second_audio,
         output_path=output,
         image_paths=[],
-        scenes=[SceneVisual(layout=SceneLayout.COMPARE, items=["A", "B"])],
-        text_overlays=["見出し"],
-        segment_narrations=["字幕です。"],
-        segment_timings=[0.0, 2.0],
+        # 5個にしているのは `chapter_labels` が経由する `segment_allocation` が
+        # 構成パート数（5）未満のセグメント数を拒否するため。
+        scenes=[SceneVisual(layout=SceneLayout.STATEMENT, items=[], relation="") for _ in range(5)],
+        text_overlays=["見出し"] * 5,
+        segment_narrations=["字幕です。"] * 5,
+        segment_timings=[0.0, 0.4, 0.8, 1.2, 1.6, 2.0],
         language="ja",
         video_format="short",
     )

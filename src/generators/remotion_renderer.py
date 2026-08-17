@@ -22,6 +22,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from src.generators.script_generator import chapter_labels
 from src.generators.video_composer import _available_cpus, _tail, mux_audio
 from src.models.formats import get_spec
 from src.models.scene import SceneVisual
@@ -194,6 +195,10 @@ class RemotionRenderer:
             "🎬",
         )
 
+        # 章ラベル（フック/事実/仕組み/インパクト/結論）は segment_index から
+        # 一意に決まる構造的な事実なので、LLM には出させず1回だけ計算する。
+        chapters = chapter_labels(len(scenes), language)
+
         props = {
             "width": spec.output_width,
             "height": spec.output_height,
@@ -203,6 +208,10 @@ class RemotionRenderer:
                 {
                     "layout": scene.layout.value,
                     "items": scene.items,
+                    # relation と chapter は8文字以内の単一ラベルで折り返さないので、
+                    # headline/subtitle と違い ZWSP を入れない。
+                    "relation": scene.relation,
+                    "chapter": chapter,
                     # ZWSP の挿入はここ（レンダリング直前）で行う。
                     # `MAX_HEADLINE_CHARS` は script.py が生成時点の文字数を
                     # 検証しており、この挿入より前に済んでいるので文字数には影響しない。
@@ -212,8 +221,8 @@ class RemotionRenderer:
                     "durationInFrames": duration,
                 }
                 # 長さは上で一致を確認済みなので strict=True で守る
-                for scene, headline, subtitle, (start, duration) in zip(
-                    scenes, text_overlays, segment_narrations, spans, strict=True
+                for scene, chapter, headline, subtitle, (start, duration) in zip(
+                    scenes, chapters, text_overlays, segment_narrations, spans, strict=True
                 )
             ],
         }
