@@ -1,6 +1,13 @@
 import { spring, useCurrentFrame, useVideoConfig } from "remotion";
 import { COLORS, FONT_STACK } from "../theme";
 
+// Python 側（`src/utils/line_break.py`）が挿入する、日本語のフレーズ境界の
+// ゼロ幅スペース。表示上は幅を持たないので、縮小率を決める文字数の計算からは
+// 除外する必要がある（除外しないと、ZWSP の分だけ「文字数」が水増しされ、
+// 見出しが必要以上に縮む——改行は直っても文字が小さくなる、という分かりにくい
+// 退行になる）。
+const ZWSP = "​";
+
 /**
  * 1行に収まる文字数の見積り（全角、`size` が既定の 92px のとき）。
  *
@@ -33,7 +40,9 @@ export const Headline: React.FC<{ text: string; size?: number }> = ({
   // 重なるか画面外に切れる。**壊れた文字列を「小さい文字」で済ませる**のが
   // ここの役割で、レイアウトの衝突より読みにくさの方が実害が小さい。
   const budget = CHARS_PER_LINE_AT_BASE * MAX_LINES;
-  const scale = Math.max(MIN_SCALE, Math.min(1, budget / Math.max(text.length, 1)));
+  // ZWSP は表示幅0なので、縮小率の計算対象の文字数から除く（上の定数コメント参照）。
+  const visibleLength = text.split(ZWSP).join("").length;
+  const scale = Math.max(MIN_SCALE, Math.min(1, budget / Math.max(visibleLength, 1)));
   const fontSize = size * scale;
 
   return (
@@ -51,7 +60,12 @@ export const Headline: React.FC<{ text: string; size?: number }> = ({
         // 見出しが切れる方がまだ読める画になる。
         maxHeight: fontSize * 1.28 * MAX_LINES,
         overflow: "hidden",
-        wordBreak: "auto-phrase",
+        // `word-break: auto-phrase` を試したが実測で無効だった（Subtitle.tsx
+        // 参照）。BudouX が挿入した ZWSP を良い改行点として使い、`keep-all` で
+        // CJK 文字間の悪い改行点を禁止する。
+        wordBreak: "keep-all",
+        // ZWSP を挟んでも1フレーズが1行に収まらない病的な入力への安全弁。
+        overflowWrap: "anywhere",
         transform: `translateY(${(1 - enter) * 40}px)`,
         opacity: enter,
       }}
