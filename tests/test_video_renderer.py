@@ -31,12 +31,19 @@ def test_unknown_renderer_is_rejected() -> None:
         build_video_renderer("blender")
 
 
-def test_ffmpeg_renderer_needs_images() -> None:
-    assert FfmpegRenderer().needs_images is True
+def test_ffmpeg_renderer_needs_one_image_per_segment() -> None:
+    """ffmpeg は静止画を並べる方式なので、セグメントごとに1枚必要。"""
+    assert FfmpegRenderer().image_count(6) == 6
+    assert FfmpegRenderer().image_count(10) == 10
 
 
-def test_remotion_renderer_does_not_need_images() -> None:
-    assert RemotionRenderer().needs_images is False
+def test_remotion_renderer_needs_exactly_one_image() -> None:
+    """Remotion は図解を React で描くので、共有する挿絵1枚だけで足りる。
+
+    セグメント数に関わらず常に1枚（`needs_images` が粗すぎたので置き換えた）。
+    """
+    assert RemotionRenderer().image_count(6) == 1
+    assert RemotionRenderer().image_count(10) == 1
 
 
 def test_ffmpeg_renderer_does_not_draw_scene_text() -> None:

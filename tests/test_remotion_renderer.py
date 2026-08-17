@@ -133,9 +133,10 @@ def captured(monkeypatch, tmp_path):
     return calls
 
 
-def test_renderer_does_not_need_images() -> None:
-    """画像生成を飛ばせること。クォータの律速がここで消える。"""
-    assert RemotionRenderer().needs_images is False
+def test_renderer_needs_exactly_one_image() -> None:
+    """動画全体で共有する挿絵1枚だけで足りること。クォータの律速がここで6分の1になる。"""
+    assert RemotionRenderer().image_count(6) == 1
+    assert RemotionRenderer().image_count(10) == 1
 
 
 def test_props_carry_resolved_frame_spans(captured, tmp_path) -> None:
@@ -290,6 +291,113 @@ def test_props_file_is_removed(captured, tmp_path) -> None:
     )
     assert list(tmp_path.glob("*_props.json")) == []
     assert list(tmp_path.glob("*_silent.mp4")) == []
+
+
+# --------------------------------------------------------------------------
+# 挿絵の受け渡し（Task 4）
+# --------------------------------------------------------------------------
+
+
+def test_illustration_lands_in_public_with_filename_only_and_is_cleaned_up(
+    captured, tmp_path
+) -> None:
+    """props には remotion/public 相対のファイル名だけを持たせ、レンダリング後は消すこと。
+
+    `staticFile()` は public/ からの相対名しか受け取らない。props の JSON や
+    無音映像と同じ扱いで、残すとコミット済みディレクトリに生成物が積もる。
+    """
+    from src.generators.remotion_renderer import REMOTION_DIR
+
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"audio")
+    illustration = tmp_path / "illustration_src.png"
+    illustration.write_bytes(b"fake png bytes")
+
+    RemotionRenderer().render(
+        audio_path=audio,
+        output_path=tmp_path / "out.mp4",
+        image_paths=[],
+        scenes=_scenes(),
+        text_overlays=["a", "b", "c"],
+        segment_narrations=["a", "b", "c"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
+        language="ja",
+        video_format="short",
+        illustration_path=illustration,
+    )
+    props = captured["props"]
+    filename = props["illustration"]
+    assert filename
+    assert "/" not in filename
+    assert "\\" not in filename
+    assert not (REMOTION_DIR / "public" / filename).exists()
+
+
+def test_illustration_is_a_top_level_prop_not_per_scene(captured, tmp_path) -> None:
+    """挿絵は動画全体で共有する1枚なので、シーンごとに複製しないこと。"""
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"audio")
+    illustration = tmp_path / "illustration_src.png"
+    illustration.write_bytes(b"fake png bytes")
+
+    RemotionRenderer().render(
+        audio_path=audio,
+        output_path=tmp_path / "out.mp4",
+        image_paths=[],
+        scenes=_scenes(),
+        text_overlays=["a", "b", "c"],
+        segment_narrations=["a", "b", "c"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
+        language="ja",
+        video_format="short",
+        illustration_path=illustration,
+    )
+    props = captured["props"]
+    assert "illustration" in props
+    assert all("illustration" not in scene for scene in props["scenes"])
+
+
+def test_illustration_is_empty_string_when_not_given(captured, tmp_path) -> None:
+    """挿絵が無い呼び出し（`illustration_path=None`）では地のみで続行すること。"""
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"audio")
+
+    RemotionRenderer().render(
+        audio_path=audio,
+        output_path=tmp_path / "out.mp4",
+        image_paths=[],
+        scenes=_scenes(),
+        text_overlays=["a", "b", "c"],
+        segment_narrations=["a", "b", "c"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
+        language="ja",
+        video_format="short",
+        illustration_path=None,
+    )
+    assert captured["props"]["illustration"] == ""
+
+
+def test_missing_illustration_file_does_not_fail_the_render(captured, tmp_path) -> None:
+    """挿絵の生成に失敗していても、レンダリング自体は落とさないこと。
+
+    章ラベルと同じ判断: 装飾的な要素の欠落で本体を落とすのは本末転倒。
+    """
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"audio")
+
+    RemotionRenderer().render(
+        audio_path=audio,
+        output_path=tmp_path / "out.mp4",
+        image_paths=[],
+        scenes=_scenes(),
+        text_overlays=["a", "b", "c"],
+        segment_narrations=["a", "b", "c"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
+        language="ja",
+        video_format="short",
+        illustration_path=tmp_path / "does_not_exist.png",
+    )
+    assert captured["props"]["illustration"] == ""
 
 
 def test_mismatched_lengths_are_rejected(tmp_path) -> None:

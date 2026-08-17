@@ -31,12 +31,20 @@ class VideoRenderer(Protocol):
     `image_paths` を使わない）、位置引数だと順序の取り違えが起きる。
     """
 
-    @property
-    def needs_images(self) -> bool:
-        """画像生成が必要か。
+    def image_count(self, segment_count: int) -> int:
+        """このレンダラが必要とする画像の枚数。
 
-        False なら `Pipeline` は `gpt-image-2` の呼び出しを丸ごと飛ばす。
-        クォータ（リージョン単位で上限4）を消費しなくなる。
+        以前は `needs_images: bool` だったが、これでは「ffmpeg は
+        セグメントごとに1枚」と「Remotion は動画全体で共有する1枚だけ」の
+        違いを表現できなかった（両方 True としか言えない）。0 を返せば
+        `Pipeline` は `gpt-image-2` の呼び出しを丸ごと飛ばす
+        （クォータはリージョン単位で上限4）。
+
+        Args:
+            segment_count: 台本のセグメント数
+
+        Returns:
+            int: 生成すべき画像の枚数
         """
         ...
 
@@ -67,6 +75,7 @@ class VideoRenderer(Protocol):
         segment_timings: list[float],
         language: str,
         video_format: str,
+        illustration_path: Path | None = None,
     ) -> Path: ...
 
 
@@ -77,9 +86,12 @@ class FfmpegRenderer:
     「今と同じものが出る」ことが担保されている必要がある。
     """
 
-    needs_images = True
     # シーンのラベルは1文字も描かない（`scenes` を受け取っても捨てる）。
     draws_scene_text = False
+
+    def image_count(self, segment_count: int) -> int:
+        """静止画を並べる方式なので、セグメントごとに1枚必要。"""
+        return segment_count
 
     def __init__(self) -> None:
         self._composer = VideoComposer()
@@ -96,10 +108,12 @@ class FfmpegRenderer:
         segment_timings: list[float],
         language: str,
         video_format: str,
+        illustration_path: Path | None = None,
     ) -> Path:
         """静止画を並べて動画を合成する。
 
-        `scenes` と `segment_narrations` は使わない（契約を揃えるために受ける）。
+        `scenes` と `segment_narrations` と `illustration_path` は使わない
+        （契約を揃えるために受ける。挿絵は Remotion レンダラだけが使う）。
 
         Args:
             audio_path: ナレーション音声
@@ -111,6 +125,7 @@ class FfmpegRenderer:
             segment_timings: 各セグメントの開始秒
             language: フォント選択用の言語コード
             video_format: 形式名
+            illustration_path: 使わない
 
         Returns:
             Path: 生成された動画のパス

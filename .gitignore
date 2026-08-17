@@ -59,6 +59,12 @@ output/scripts/*
 output/cards/*
 !output/**/.gitkeep
 
+# Remotion が staticFile() で読む挿絵。RemotionRenderer.render() が
+# レンダリング1回ごとに書き込み、finally で消す一時ファイル。
+# 消し忘れ・異常終了で残った場合でもコミットされないようにする。
+remotion/public/*
+!remotion/public/.gitkeep
+
 # Logs
 *.log
 logs/

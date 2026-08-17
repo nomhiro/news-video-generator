@@ -27,7 +27,7 @@ from src.generators.video_composer import _available_cpus, _tail, mux_audio
 from src.models.formats import get_spec
 from src.models.scene import SceneVisual
 from src.utils.line_break import insert_break_opportunities
-from src.utils.logger import log_error, log_step, log_success
+from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
 class RemotionRenderError(Exception):
@@ -177,13 +177,15 @@ class RemotionRenderer:
     # （src/jobs/worker.py:211）。**そこを同期処理に変えると前提が崩れる。**
     TIMEOUT_SEC = 900
 
-    # 画像生成を必要としない。これが `Pipeline` が gpt-image-2 の呼び出しを
-    # 丸ごと飛ばせる根拠で、クォータの律速が消える理由。
-    needs_images = False
+    # 動画全体で共有する挿絵1枚だけで足りる。これが `Pipeline` が
+    # `gpt-image-2` の呼び出しを1本あたり6回から1回に減らせる根拠。
+    def image_count(self, segment_count: int) -> int:
+        """セグメント数に関わらず、共有する挿絵は常に1枚。"""
+        return 1
 
     # シーンのラベルを実際に画面へ描く。これが `ScriptGenerator` に数値の根拠を
     # **強制させる**根拠（記事に無い数値が画面に出るのは、ニュースを扱う以上
-    # 最も害が大きい種類の誤り）。`needs_images` とは別の問いなので別に持つ。
+    # 最も害が大きい種類の誤り）。`image_count` とは別の問いなので別に持つ。
     draws_scene_text = True
 
     def render(
@@ -198,6 +200,7 @@ class RemotionRenderer:
         segment_timings: list[float],
         language: str,
         video_format: str,
+        illustration_path: Path | None = None,
     ) -> Path:
         """図解の構造から動画を作る。
 
@@ -212,6 +215,9 @@ class RemotionRenderer:
             language: 日本語の折り返し位置（ZWSP）を挿入するかの判定に使う
                 （フォントはシステムのものを font-family で選ぶため未使用）
             video_format: 形式名。解像度は formats.py が持つ
+            illustration_path: 動画全体で共有する挿絵。`None` なら
+                地のみで描く（生成に失敗した場合もここに `None` が渡る。
+                装飾的な要素の欠落でレンダリング本体を落とさない）
 
         Returns:
             Path: 生成された動画のパス
@@ -247,11 +253,16 @@ class RemotionRenderer:
         # 一意に決まる構造的な事実なので、LLM には出させず1回だけ計算する。
         chapters = chapter_labels(len(scenes), language)
 
+        # 挿絵は全シーンで共有する1枚なので、シーンごとの辞書ではなく
+        # トップレベルの props に持たせる（`width` / `height` と同じ階層）。
+        illustration_filename = self._place_illustration(illustration_path, output_path)
+
         props = {
             "width": spec.output_width,
             "height": spec.output_height,
             "fps": self.FRAME_RATE,
             "durationInFrames": total_frames,
+            "illustration": illustration_filename,
             "scenes": [
                 {
                     "layout": scene.layout.value,
@@ -294,9 +305,54 @@ class RemotionRenderer:
             # Blob にも余計なものが上がる（*_silent.mp4 と同じ扱い）。
             props_path.unlink(missing_ok=True)
             silent_path.unlink(missing_ok=True)
+            # 挿絵も同じ扱い。remotion/public/ はコミット対象のディレクトリ
+            # なので、レンダリングごとに増えたままだと蓄積する。
+            if illustration_filename:
+                (self._public_dir() / illustration_filename).unlink(missing_ok=True)
 
         log_success(f"動画を描画しました ({audio_duration:.1f}秒)")
         return output_path
+
+    @staticmethod
+    def _public_dir() -> Path:
+        """Remotion が `staticFile()` で読む `public/` ディレクトリ。"""
+        return REMOTION_DIR / "public"
+
+    def _place_illustration(self, illustration_path: Path | None, output_path: Path) -> str:
+        """挿絵を `remotion/public/` へ置き、`staticFile()` 用のファイル名を返す。
+
+        `staticFile()` は `public/` からの相対名しか受け取らないため、
+        Pipeline が作業ディレクトリに生成したファイルをそのまま渡せない
+        （絶対パスでは解決できない）。ファイル名は `output_path.stem`
+        （呼び出し元がタイムスタンプ+言語で一意にしている）から作るので、
+        並行するレンダリングとも衝突しない。
+
+        **挿絵の欠落・生成失敗でレンダリングを落とさない**。章ラベルと
+        同じ判断で、装飾的な要素のために本体を失敗させるのは本末転倒。
+
+        Args:
+            illustration_path: Pipeline が生成した挿絵。`None` なら未生成
+            output_path: 出力する動画のパス（ファイル名の元にする）
+
+        Returns:
+            str: `remotion/public/` に置いたファイル名。置けなかった場合は
+                空文字列（React 側はこれを「地のみで描く」と解釈する）
+        """
+        if illustration_path is None:
+            return ""
+        if not illustration_path.exists():
+            log_warning(f"挿絵が見つかりません。地のみで続行します: {illustration_path}")
+            return ""
+
+        try:
+            public_dir = self._public_dir()
+            public_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"illustration-{output_path.stem}{illustration_path.suffix}"
+            shutil.copyfile(illustration_path, public_dir / filename)
+            return filename
+        except OSError as e:
+            log_warning(f"挿絵の配置に失敗しました。地のみで続行します: {e}")
+            return ""
 
     def _run_remotion(self, props_path: Path, silent_path: Path) -> None:
         """Remotion の CLI を呼んで無音の映像を作る。

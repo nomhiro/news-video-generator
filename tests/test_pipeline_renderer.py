@@ -53,6 +53,7 @@ class _FakeScript:
         self.text_overlays = ["headline"]
         self.segment_narrations = ["narration"]
         self.full_narration = "narration"
+        self.illustration_subject = "A single lightbulb glowing above a laptop."
 
     def to_json_file(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,10 +79,12 @@ class _FakeVoiceGenerator:
 
 
 class _FakeVideoRenderer:
-    """`needs_images = False` の状態を模す（実際の Remotion は呼ばない）。"""
+    """画像生成を必要としない状態を模す（実際の Remotion は呼ばない）。"""
 
-    needs_images = False
     draws_scene_text = True
+
+    def image_count(self, segment_count: int) -> int:
+        return 0
 
     def render(self, *, output_path: Path, **kwargs: object) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,7 +127,6 @@ def test_pipeline_skips_image_generation_for_remotion(tmp_path: Path) -> None:
 class _FakeNonDrawingRenderer(_FakeVideoRenderer):
     """ffmpeg レンダラと同じ「ラベルを描かない」状態を模す。"""
 
-    needs_images = False
     draws_scene_text = False
 
 
@@ -136,6 +138,98 @@ def _run_with_fakes(pipeline: Pipeline, renderer: _FakeVideoRenderer) -> _FakeSc
     pipeline.video_renderer = renderer
     pipeline.run("トピック", languages=["ja"])
     return script_generator
+
+
+class _FakeSharedIllustrationRenderer(_FakeVideoRenderer):
+    """Remotion と同じ「共有する挿絵1枚だけで足りる」状態を模す。
+
+    `render` の引数は親クラスと同じ形（`output_path` と `**kwargs`）に揃え、
+    `illustration_path` は `kwargs` から読む。シグネチャを変えると
+    `VideoRenderer` プロトコルとの構造的な適合が崩れる。
+    """
+
+    def __init__(self) -> None:
+        self.received_illustration_path: Path | None = None
+
+    def image_count(self, segment_count: int) -> int:
+        return 1
+
+    def render(self, *, output_path: Path, **kwargs: object) -> Path:
+        illustration_path = kwargs.get("illustration_path")
+        assert illustration_path is None or isinstance(illustration_path, Path)
+        self.received_illustration_path = illustration_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"video")
+        return output_path
+
+
+def test_pipeline_generates_one_shared_illustration_when_renderer_needs_one(
+    tmp_path: Path,
+) -> None:
+    """`image_count() == 1` のレンダラには挿絵を1枚だけ生成して渡すこと。
+
+    `image_prompts`（複数枚用）ではなく `illustration_subject`（1文）から
+    プロンプトを組み、`ImageGenerator.generate_batch` に渡す枚数も1枚だけ
+    であることを確かめる。
+    """
+    pipeline = Pipeline(_config(tmp_path, video_renderer="remotion"))
+    pipeline.script_generator = _FakeScriptGenerator()  # type: ignore[assignment]
+    pipeline.voice_generator = _FakeVoiceGenerator()  # type: ignore[assignment]
+    renderer = _FakeSharedIllustrationRenderer()
+    pipeline.video_renderer = renderer
+
+    captured_prompts: list[list[str]] = []
+    captured_enhance: list[bool] = []
+
+    def fake_generate_batch(
+        prompts: list[str],
+        output_dir: Path,
+        language: str = "ja",
+        video_format: str = "short",
+        *,
+        size: str | None = None,
+        enhance: bool = True,
+    ) -> list[Path]:
+        captured_prompts.append(prompts)
+        captured_enhance.append(enhance)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / "illustration.png"
+        path.write_bytes(b"fake png")
+        return [path]
+
+    pipeline.image_generator.generate_batch = fake_generate_batch  # type: ignore[method-assign]
+
+    result = pipeline.run("トピック", languages=["ja"])
+
+    assert result["status"] == "success"
+    assert len(captured_prompts) == 1
+    assert len(captured_prompts[0]) == 1
+    # enhance=False: 挿絵のプロンプトは完結済みなので _enhance_prompt を重ねない
+    assert captured_enhance == [False]
+    assert renderer.received_illustration_path is not None
+    assert renderer.received_illustration_path.exists()
+
+
+def test_pipeline_continues_without_illustration_on_generation_failure(tmp_path: Path) -> None:
+    """挿絵の生成に失敗しても、動画生成自体は失敗させないこと。
+
+    章ラベルと同じ判断: 装飾的な要素の欠落で本体を落とすのは本末転倒。
+    """
+    pipeline = Pipeline(_config(tmp_path, video_renderer="remotion"))
+    pipeline.script_generator = _FakeScriptGenerator()  # type: ignore[assignment]
+    pipeline.voice_generator = _FakeVoiceGenerator()  # type: ignore[assignment]
+    renderer = _FakeSharedIllustrationRenderer()
+    pipeline.video_renderer = renderer
+
+    def failing_generate_batch(*args: object, **kwargs: object) -> list[Path]:
+        raise Exception("コンテンツフィルタに拒否された")
+
+    pipeline.image_generator.generate_batch = failing_generate_batch  # type: ignore[method-assign]
+
+    result = pipeline.run("トピック", languages=["ja"])
+
+    assert result["status"] == "success"
+    assert renderer.received_illustration_path is None
 
 
 def test_grounding_enforcement_follows_the_renderer(tmp_path: Path) -> None:

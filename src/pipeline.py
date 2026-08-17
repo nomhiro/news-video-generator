@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 from config import Config
 from src.generators.image_generator import ImageGenerator
+from src.generators.remotion_renderer import build_illustration_prompt
 from src.generators.script_generator import ScriptGenerator
 from src.generators.video_renderer import VideoRenderer, build_video_renderer
 from src.generators.voice_generator import VoiceGenerator
@@ -211,25 +212,50 @@ class Pipeline:
                 script.to_json_file(script_path)
                 script_paths[lang] = script_path
 
-            # 2. 画像を生成する（レンダラが必要とする場合のみ）
+            # 2. 画像を生成する（レンダラが必要とする枚数だけ）
             #
-            # Remotion レンダラは図解を React で描くので画像を使わない。
-            # 飛ばすと gpt-image-2 のクォータ（リージョン単位で上限4、
-            # 1本6枚で1分以上）を一切消費しなくなり、X の画像カードとの
-            # 共食いも消える。
+            # ffmpeg はセグメントごとに1枚（`image_prompts` そのまま）、
+            # Remotion は図解を React で描くので画像は使わず、動画全体で
+            # 共有する挿絵を1枚だけ生成する。1本6枚だったのが1枚になり、
+            # gpt-image-2 のクォータ（リージョン単位で上限4）が
+            # X の画像カードと共食いする度合いが下がる。
+            first_lang = languages[0]
+            image_count = self.video_renderer.image_count(len(scripts[first_lang].scenes))
+            image_dir = self.config.output_dir / "images" / base_name
             image_paths: list[Path] = []
-            if self.video_renderer.needs_images:
+            illustration_path: Path | None = None
+
+            if image_count == 0:
+                log_step("画像生成は不要です（レンダラが図解を描きます）", "🎨")
+            elif image_count == 1:
+                # 動画全体で共有する挿絵1枚。`enhance=False` にする理由は
+                # `build_illustration_prompt` が medium/palette/技法まで
+                # 書き切った完結済みプロンプトだから（`_enhance_prompt` を
+                # 重ねると、画像カードの `enhance=False` と同じ理由で
+                # 矛盾した指示が混ざる）。
+                log_step("挿絵を生成中...", "🎨")
+                try:
+                    prompt = build_illustration_prompt(scripts[first_lang].illustration_subject)
+                    illustration_paths = self.image_generator.generate_batch(
+                        [prompt],
+                        image_dir,
+                        language=first_lang,
+                        video_format=video_format,
+                        enhance=False,
+                    )
+                    illustration_path = illustration_paths[0]
+                except Exception as e:
+                    # 章ラベルと同じ判断: 装飾的な要素の生成失敗で
+                    # 本体（動画生成）を落とさない。地のみで続行する。
+                    log_error(f"挿絵の生成に失敗しました。地のみで続行します: {e}")
+            else:
                 log_step("画像を生成中...", "🎨")
-                first_lang = languages[0]
-                image_dir = self.config.output_dir / "images" / base_name
                 image_paths = self.image_generator.generate_batch(
                     scripts[first_lang].image_prompts,
                     image_dir,
                     language=first_lang,
                     video_format=video_format,
                 )
-            else:
-                log_step("画像生成は不要です（レンダラが図解を描きます）", "🎨")
 
             # 3. Generate voices for each language (with timing if available)
             log_step("音声を生成中...", "🎙️")
@@ -273,6 +299,7 @@ class Pipeline:
                     segment_timings=segment_timings.get(lang, []),
                     language=lang,
                     video_format=video_format,
+                    illustration_path=illustration_path,
                 )
                 video_paths[lang] = video_path
 
