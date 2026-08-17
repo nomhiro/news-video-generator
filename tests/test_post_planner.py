@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from src.generators.image_generator import ContentFilterError
 from src.jobs.post_planner import plan_daily_posts
@@ -385,3 +386,44 @@ def test_作業ディレクトリが無ければSINGLEに降格する() -> None:
     assert card_post.kind == PostKind.SINGLE
     assert card_generator.calls == []
     assert image_generator.calls == []
+
+
+def test_生成に失敗しても後続が枠を繰り上げる() -> None:
+    """枠を記事の添字に紐づけると、失敗した記事の時間が誰にも使われず消える。
+
+    実測（2026-08-17）: 3件のうち1件目と3件目の生成が失敗し、成功した2件目だけが
+    2番目の枠に積まれた。1番目と3番目の枠は空のまま消え、3件出す予定の日に
+    1件しか出なかった。
+    """
+    posts = FakePosts()
+    plan = _plan(
+        FakeNews([_article("a"), _article("b"), _article("c")]),
+        posts,
+        FakeGenerator(fail_for={"a", "c"}),
+    )
+
+    assert len(plan.group_ids) == 1
+    # 成功した1件は**最初の枠**に入る（2番目ではない）
+    scheduled = next(iter(posts.enqueued[0][1].values()))
+    first_slot = next(iter(_plan_slots()))
+    assert scheduled.astimezone(ZoneInfo("Asia/Tokyo")).strftime("%H:%M") == first_slot
+
+
+def test_成功順に型が割り当てられる() -> None:
+    """型も枠と同じ理由で成功順にする。
+
+    添字に紐づけると、失敗した記事のぶん CARD の順番が飛んで、
+    画像カードが出ない日が偶然できる。
+    """
+    posts = FakePosts()
+    articles = [_article(s) for s in "abcd"]
+    # 先頭3件が失敗すると、4件目が「1番目」として扱われるべき
+    _plan(FakeNews(articles), posts, FakeGenerator(fail_for={"a", "b", "c"}))
+
+    kinds = [batch[0].kind for batch, _ in posts.enqueued]
+    assert kinds == [PostKind.SINGLE]
+
+
+def _plan_slots() -> list[str]:
+    """`_plan` が使う投稿時刻のうち、MORNING の時点で未来のもの。"""
+    return TIMES

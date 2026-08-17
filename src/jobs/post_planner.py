@@ -224,13 +224,20 @@ def plan_daily_posts(
     schedule = _resolve_schedule(times, now, timezone)
     group_ids: list[str] = []
 
-    for index, article in enumerate(articles):
-        if index >= len(schedule):
-            # 時刻の数より記事が多い。出せる分だけ出す
-            log_error(f"投稿時刻が足りないため {len(articles) - index}件を見送ります")
+    # **枠は「成功した下書き」に順に割り当てる。記事の添字に紐づけない。**
+    # 実測（2026-08-17）: 3件のうち1件目と3件目の生成が失敗し、成功した2件目だけが
+    # 2番目の枠（19:00）に積まれた。1番目（12:30）と3番目（21:30）の枠は誰にも
+    # 使われず消えた。3件出す予定の日に1件しか出ないことになる。
+    # 型の割り当ても同じ理由で成功順にする（失敗すると CARD の順番が飛ぶ）。
+    filled = 0
+
+    for article in articles:
+        if filled >= len(schedule):
+            # 埋められる枠が無くなった。残りは翌日に回る（消費済みにしていない）
+            log_error(f"投稿時刻が埋まったため {len(articles) - filled}件を見送ります")
             break
 
-        kind = KIND_ROTATION[index % len(KIND_ROTATION)]
+        kind = KIND_ROTATION[filled % len(KIND_ROTATION)]
         image_key: str | None = None
         caption: str | None = None
         # card_generator / image_generator / artifacts が揃っていない場合は
@@ -254,9 +261,10 @@ def plan_daily_posts(
         if image_key:
             drafts = [dataclasses.replace(drafts[0], image_key=image_key), *drafts[1:]]
 
-        at = schedule[index]
+        at = schedule[filled]
         group_ids.append(posts.enqueue(drafts, {d.position: at for d in drafts}))
         log_success(f"{at:%H:%M} に {kind} を積みました（{article.title[:24]}）")
+        filled += 1
 
     if not group_ids:
         return DailyPostPlan(group_ids=[], skipped_reason="積める下書きがありませんでした")
