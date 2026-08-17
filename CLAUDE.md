@@ -19,6 +19,9 @@ uv run pytest -m slow                             # ffmpeg を実際に起動す
 uv run pytest -m live                             # 実APIを叩く（課金あり）
 
 npm run build:css                                 # テンプレートのクラスを変えたとき
+
+cd remotion && npm install                        # 動画レンダラの依存（初回のみ）
+cd remotion && npm run studio                     # 見た目を作り込む（ブラウザで見ながら）
 ```
 
 `-f` は `short`（縦・約35秒）/ `tiktok`（縦・60〜90秒）/ `long`（横・約5分）。
@@ -33,6 +36,10 @@ git config core.hooksPath .githooks
 ## 外部依存
 
 **ffmpeg / ffprobe** が PATH に必要（`video_composer.py` が subprocess で直接呼ぶ）。
+
+**Node 22 / Chrome Headless Shell** — `VIDEO_RENDERER=remotion` のときに必要。
+`remotion/` が独立したパッケージで、CSS 用の `package.json` とは別物
+（あちらは devDependencies だけで実行時に Node は不要）。
 
 **Azure OpenAI** — 台本生成（`AZURE_OPENAI_DEPLOYMENT`）と画像生成
 （`AZURE_OPENAI_IMAGE_DEPLOYMENT`）の2つのデプロイを使う。
@@ -231,6 +238,93 @@ Actions を CD 専用にしたときに外した（Issue #15）。現時点で�
 **`shutdown_on` に日付を入れた時点で、気付く経路を作り直す必要がある**
 （pre-push は作業していなければ走らない）。
 
+### 動画のレンダラは2つある（既定は今も ffmpeg）
+
+`VIDEO_RENDERER` で切り替える。`ffmpeg` は静止画（`gpt-image-2`）を並べる
+現行の方式、`remotion` は React で図解を描く方式。
+
+`remotion` を選ぶと**画像生成 API を1回も呼ばない**。`gpt-image-2` のクォータ
+（サブスクリプション・リージョン単位で上限4）が動画の律速だったので、
+これが消えると X の画像カードとの共食いも無くなる。
+
+実測（2026-08-17、2 vCPU / 4Gi / concurrency 2、1080x1920 / 35秒 = 1050フレーム）。
+
+| 条件 | 時間 | ピーク RSS |
+|---|---|---|
+| 全画面 `filter: blur(40px)` あり | 598秒 | 1,519MB |
+| blur なし | **199秒** | 1,915MB |
+
+戻すときに壊しやすい点。
+
+- **`--concurrency` を必ず明示する。** 既定は「ホストの CPU スレッド数の半分」で
+  cgroup を見ない。`os.cpu_count()` がコンテナで20を返した罠と同じ構造。
+  `_available_cpus()` の値を渡している。
+- **全画面 `filter: blur()` を使わない。** 上の表の3倍差。デザインの制約であって
+  実装の詳細ではない。`tests/test_remotion_design_rules.py` が名前で狙い撃つ
+  （`box-shadow` を重ねる等の別経路は防げない）。検査は `//` と `/* */` を
+  近似的に取り除いてから grep する（トークナイザではない）。`Background.tsx` /
+  `theme.ts` が禁止している構文そのもの（`blur(` / `@font-face`）をコメントで
+  説明しているため、削らずに素朴に grep すると自分の説明コメントに引っかかる。
+  裏を返せば、文字列リテラルの中に `blur(` を隠せば検査を通り抜ける
+  （近似ゆえの穴で、直していない）。
+- **速くなるとメモリが増える。** blur を外した方がピーク RSS が上（1,519 → 1,915MB）。
+  フレーム生成が速いぶんエンコード待ちのバッファが溜まる。4GB に収まるが余裕は
+  2倍しかない。逃げ道は `disallowParallelEncoding`。
+- **Remotion は無音の映像までしか作らない。** 音声の多重化は `mux_audio()` を
+  共有する。Remotion 内で `<Audio>` を使って1発で作ってはいけない
+  （1段で合成していた頃、マクサーが映像パケットを溜め込んでピーク 4,077MB で
+  OOM killer に殺された）。
+- **Web フォントを使わない。** システムの `fonts-noto-cjk` を `font-family` で
+  参照する。`@font-face` は `delayRender` / `waitForFonts` で待たない限り
+  最初の数フレームだけフォールバックフォントで焼かれ、**エラーにならない**。
+  代償としてローカル（Windows / Yu Gothic）と本番（Linux / Noto Sans CJK）で
+  字形が変わるので、**最終確認は Docker 経由で行う**。
+- **フレーム範囲は Python 側で解く**（`resolve_frame_spans`）。単調増加の強制と
+  「タイミングの要素数はセグメント数+1」の契約が Python にあるため。各開始秒を
+  独立に丸めると長さ0のシーンができ、Remotion は例外を出さずシーンが飛んだ
+  動画を黙って作る。
+- **自動フォールバックは無い。** Remotion が失敗したらジョブを失敗させ、リースと
+  再試行に任せる。黙って `ffmpeg` に落ちると「毎朝の生成が古い見た目で回り続けて
+  誰も気付かない」状態になる（CD が無かった頃と同じ形の失敗）。
+- **Node は `node:22-trixie-slim` から取る。** 実行ステージの `python:3.13-slim` は
+  Debian 13 (trixie)。`node:22-slim` は bookworm(12) なので混ぜてはいけない。
+- **タイムアウトは900秒**（実測199秒の4.5倍）。`FFMPEG_TIMEOUT_SEC`（1800秒）は
+  流用しない。ジョブのリース（15分）とほぼ同じ長さになるが、`_start_heartbeat` が
+  独立した daemon スレッドで延ばすので切れない（`src/jobs/worker.py`）。
+  **そこを同期処理に変えると前提が崩れる。**
+
+**Remotion のライセンスは個人・3人以下なら商用（収益化含む）も無料。**
+4人以上は Company License が必須で、自動化用途は $0.01/render・最低 $100/月。
+**受託や共同作業では相手方の人数も合算される。** 運用主体が変わったら再判定する。
+
+### 図解の構造は LLM に出させ、文字はコードが描く
+
+`src/models/scene.py` の `SceneVisual` が出力契約。`layout` は3種類
+（`statement` / `compare` / `flow`）の閉じた集合で、レイアウト1つに React
+コンポーネントが1つ対応する。
+
+- **見出しとキャプションのフィールドは作っていない。** 見出しは
+  `text_overlays[i]`、字幕は `segment_narrations[i]` から取る。検証フレームの
+  実物で、見出し・キャプション・字幕の3つを乗せるとキャプションと字幕が
+  同じことを言っていた（880c95f の「同じ主張を2回出しても情報は増えない」）。
+- **`statement` は半数以下に制限している。** 図を持たないレイアウトなので、
+  モデルが全部これを選ぶと静止画スライドショーだった頃の紙芝居に戻る。
+  実在する劣化経路で、モデルは楽な選択肢に寄る。
+- **`items` の数字は記事本文と突き合わせる。** カードでは「画像側は機械的に
+  検査できないのでスタイル文で閉じた」（記事に無い `¥980` が絵に描かれた）が、
+  Remotion では**描く文字がデータなので検査できる**。`ScriptGenerator` が
+  `ungrounded_numbers` で見て、根拠が無ければ理由を伝えて引き直す。
+  **分量の超過と違い、最終試行でも通さない。**
+- **`stat`（数字1つを主役にする）レイアウトは作っていない。** 効果的だが、
+  直したばかりの数値捏造を正面から誘発する。数値検査が実運用で効いていることを
+  確認してから足す。
+- **`items` の8字上限と「ちょうど2個」はカードからの借り物。** カードは
+  1024x1024、動画は 1080x1920 で面積が違う。カードでは上限90字が正常な出力を
+  3回連続で弾いた前例があるので、動画でも実測で決め直す。
+- `image_prompts` は `remotion` では使わないが**残してある**。
+  `VIDEO_RENDERER=ffmpeg` への退路を生かすため、両レンダラが同じ台本から
+  動く状態を保つ。
+
 ## 既知の設計上の負債
 
 リファクタリング途中のため、以下は意図的に残している。
@@ -239,6 +333,14 @@ Actions を CD 専用にしたときに外した（Issue #15）。現時点で�
 - **`data/news/*.json` を書き換え可能なデータストアとして使っている。**
   同一プロセス内はロックで守っているが、複数プロセスからは守れない。
   Phase 4 で SQLite に移す。
+- **見出しの改行が不自然に折れる。未解決。** `Subtitle.tsx:34` と
+  `Headline.tsx:22` に `word-break: auto-phrase` を当てたが、実物のフレームで
+  確認したところ効いていない。検証で「推論コストが桁で下 / がる」と、
+  「ことでした」が「こ / とでした」に割れた（2026-08-17、`remotion/out/check.png`）。
+  `_wrap_text` が14文字で機械的に切っているのと同じ課題が形を変えて残っている。
+  直すなら次のいずれか。テキストが props に渡る前に Python 側で分かち書きして
+  改行位置を制御する、`<wbr>` / ZWSP をコード側で挿入する、BudouX のような
+  文節チャンク化を挟む。`auto-phrase` 単独では足りないと分かった前提で選ぶこと。
 
 ### OAuth トークンも保存先を差し替える
 
@@ -602,13 +704,18 @@ tenant level resource provider` という原因の分からないエラーにな
 ### チェックは pre-push に寄せている
 
 lint / 型 / テストは GitHub Actions ではなく `.githooks/pre-push` で走る。
-ローカルで数十秒（実測: 全体で約30秒）で終わるものを、push のたびに ubuntu
-ランナーで再実行しても遅くなるだけだった。
+ローカルで数十秒（実測: 全体で約58秒。Remotion 導入前は約30秒だった）で
+終わるものを、push のたびに ubuntu ランナーで再実行しても遅くなるだけだった。
+増えた約30秒は実際の Remotion レンダリング（2秒ぶんのフレーム）1回分で、
+Node + Chrome + `mux_audio` の統合を検査する唯一の自動実行経路がこれである。
 
 ```bash
 git config core.hooksPath .githooks   # clone した直後に一度だけ
 ```
 
+- **`node` に加えて `remotion/node_modules` の存在も検査する。** node があっても
+  `npm install` していなければ Remotion の slow テストは静かに skip される。
+  ffmpeg / ffprobe と同じ理由（下記）で、hook の先頭で両方落とす。
 - **`uv sync --frozen` ではなく `uv lock --check` を使う。** 見たいのは
   「lock が pyproject と一致しているか」だけで、sync は `.venv` を書き換えるため、
   Windows で開発サーバを上げたまま push すると
