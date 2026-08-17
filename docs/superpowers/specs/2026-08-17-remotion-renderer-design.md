@@ -302,6 +302,17 @@ Remotion のレンダリングが失敗したとき `ffmpeg` レンダラへ自�
 `VIDEO_RENDERER` の既定を `ffmpeg` にして入れるので、**マージしても見た目は変わらない。**
 切り替えを人の判断にするための段取り。
 
+「見た目が変わらない」だけでは足りない。**新しい失敗経路も増やさない**必要がある。
+シーンのラベルの数値の根拠の検査（`_ungrounded_scene_numbers`）は、最初の実装では
+レンダラに関係なく例外にしていた。ラベルを描くのは Remotion だけなので、既定の
+`ffmpeg` では**画面のどこにも出ない数値のために台本生成が失敗し、ジョブが3回の試行を
+使い切って FAILED になる**状態だった（`Pipeline.run_from_article` が本文を
+`content[:2000]` で切るため、切り捨てた先に出てくるバージョン番号は捏造に見える）。
+現在は `VideoRenderer.draws_scene_text`（`ffmpeg` は False、`remotion` は True）を
+`ScriptGenerator.generate(enforce_scene_grounding=...)` に渡し、描かないレンダラでは
+**検査は走らせるが警告に留める**。警告を残すのは、切り替える前に捏造の頻度を知る
+唯一の経路だからである。
+
 1. **既定 `ffmpeg` で入れる。** `scenes` が台本に増えるだけで、生成される動画は今と同じ。
    この時点で両レンダラが同じ台本から動く状態になる
 2. **ローカルで `VIDEO_RENDERER=remotion` にして実物を見る。** ここで

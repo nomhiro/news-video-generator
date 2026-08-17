@@ -673,6 +673,8 @@ Before output, verify:
         language: str = "ja",
         video_format: str = "short",
         source_url: str = "",
+        *,
+        enforce_scene_grounding: bool = True,
     ) -> Script:
         """ニューストピックから台本を生成する。
 
@@ -682,6 +684,11 @@ Before output, verify:
             video_format: 動画形式 ("short" or "long")
             source_url: 元記事の URL。説明文への出典追記に使う。
                 モデルには渡さない（URL を知らないので捏造する）
+            enforce_scene_grounding: シーンのラベルに記事外の数値があったら
+                台本生成を失敗させるか。**既定は厳格**（引数を渡し忘れた
+                呼び出し元が安全側に落ちるため）。ラベルを描かないレンダラ
+                （`VideoRenderer.draws_scene_text is False`）のときだけ
+                呼び出し元が False にする。False でも検査は走り、警告に残る
 
         Returns:
             Script: 生成された台本
@@ -731,11 +738,25 @@ Before output, verify:
                 # 長いまま進める方が実用的。警告だけ残す。
                 log_warning(f"分量が範囲外のまま採用します: {problem}")
 
-            # 数値の根拠の検査。**分量と違い、最終試行でも通さない。**
-            # 記事に無い数値が画面に描かれるのは、ニュースを扱う以上
-            # 最も害が大きい種類の誤りで、警告して採用する選択肢が無い。
+            # 数値の根拠の検査。ラベルを描くレンダラでは**分量と違い、
+            # 最終試行でも通さない。** 記事に無い数値が画面に描かれるのは、
+            # ニュースを扱う以上最も害が大きい種類の誤りで、警告して採用する
+            # 選択肢が無い。
+            #
+            # 描かないレンダラ（既定の ffmpeg）では警告だけに留める。画面に
+            # 一切出ない数値のために再試行を使い切って FAILED にすると、
+            # 「既定のままなら振る舞いは変わらない」という前提が失敗経路の側で
+            # 崩れる。検査自体は走らせる — 切り替える前に捏造の頻度を知る
+            # 唯一の経路であり、`Pipeline.run_from_article` が本文を
+            # `content[:2000]` で切る影響（切り捨てた先のバージョン番号が
+            # 捏造に見える）もここに出る。
             ungrounded = self._ungrounded_scene_numbers(draft, news_topic)
-            if ungrounded:
+            if ungrounded and not enforce_scene_grounding:
+                log_warning(
+                    "シーンのラベルに記事にない数値がありますが、"
+                    f"このレンダラは描かないので採用します: {sorted(ungrounded)}"
+                )
+            elif ungrounded:
                 last_problem = f"シーンのラベルに記事にない数値があります: {sorted(ungrounded)}"
                 if remaining:
                     log_warning(

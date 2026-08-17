@@ -131,6 +131,11 @@ class RemotionRenderer:
     # 丸ごと飛ばせる根拠で、クォータの律速が消える理由。
     needs_images = False
 
+    # シーンのラベルを実際に画面へ描く。これが `ScriptGenerator` に数値の根拠を
+    # **強制させる**根拠（記事に無い数値が画面に出るのは、ニュースを扱う以上
+    # 最も害が大きい種類の誤り）。`needs_images` とは別の問いなので別に持つ。
+    draws_scene_text = True
+
     def render(
         self,
         *,

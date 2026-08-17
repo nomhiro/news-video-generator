@@ -37,3 +37,16 @@ def test_ffmpeg_renderer_needs_images() -> None:
 
 def test_remotion_renderer_does_not_need_images() -> None:
     assert RemotionRenderer().needs_images is False
+
+
+def test_ffmpeg_renderer_does_not_draw_scene_text() -> None:
+    """ffmpeg レンダラはシーンのラベルを一切描かない。
+
+    `needs_images` とは別の問いなので別のフラグにしてある。混ぜると
+    「画像は要らないがラベルは描かない」レンダラが表現できなくなる。
+    """
+    assert FfmpegRenderer().draws_scene_text is False
+
+
+def test_remotion_renderer_draws_scene_text() -> None:
+    assert RemotionRenderer().draws_scene_text is True

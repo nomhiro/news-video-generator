@@ -194,8 +194,15 @@ class Pipeline:
             script_paths: dict[str, Path] = {}
 
             for lang in languages:
+                # 数値の根拠の強制はレンダラに従う。ラベルを描かない
+                # レンダラ（既定の ffmpeg）では、画面に出ない数値のために
+                # 台本生成を失敗させない（警告だけ残る）。
                 script = self.script_generator.generate(
-                    news_topic, lang, video_format, source_url=source_url
+                    news_topic,
+                    lang,
+                    video_format,
+                    source_url=source_url,
+                    enforce_scene_grounding=self.video_renderer.draws_scene_text,
                 )
                 scripts[lang] = script
 

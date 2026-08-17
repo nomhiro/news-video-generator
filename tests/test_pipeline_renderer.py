@@ -60,7 +60,11 @@ class _FakeScript:
 
 
 class _FakeScriptGenerator:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
     def generate(self, *args: object, **kwargs: object) -> _FakeScript:
+        self.calls.append(kwargs)
         return _FakeScript()
 
 
@@ -77,6 +81,7 @@ class _FakeVideoRenderer:
     """`needs_images = False` の状態を模す（実際の Remotion は呼ばない）。"""
 
     needs_images = False
+    draws_scene_text = True
 
     def render(self, *, output_path: Path, **kwargs: object) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,3 +119,34 @@ def test_pipeline_skips_image_generation_for_remotion(tmp_path: Path) -> None:
 
     assert result["status"] == "success"
     assert result["images"] == []
+
+
+class _FakeNonDrawingRenderer(_FakeVideoRenderer):
+    """ffmpeg レンダラと同じ「ラベルを描かない」状態を模す。"""
+
+    needs_images = False
+    draws_scene_text = False
+
+
+def _run_with_fakes(pipeline: Pipeline, renderer: _FakeVideoRenderer) -> _FakeScriptGenerator:
+    """外部サービスを一切呼ばずに `Pipeline.run` を1回通す。"""
+    script_generator = _FakeScriptGenerator()
+    pipeline.script_generator = script_generator  # type: ignore[assignment]
+    pipeline.voice_generator = _FakeVoiceGenerator()  # type: ignore[assignment]
+    pipeline.video_renderer = renderer
+    pipeline.run("トピック", languages=["ja"])
+    return script_generator
+
+
+def test_grounding_enforcement_follows_the_renderer(tmp_path: Path) -> None:
+    """数値の根拠の強制を、ラベルを描くレンダラのときだけ有効にすること。
+
+    描かないレンダラ（既定の ffmpeg）で例外にすると、画面に出ない数値のために
+    ジョブが3回の試行を使い切って FAILED になる。「マージしても毎朝の自動生成の
+    振る舞いは変わらない」という前提が、出力ではなく失敗経路の側で崩れる。
+    """
+    drawing = _run_with_fakes(Pipeline(_config(tmp_path)), _FakeVideoRenderer())
+    assert drawing.calls[0]["enforce_scene_grounding"] is True
+
+    not_drawing = _run_with_fakes(Pipeline(_config(tmp_path)), _FakeNonDrawingRenderer())
+    assert not_drawing.calls[0]["enforce_scene_grounding"] is False

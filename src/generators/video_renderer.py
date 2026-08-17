@@ -40,6 +40,21 @@ class VideoRenderer(Protocol):
         """
         ...
 
+    @property
+    def draws_scene_text(self) -> bool:
+        """シーンのラベル（`SceneVisual.items`）を画面に描くか。
+
+        `needs_images` とは**別の問い**なので別のフラグにしている。混ぜると
+        「画像は要らないがラベルは描かない」レンダラを表現できなくなり、
+        この区別を落とした結果として起きたバグ（描かないレンダラでも
+        記事に無い数値で台本生成が失敗した）がそのまま戻る。
+
+        False なら `ScriptGenerator` は数値の根拠の検査を警告に留める。
+        描かない文字のために再試行を使い切って FAILED にするのは、
+        既定の経路に新しい失敗を持ち込むだけである。
+        """
+        ...
+
     def render(
         self,
         *,
@@ -63,6 +78,8 @@ class FfmpegRenderer:
     """
 
     needs_images = True
+    # シーンのラベルは1文字も描かない（`scenes` を受け取っても捨てる）。
+    draws_scene_text = False
 
     def __init__(self) -> None:
         self._composer = VideoComposer()
