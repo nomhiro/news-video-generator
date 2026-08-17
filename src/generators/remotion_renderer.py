@@ -34,6 +34,54 @@ class RemotionRenderError(Exception):
     """Remotion のレンダリングに失敗した。"""
 
 
+# 挿絵1枚の固定スタイル文。**ここが単一の情報源。**
+#
+# `src/social/card_visual.py` の `CARD_STYLE_PROMPT` を再利用しない理由:
+# あちらの地は off-white の紙で、`remotion/src/theme.ts` のスレート地
+# （`COLORS.bg = "#242226"`）の上に紙色の挿絵を貼ると「貼り付けた画像」に
+# 見える。この動画の地の暗さはオーナーが選んだ既定であり、挿絵側がそれに
+# 合わせる。配色はテーマの実際の HEX 値（`COLORS.accent` / `COLORS.accent2`）
+# から取っており、コードとデザインを別々に触ると必ずずれるので、値を変えたら
+# ここも直す。
+#
+# 制約に「文字を一切描かない」を含める。動画の文字は React（`Headline.tsx`
+# など）が描くので、挿絵側に文字が入ると二重に描かれる、あるいは言語が
+# 揃わない不整合が起きる。
+ILLUSTRATION_STYLE_PROMPT = """\
+Medium: a hand-drawn illustrated sketch, chalk-like off-white linework on a
+  dark slate/sumi ground (near-black warm charcoal, like a blackboard).
+Palette: dark slate ground (#242226), off-white chalk linework (#f3ecdf),
+  two muted accents only — a muted teal (#5ea79c) and a muted amber
+  (#c98a4c). Flat fills only — no gradients, no glossy 3D render, no
+  photorealism.
+Composition: a single explanatory illustration, the subject centred with
+  generous margins on all sides. It will be displayed as a wide band
+  cropped from this square image, so keep the subject readable within a
+  horizontal crop through the centre.
+Constraints: absolutely no text, letters, numerals, or captions anywhere in
+  the image (all text is drawn separately by the video renderer — any text
+  baked into the image would duplicate or contradict it). No watermarks, no
+  logos, no UI chrome. Do not depict any real, identifiable person; use
+  simple silhouettes if a figure is needed."""
+
+
+def build_illustration_prompt(subject: str) -> str:
+    """gpt-image-2 に渡す挿絵プロンプトを組む。
+
+    `src/social/card_visual.py` の `build_card_prompt` と同じ二段構え
+    （LLM が *what*、コード側が *how* を前置する）。ここは1本の動画で
+    共有する挿絵1枚ぶんなので、`key_details` や `labels` のような
+    複数要素の構造は持たない — 主題は `illustration_subject` の1文だけ。
+
+    Args:
+        subject: `Script.illustration_subject`（英語1文、スタイル語は含まない）
+
+    Returns:
+        str: 固定のスタイル文を前置したプロンプト
+    """
+    return f"{ILLUSTRATION_STYLE_PROMPT}\nSubject: {subject}"
+
+
 def resolve_frame_spans(
     segment_timings: list[float],
     audio_duration_sec: float,

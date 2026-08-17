@@ -10,12 +10,44 @@ from pathlib import Path
 import pytest
 
 from src.generators.remotion_renderer import (
+    ILLUSTRATION_STYLE_PROMPT,
     RemotionRenderer,
     RemotionRenderError,
+    build_illustration_prompt,
     resolve_frame_spans,
 )
 from src.models.scene import SceneLayout, SceneVisual
 from src.utils.line_break import ZWSP
+
+# --------------------------------------------------------------------------
+# 挿絵のプロンプト（Task 2）
+# --------------------------------------------------------------------------
+
+
+def test_illustration_prompt_prepends_the_fixed_style() -> None:
+    """CardVisual と同じ二段構え。LLM の主題の前にスタイル文が来ること。"""
+    prompt = build_illustration_prompt("A single lightbulb glowing above a laptop.")
+    assert prompt.startswith(ILLUSTRATION_STYLE_PROMPT)
+    assert "A single lightbulb glowing above a laptop." in prompt
+
+
+def test_illustration_style_forbids_text() -> None:
+    """文字は React が描くので、画像側には一切描かせないこと。"""
+    assert "no text" in ILLUSTRATION_STYLE_PROMPT.lower()
+
+
+def test_illustration_style_is_not_the_card_style() -> None:
+    """カードのスタイル文を再利用しないこと（地の色が紙 vs スレートで違う）。"""
+    from src.social.card_visual import CARD_STYLE_PROMPT
+
+    assert ILLUSTRATION_STYLE_PROMPT != CARD_STYLE_PROMPT
+
+
+def test_illustration_style_uses_the_theme_colors() -> None:
+    """テーマの実際の HEX 値を使うこと（デザインとコードがずれると気付きにくい）。"""
+    assert "#242226" in ILLUSTRATION_STYLE_PROMPT  # theme.ts の COLORS.bg
+    assert "#5ea79c" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent
+    assert "#c98a4c" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent2
 
 
 def test_spans_cover_the_whole_audio_without_gaps() -> None:
