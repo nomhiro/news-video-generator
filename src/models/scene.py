@@ -27,6 +27,15 @@ from pydantic import BaseModel, model_validator
 # 3回連続で弾いた前例があるので、動画でも実測で決める。
 MAX_LABEL_CHARS = 8
 
+# 関係性ラベル（relation）1個の最大文字数。
+#
+# items と同じ名札の役割（矢印や対比の脇に置く短い語）であって、文ではない。
+# `切替` `1/10` `並列化` のような単語1つを想定している。MAX_LABEL_CHARS と
+# 値は同じ8だが、こちらも**暫定値**である。カードの MAX_LABEL_CHARS が
+# 実測で決まった経緯（90字が正常な出力を弾いた前例）と同じく、動画の実フレームを
+# 見てから再測定する前提を残す。
+MAX_RELATION_CHARS = 8
+
 
 class SceneLayout(StrEnum):
     """シーンの型。1つにつき React コンポーネントが1つ対応する。
@@ -67,10 +76,14 @@ class SceneVisual(BaseModel):
     Attributes:
         layout: シーンの型
         items: 図に入れる短いラベル。個数は `ITEMS_PER_LAYOUT` が決める
+        relation: 2つの要素の関係性を表す短い語（`切替` `1/10` `並列化` など）。
+            `compare` / `flow` では必須、`statement` では空文字列を要求する
+            （対比・因果の図が無いシーンに関係性は存在しない）
     """
 
     layout: SceneLayout
     items: list[str]
+    relation: str
 
     @model_validator(mode="after")
     def _check_items(self) -> SceneVisual:
@@ -96,4 +109,36 @@ class SceneVisual(BaseModel):
                     f"items の{i}番目が長すぎます"
                     f"（{len(item)}字、最大{MAX_LABEL_CHARS}字）: {item!r}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _check_relation(self) -> SceneVisual:
+        """relation の要否と長さを検証する。
+
+        `statement` は2つの要素を持たないので、関係性ラベルは描く場所が無い
+        （どこにも表示されない値をモデルに出させると、次に見た人が「なぜ
+        使われていないのか」を調べる無駄が生まれる）。
+
+        Returns:
+            SceneVisual: 検証済みの自身
+
+        Raises:
+            ValueError: statement で relation が非空、または compare/flow で
+                relation が空・長すぎる場合
+        """
+        if self.layout is SceneLayout.STATEMENT:
+            if self.relation.strip():
+                raise ValueError(
+                    f"layout=statement は relation を空文字列にする必要があります"
+                    f"（図が無く、関係性を描く場所が無いため）: {self.relation!r}"
+                )
+            return self
+
+        if not self.relation.strip():
+            raise ValueError(f"layout={self.layout.value} は relation が空です")
+        if len(self.relation) > MAX_RELATION_CHARS:
+            raise ValueError(
+                f"relation が長すぎます"
+                f"（{len(self.relation)}字、最大{MAX_RELATION_CHARS}字）: {self.relation!r}"
+            )
         return self

@@ -398,7 +398,7 @@ def test_scenes_must_match_segment_count() -> None:
     シーンの数が合わないと、レンダラが参照するインデックスが範囲外になる。
     """
     with pytest.raises(ValidationError, match="配列長の不一致"):
-        _draft(scenes=[{"layout": "compare", "items": ["前", "後"]}])
+        _draft(scenes=[{"layout": "compare", "items": ["前", "後"], "relation": "変化"}])
 
 
 def test_too_many_statement_scenes_is_rejected() -> None:
@@ -409,9 +409,9 @@ def test_too_many_statement_scenes_is_rejected() -> None:
     with pytest.raises(ValidationError, match="statement が多すぎます"):
         _draft(
             scenes=[
-                {"layout": "statement", "items": []},
-                {"layout": "statement", "items": []},
-                {"layout": "compare", "items": ["前", "後"]},
+                {"layout": "statement", "items": [], "relation": ""},
+                {"layout": "statement", "items": [], "relation": ""},
+                {"layout": "compare", "items": ["前", "後"], "relation": "変化"},
             ]
         )
 

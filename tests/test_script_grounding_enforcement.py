@@ -21,9 +21,9 @@ from tests.factories import make_draft
 
 # 記事本文に無い数値をラベルに含む下書き
 _UNGROUNDED_SCENES = [
-    {"layout": "compare", "items": ["50%", "従来"]},
-    {"layout": "flow", "items": ["入力", "選択"]},
-    {"layout": "statement", "items": []},
+    {"layout": "compare", "items": ["50%", "従来"], "relation": "改善"},
+    {"layout": "flow", "items": ["入力", "選択"], "relation": "変換"},
+    {"layout": "statement", "items": [], "relation": ""},
 ]
 
 _ARTICLE = "記事本文に数値は一つも出てこない。" * 5

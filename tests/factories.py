@@ -31,9 +31,9 @@ def make_draft(**overrides: object) -> ScriptDraft:
         "estimated_duration": 35,
         "segment_narrations": ["文A。", "文B。", "文C。"],
         "scenes": [
-            {"layout": "compare", "items": ["従来", "新方式"]},
-            {"layout": "flow", "items": ["入力", "選択"]},
-            {"layout": "statement", "items": []},
+            {"layout": "compare", "items": ["従来", "新方式"], "relation": "切替"},
+            {"layout": "flow", "items": ["入力", "選択"], "relation": "変換"},
+            {"layout": "statement", "items": [], "relation": ""},
         ],
     }
     payload.update(overrides)
