@@ -62,17 +62,10 @@ def test_spans_end_exactly_at_the_audio_end() -> None:
 
 
 def _scenes() -> list[SceneVisual]:
-    # 6個にしているのは "short" 形式の segment_count（6）に合わせるため。
-    # `chapter_labels` は `segment_allocation` を経由し、構成パート数（5）を
-    # 下回るセグメント数を拒否するので、3個のような短い数は使えない
-    # （production では常に 6 or 10 なので、この制約は実害を生まない）。
     return [
         SceneVisual(layout=SceneLayout.STATEMENT, items=[], relation=""),
         SceneVisual(layout=SceneLayout.COMPARE, items=["従来", "新方式"], relation="切替"),
         SceneVisual(layout=SceneLayout.FLOW, items=["入力", "選択"], relation="変換"),
-        SceneVisual(layout=SceneLayout.COMPARE, items=["旧案", "新案"], relation="改善"),
-        SceneVisual(layout=SceneLayout.FLOW, items=["原因", "結果"], relation="発生"),
-        SceneVisual(layout=SceneLayout.STATEMENT, items=[], relation=""),
     ]
 
 
@@ -121,9 +114,9 @@ def test_props_carry_resolved_frame_spans(captured, tmp_path) -> None:
         output_path=tmp_path / "out.mp4",
         image_paths=[],
         scenes=_scenes(),
-        text_overlays=["見出し1", "見出し2", "見出し3", "見出し4", "見出し5", "見出し6"],
-        segment_narrations=["字幕1", "字幕2", "字幕3", "字幕4", "字幕5", "字幕6"],
-        segment_timings=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+        text_overlays=["見出し1", "見出し2", "見出し3"],
+        segment_narrations=["字幕1", "字幕2", "字幕3"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
         language="ja",
         video_format="short",
     )
@@ -131,33 +124,16 @@ def test_props_carry_resolved_frame_spans(captured, tmp_path) -> None:
     assert props["width"] == 1080
     assert props["height"] == 1920
     assert props["durationInFrames"] == 90
-    assert [s["fromFrame"] for s in props["scenes"]] == [0, 15, 30, 45, 60, 75]
-    assert [s["headline"] for s in props["scenes"]] == [
-        "見出し1",
-        "見出し2",
-        "見出し3",
-        "見出し4",
-        "見出し5",
-        "見出し6",
-    ]
-    assert [s["subtitle"] for s in props["scenes"]] == [
-        "字幕1",
-        "字幕2",
-        "字幕3",
-        "字幕4",
-        "字幕5",
-        "字幕6",
-    ]
+    assert [s["fromFrame"] for s in props["scenes"]] == [0, 30, 60]
+    assert [s["headline"] for s in props["scenes"]] == ["見出し1", "見出し2", "見出し3"]
+    assert [s["subtitle"] for s in props["scenes"]] == ["字幕1", "字幕2", "字幕3"]
     assert props["scenes"][1]["items"] == ["従来", "新方式"]
 
 
-def test_props_carry_relation_and_chapter(captured, tmp_path) -> None:
-    """次のディスパッチ（React側）が読む2つの新規プロップ。
+def test_props_carry_relation(captured, tmp_path) -> None:
+    """次のディスパッチ（React側）が読む relation プロップ。
 
-    relation はシーンの視覚指示から、chapter はセグメント番号から
-    導出される（chapter は LLM 出力ではない）。6セグメントは
-    `chapter_labels(6, "ja")` の並びと一致するはず
-    （仕組みが2セグメントを占める）。
+    relation はシーンの視覚指示からそのまま来る。
     """
     audio = tmp_path / "voice.mp3"
     audio.write_bytes(b"audio")
@@ -166,29 +142,38 @@ def test_props_carry_relation_and_chapter(captured, tmp_path) -> None:
         output_path=tmp_path / "out.mp4",
         image_paths=[],
         scenes=_scenes(),
-        text_overlays=["見出し1", "見出し2", "見出し3", "見出し4", "見出し5", "見出し6"],
-        segment_narrations=["字幕1", "字幕2", "字幕3", "字幕4", "字幕5", "字幕6"],
-        segment_timings=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+        text_overlays=["見出し1", "見出し2", "見出し3"],
+        segment_narrations=["字幕1", "字幕2", "字幕3"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
         language="ja",
         video_format="short",
     )
     props = captured["props"]
-    assert [s["relation"] for s in props["scenes"]] == [
-        "",
-        "切替",
-        "変換",
-        "改善",
-        "発生",
-        "",
-    ]
-    assert [s["chapter"] for s in props["scenes"]] == [
-        "フック",
-        "事実",
-        "仕組み",
-        "仕組み",
-        "インパクト",
-        "結論",
-    ]
+    assert [s["relation"] for s in props["scenes"]] == ["", "切替", "変換"]
+
+
+def test_props_carry_empty_chapter_when_too_few_scenes_to_allocate(captured, tmp_path) -> None:
+    """章ラベルは装飾なので、配分できない短さでもレンダリング自体は成立すること。
+
+    `chapter_labels` は構成パート数（5）未満のセグメント数では空文字列で
+    埋める（`segment_allocation` の ValueError をそのまま伝えない）。
+    ここで使う `_scenes()` は3個なので、その劣化経路を通る。
+    """
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"audio")
+    RemotionRenderer().render(
+        audio_path=audio,
+        output_path=tmp_path / "out.mp4",
+        image_paths=[],
+        scenes=_scenes(),
+        text_overlays=["見出し1", "見出し2", "見出し3"],
+        segment_narrations=["字幕1", "字幕2", "字幕3"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
+        language="ja",
+        video_format="short",
+    )
+    props = captured["props"]
+    assert [s["chapter"] for s in props["scenes"]] == ["", "", ""]
 
 
 def test_props_get_line_break_opportunities_for_japanese(captured, tmp_path) -> None:
@@ -206,9 +191,9 @@ def test_props_get_line_break_opportunities_for_japanese(captured, tmp_path) -> 
         output_path=tmp_path / "out.mp4",
         image_paths=[],
         scenes=_scenes(),
-        text_overlays=[headline] * 6,
-        segment_narrations=[subtitle] * 6,
-        segment_timings=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+        text_overlays=[headline] * 3,
+        segment_narrations=[subtitle] * 3,
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
         language="ja",
         video_format="short",
     )
@@ -226,23 +211,9 @@ def test_props_have_no_line_break_opportunities_for_english(captured, tmp_path) 
         output_path=tmp_path / "out.mp4",
         image_paths=[],
         scenes=_scenes(),
-        text_overlays=[
-            "headline 1",
-            "headline 2",
-            "headline 3",
-            "headline 4",
-            "headline 5",
-            "headline 6",
-        ],
-        segment_narrations=[
-            "subtitle 1",
-            "subtitle 2",
-            "subtitle 3",
-            "subtitle 4",
-            "subtitle 5",
-            "subtitle 6",
-        ],
-        segment_timings=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+        text_overlays=["headline 1", "headline 2", "headline 3"],
+        segment_narrations=["subtitle 1", "subtitle 2", "subtitle 3"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
         language="en",
         video_format="short",
     )
@@ -260,9 +231,9 @@ def test_concurrency_is_always_explicit(captured, tmp_path) -> None:
         output_path=tmp_path / "out.mp4",
         image_paths=[],
         scenes=_scenes(),
-        text_overlays=["a", "b", "c", "d", "e", "f"],
-        segment_narrations=["a", "b", "c", "d", "e", "f"],
-        segment_timings=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+        text_overlays=["a", "b", "c"],
+        segment_narrations=["a", "b", "c"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
         language="ja",
         video_format="short",
     )
@@ -279,9 +250,9 @@ def test_props_file_is_removed(captured, tmp_path) -> None:
         output_path=tmp_path / "out.mp4",
         image_paths=[],
         scenes=_scenes(),
-        text_overlays=["a", "b", "c", "d", "e", "f"],
-        segment_narrations=["a", "b", "c", "d", "e", "f"],
-        segment_timings=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+        text_overlays=["a", "b", "c"],
+        segment_narrations=["a", "b", "c"],
+        segment_timings=[0.0, 1.0, 2.0, 3.0],
         language="ja",
         video_format="short",
     )

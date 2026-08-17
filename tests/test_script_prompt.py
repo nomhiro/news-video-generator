@@ -257,7 +257,13 @@ def test_chapter_labels_length_matches_segment_count() -> None:
         assert len(chapter_labels(count, "ja")) == count
 
 
-def test_chapter_labels_rejects_too_few_segments() -> None:
-    """`segment_allocation` の制約をそのまま継承すること。"""
-    with pytest.raises(ValueError, match="構成パート数を下回っています"):
-        chapter_labels(4, "ja")
+def test_chapter_labels_degrades_instead_of_raising_for_too_few_segments() -> None:
+    """章ラベルは装飾なので、配分できない短さでも例外にしないこと。
+
+    `segment_allocation` は構成パート数（5）未満を ValueError で拒否するが、
+    それをそのまま伝えると `RemotionRenderer.render()` が章ラベルのためだけに
+    落ちてしまう（装飾のために本体を落とすのは本末転倒）。空文字列で埋めて
+    「描く文字が無い」と伝える。
+    """
+    assert chapter_labels(4, "ja") == ["", "", "", ""]
+    assert chapter_labels(1, "ja") == [""]
