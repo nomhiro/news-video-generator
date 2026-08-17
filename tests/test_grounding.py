@@ -3,7 +3,7 @@
 自動投稿なので、機械的な検証だけが捏造への防衛線になる。
 """
 
-from src.social.grounding import ungrounded_numbers
+from src.utils.grounding import ungrounded_numbers
 
 
 def test_記事にある数値は通る():

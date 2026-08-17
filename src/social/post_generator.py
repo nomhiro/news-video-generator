@@ -43,7 +43,7 @@ from src.models.social import (
     PostKind,
     weighted_length,
 )
-from src.social.grounding import ungrounded_numbers
+from src.utils.grounding import ungrounded_numbers
 
 # 型ごとの本文の字数予算（日本語の文字数、下限と上限）。
 #
