@@ -35,6 +35,21 @@ const LINE_HEIGHT = 1.28;
 const MIN_SCALE = 0.5;
 
 /**
+ * `文字数/行 ∝ 1/fontSize` という近似への安全係数。
+ *
+ * **実測でこの近似は文字数/行の伸びを過大評価していた。** `compare` の狭い
+ * ゾーン（380px）に45字の見出しを入れる検証で、この係数を掛けずに導出した
+ * fontSize（≈69.7px）でレンダリングしたところ、理論上は4.3行で収まる想定
+ * だったのに実際は5行必要で、最後の行がほぼ丸ごと欠けた。
+ * フレーズ境界改行では、フォントを縮めても「1行に入るフレーズの数」が
+ * 理論値（フォントサイズに反比例）ほど増えない
+ * （92px→69.7px の縮小で文字数/行は 8→約9 にしか伸びず、
+ * 反比例が予測する 10.56 には届かなかった）。この係数はその実測比
+ * （9/10.56 ≈ 0.85）を丸めたもの。
+ */
+const LINE_ESTIMATE_SAFETY_MARGIN = 0.85;
+
+/**
  * 見出し。`Script.text_overlays[i]` が入る。
  *
  * **フォントサイズはゾーンの高さから逆算する。** 以前は
@@ -82,9 +97,10 @@ export const Headline: React.FC<{
   // レイアウトの衝突より読みにくさの方が実害が小さい。
   // ZWSP は表示幅0なので、縮小率の計算対象の文字数から除く（上の定数コメント参照）。
   const visibleLength = Math.max(text.split(ZWSP).join("").length, 1);
-  const idealFontSize = Math.sqrt(
-    (CHARS_PER_LINE_AT_BASE * MEASURED_AT_SIZE * zone.height) / (LINE_HEIGHT * visibleLength),
-  );
+  const idealFontSize =
+    Math.sqrt(
+      (CHARS_PER_LINE_AT_BASE * MEASURED_AT_SIZE * zone.height) / (LINE_HEIGHT * visibleLength),
+    ) * LINE_ESTIMATE_SAFETY_MARGIN;
   const fontSize = Math.max(size * MIN_SCALE, Math.min(size, idealFontSize));
 
   return (
