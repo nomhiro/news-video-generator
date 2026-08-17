@@ -2,7 +2,7 @@
   "name": "news-video-generator-styles",
   "private": true,
   "type": "module",
-  "description": "CSS のビルドにのみ使う。実行時に Node は不要（生成済み static/css/app.css をコミットしている）。",
+  "description": "CSS のビルドにのみ使う。動画のレンダラは別パッケージ（remotion/）で、そちらは実行時に Node が必要。",
   "scripts": {
     "build:css": "tailwindcss -i static/css/input.css -o static/css/app.css --minify",
     "watch:css": "tailwindcss -i static/css/input.css -o static/css/app.css --watch"

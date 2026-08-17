@@ -7,6 +7,9 @@
 #   - libssl / libasound2 : Azure Speech SDK のネイティブ依存。
 #                        wheel の中身は C++ ライブラリのラッパで、これが無いと
 #                        import 時点で OSError になる（Windows の wheel は自己完結）
+#   - Node / Chrome     : Remotion レンダラ（インフォグラフィックの描画）が使う。
+#                        ローカルには Node が常にあるため、コンテナに載せたときだけ
+#                        「生成しようとして初めて落ちる」形で露見する
 
 # ---- ビルドステージ: 依存を解決して仮想環境を作る ----
 FROM python:3.13-slim AS builder
@@ -24,6 +27,25 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
+
+# ---- Remotion ステージ: node_modules と Chrome を用意する ----
+#
+# **node:22-trixie-slim を使う。** 実行ステージの python:3.13-slim は
+# Debian 13 (trixie) で、node:22-slim は bookworm(12)。混ぜると glibc と
+# ライブラリ名（libasound2 → libasound2t64 など）が食い違う。
+FROM node:22-trixie-slim AS remotion
+
+WORKDIR /remotion
+
+# 依存だけを先に入れる。src の変更でこのレイヤーを無効化しない。
+COPY remotion/package.json remotion/tsconfig.json remotion/remotion.config.ts ./
+RUN npm install --no-audit --no-fund
+
+COPY remotion/src ./src
+
+# Chrome Headless Shell を焼き込む（約92MB）。実行時に取得させると
+# ネットワークに依存し、初回の動画生成が数十秒遅くなる。
+RUN npx remotion browser ensure
 
 # ---- 実行ステージ ----
 FROM python:3.13-slim AS runtime
@@ -43,12 +65,29 @@ LABEL org.opencontainers.image.source="https://github.com/nomhiro/news-video-gen
 # libssl3 / libasound2 は Azure Speech SDK（azure-cognitiveservices-speech）が
 # 動的リンクするもの。python:3.13-slim には入っていない。
 # ca-certificates が無いと TLS の検証に失敗する。
+#
+# libnss3 〜 libcups2 は Remotion（Chrome Headless Shell）のネイティブ依存。
+# 14個のうち libasound2 は Speech SDK 用に上で入れているので重ねない。
+# 全て trixie で解決することを実測で確認済み（`apt-get install --simulate`）。
 RUN apt-get update && apt-get install --no-install-recommends -y \
         ffmpeg \
         fonts-noto-cjk \
         libssl3 \
         libasound2 \
         ca-certificates \
+        libnss3 \
+        libdbus-1-3 \
+        libatk1.0-0 \
+        libgbm-dev \
+        libxrandr2 \
+        libxkbcommon-dev \
+        libxfixes3 \
+        libxcomposite1 \
+        libxdamage1 \
+        libatk-bridge2.0-0 \
+        libpango-1.0-0 \
+        libcairo2 \
+        libcups2 \
     && rm -rf /var/lib/apt/lists/*
 
 # root で動かさない。
@@ -58,6 +97,14 @@ WORKDIR /app
 
 # ビルドステージで作った仮想環境を持ってくる
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
+
+# Node の実体。node / npm / npx がすべて /usr/local の下にある。
+# 実行ステージと同じ Debian リリース（trixie）のイメージから取るので、
+# glibc の食い違いは起きない。
+COPY --from=remotion /usr/local/bin/node /usr/local/bin/node
+COPY --from=remotion /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 # アプリ本体。
 # .dockerignore が output/ や .venv/ を除いている。
@@ -76,6 +123,10 @@ COPY --chown=app:app migrations/ ./migrations/
 
 # 運用スクリプト（トークンの移送など）。
 COPY --chown=app:app scripts/ ./scripts/
+
+# Remotion のレンダラ。node_modules と Chrome はビルドステージで
+# 用意したものをそのまま持ってくる（実行時 npm install はしない）。
+COPY --from=remotion --chown=app:app /remotion /app/remotion
 
 # 生成物・ニュースデータ・ジョブ表の置き場所。
 #

@@ -25,6 +25,20 @@ command -v ffprobe >/dev/null 2>&1 || {
 	exit 1
 }
 
+# Remotion の slow テストは Node が無いと pytest.skip で静かに飛ぶ。
+# ffmpeg と同じ理由で、先にここで落とす。
+command -v node >/dev/null 2>&1 || {
+	echo "pre-push: node が PATH にありません（-m slow が静かに skip されます）" >&2
+	exit 1
+}
+
+# node があっても remotion/node_modules（npm install 済み）が無ければ同じく
+# skip される。node の存在チェックだけでは足りない。
+[ -d remotion/node_modules ] || {
+	echo "pre-push: remotion/node_modules がありません。cd remotion && npm install を実行してください" >&2
+	exit 1
+}
+
 # ロックファイルの更新漏れを検出する。pyproject.toml を触って uv.lock を
 # 更新していないと落ちる。
 #
