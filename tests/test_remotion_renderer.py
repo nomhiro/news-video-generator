@@ -84,6 +84,20 @@ def test_illustration_style_allows_japanese_labels_but_bans_numerals() -> None:
     assert "no sentence, caption, title, or paragraph anywhere" in lowered
 
 
+def test_illustration_style_demands_margins() -> None:
+    """図と名札を画像の端に寄せさせないこと。
+
+    名札を許した結果、実際に端で文字が欠けた（2026-08-20 の実測: 描画が
+    横幅の 4.7%〜96.5% に及び、末尾フレームで右端まで達して「軽ブロック」の
+    一部が切れた）。レンダラ側は `Illustration.tsx` を `contain` + 縮小配置に
+    直して切り取り自体を無くしたが、**画像が端まで使っていると縮小の余白が
+    足りなくなる**ので、生成側にも余白を要求する。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "central 90% of" in lowered
+    assert "nothing may touch or approach the edge" in lowered
+
+
 def test_illustration_style_requires_an_explanatory_diagram() -> None:
     """1つの仕組みを1枚の説明図として描かせること。
 

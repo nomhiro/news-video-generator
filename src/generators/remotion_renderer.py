@@ -104,6 +104,10 @@ Composition: ONE mechanism explained in ONE diagram, centred, front-on flat
   mechanism — but draw only the parts the explanation needs. One idea only —
   no comic panels, no multi-step timeline, no repeated variants of the same
   figure.
+Margins: every shape and every label must sit well inside the central 90% of
+  the canvas. Nothing may touch or approach the edge of the image — the
+  renderer places this figure inside a band and a label at the edge gets
+  clipped.
 Accent discipline: the accent colour (teal or amber) marks ONLY the part the
   explanation turns on. Every other shape stays dim or off-white. Spreading
   the accent decoratively across unrelated shapes makes the colour carry no
