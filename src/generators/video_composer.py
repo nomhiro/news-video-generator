@@ -2,13 +2,29 @@
 
 import json
 import os
+import re
 import subprocess
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import ClassVar
+from unicodedata import east_asian_width
+
+from PIL import ImageFont
+from PIL.ImageFont import FreeTypeFont
 
 from src.models.formats import FormatSpec, get_spec
 from src.utils.logger import log_error, log_step, log_success, log_warning
+
+
+@lru_cache(maxsize=8)
+def _load_font(font_path: str, size: int) -> FreeTypeFont:
+    """フォントを読む（同じフォントを何度も開かないようにキャッシュする）。
+
+    字幕は1本の動画で6〜10個あり、そのそれぞれで折り返し幅を測るため、
+    毎回開くとフォントファイルの読み込みがその回数だけ走る。
+    """
+    return ImageFont.truetype(font_path, size)
 
 
 class VideoCompositionError(Exception):
@@ -209,8 +225,18 @@ class VideoComposer:
     TEXT_BOX_COLOR = "black@0.7"  # 半透明黒背景
     TEXT_BOX_BORDER = 15  # ボックスの余白
     TEXT_Y_POSITION = "(h-text_h)/3"  # 上から1/3の位置（中央寄り）
-    TEXT_LINE_SPACING = -70  # 行間（ピクセル）- 負の値で行を詰める
-    TEXT_MAX_CHARS_PER_LINE = 14  # 1行の最大文字数
+    # 行間（ピクセル）。drawtext の `line_spacing` は**行送りに加算される**値で、
+    # 行の高さそのものではない。1080x1920 / fontsize=64 のとき行送りは実測 88px
+    # （字面の高さは 68px）なので、詰めるつもりで -70 を入れると行送りが 18px に
+    # なり、2行が重なってまったく読めない動画が出来ていた（実際にそうなっていた）。
+    # 合成は成功し尺も解像度も音声も正しいので、ffprobe では気付けない。
+    # -12 で行送り 76px。詰まって見えるが字面は重ならない。
+    # **フォントサイズを変えたらこの値も測り直す**（絶対値なので追従しない）。
+    TEXT_LINE_SPACING = -12
+    # 1行の最大文字数（**全角換算**）。上限の幅は
+    # `TEXT_MAX_CHARS_PER_LINE * TEXT_FONT_SIZE` ピクセルとして扱う。
+    # 14 × 64 = 896px。box の余白（15×2）を足しても 1080px に収まる。
+    TEXT_MAX_CHARS_PER_LINE = 14
 
     # テキストオーバーレイに使う日本語フォントの候補。
     #
@@ -249,6 +275,21 @@ class VideoComposer:
         Raises:
             VideoCompositionError: 使用可能な日本語フォントが見つからない場合
         """
+        return self._escape_for_ffmpeg(self._resolve_japanese_font_path())
+
+    def _resolve_japanese_font_path(self) -> str:
+        """使用可能な日本語フォントの実パスを返す。
+
+        ffmpeg 用のエスケープと分けている理由: 折り返し幅の実測
+        （`_line_width`）で Pillow に同じフォントを読ませるため、
+        エスケープしていない生のパスが必要になる。
+
+        Returns:
+            str: フォントファイルのパス
+
+        Raises:
+            VideoCompositionError: 使用可能な日本語フォントが見つからない場合
+        """
         override = os.environ.get(self.FONT_PATH_ENV_VAR)
         candidates = (
             [override, *self.JAPANESE_FONT_CANDIDATES]
@@ -258,7 +299,7 @@ class VideoComposer:
 
         for font_path in candidates:
             if font_path and Path(font_path).exists():
-                return self._escape_for_ffmpeg(font_path)
+                return font_path
 
         raise VideoCompositionError(
             "日本語フォントが見つかりません。次のいずれかで解決してください:\n"
@@ -283,12 +324,82 @@ class VideoComposer:
         """
         return font_path.replace("\\", "/").replace(":", "\\:")
 
+    def _line_width(self, text: str) -> float:
+        """1行を描いたときの幅をピクセルで見積もる。
+
+        なぜ実フォントを測るか
+        ----------------------
+        以前は文字数だけで折り返していたため、半角英数が混じった行が
+        極端に短くなった（実測 fontsize=64: 全角14文字は 881px だが
+        "Anthropicが最強AI" の14文字は 551px）。Yu Gothic や Noto Sans CJK は
+        ラテン文字がプロポーショナルなので、幅は文字種だけでも決まらない
+        （'A' は 43.7px、'a' 相当は 33px 前後）。
+
+        ffmpeg には「この文字列の幅」を問い合わせる口が無いため、
+        drawtext に渡すのと同じ TTF を Pillow に読ませて送り幅を得る。
+        実測では ffmpeg の描画幅と1〜2%以内で一致し、常に Pillow 側が
+        わずかに大きい（送り幅にサイドベアリングを含むため）。
+        はみ出す方向に誤らないので都合がよい。
+
+        Args:
+            text: 幅を測る文字列（改行を含まない）
+
+        Returns:
+            float: 幅（ピクセル）
+        """
+        font = self._overlay_font()
+        if font is not None:
+            return float(font.getlength(text))
+
+        # フォントを読めないときの近似。全角を1文字ぶん、半角を半文字ぶんとして
+        # 数える。ラテン大文字では実際より狭く見積もるが、折り返しが
+        # 例外で止まるより粗く折り返す方がまだよい。
+        return sum(
+            self.TEXT_FONT_SIZE * (1.0 if east_asian_width(ch) in "WFA" else 0.5) for ch in text
+        )
+
+    def _overlay_font(self) -> FreeTypeFont | None:
+        """幅の実測に使うフォントを返す。読めなければ None。
+
+        フォントが見つからない場合、動画合成そのものは字幕を諦めて続行する
+        （`compose` が `VideoCompositionError` を捕まえている）。
+        折り返しだけが例外で落ちると、その経路まで壊してしまう。
+        """
+        try:
+            return _load_font(self._resolve_japanese_font_path(), self.TEXT_FONT_SIZE)
+        except (VideoCompositionError, OSError) as e:
+            log_warning(f"フォントを読めないため折り返し幅を近似します: {e}")
+            return None
+
     def _wrap_text(self, text: str, max_chars: int | None = None) -> str:
-        """テキストを指定文字数で自動改行する。
+        """テキストを描画幅で自動改行する。
+
+        `max_chars` は**全角換算**の文字数で、上限の幅は
+        `max_chars * TEXT_FONT_SIZE` ピクセルとして扱う。
+        全角だけの行では従来の文字数指定と同じ結果になる。
+
+        語の途中で割らない
+        ------------------
+        英数の連なり（"Anthropic" / "gpt-image-2"）は1つのまとまりとして扱う。
+        文字数で折り返していた頃は "Anthro / pic" のように語の途中で
+        改行されていた。英語（`-l en`）でも動画を作るのでここは効く。
+        1語で1行に収まらない場合だけ文字単位で割る。
+
+        禁則処理
+        --------
+        `？` や `。` を行頭に置かない（`_break_line`）。実際に生成した動画で
+        "Claude vs GPT画像 何が違う" までが1行に入り、`？` だけが
+        2行目に落ちた。
+
+        2行のときは幅を均す
+        -------------------
+        貪欲に詰めると最後の行が極端に短くなる（実際に生成した動画で
+        "Claude Opus 5 最新モデル登" / "場" になった）。字幕はほとんどが
+        2行なので、2行に収まるときだけ分割位置を選び直す（`_balance_two_lines`）。
 
         Args:
             text: 元のテキスト
-            max_chars: 1行の最大文字数（デフォルトはTEXT_MAX_CHARS_PER_LINE）
+            max_chars: 1行の最大文字数（全角換算。既定は TEXT_MAX_CHARS_PER_LINE）
 
         Returns:
             改行を含むテキスト
@@ -296,20 +407,131 @@ class VideoComposer:
         if max_chars is None:
             max_chars = self.TEXT_MAX_CHARS_PER_LINE
 
-        if len(text) <= max_chars:
+        max_width = max_chars * self.TEXT_FONT_SIZE
+        if self._line_width(text) <= max_width:
             return text
 
-        lines = []
-        current_line = ""
-        for char in text:
-            current_line += char
-            if len(current_line) >= max_chars:
-                lines.append(current_line)
-                current_line = ""
-        if current_line:
-            lines.append(current_line)
+        tokens = self._tokenize_for_wrap(text)
+        lines = self._greedy_wrap(tokens, max_width)
+        if len(lines) == 2:
+            lines = self._balance_two_lines(tokens, max_width) or lines
 
         return "\n".join(lines)
+
+    def _greedy_wrap(self, tokens: list[str], max_width: float) -> list[str]:
+        """上限の幅まで詰めて折り返す。"""
+        lines: list[str] = []
+        current = ""
+        for token in tokens:
+            # 1つで1行に収まらない語は文字単位に崩す（崩さないとはみ出す）
+            pieces = [token] if self._line_width(token) <= max_width else list(token)
+            for piece in pieces:
+                if not current and piece.isspace():
+                    continue  # 行頭の空白は捨てる
+                if current and self._line_width(current + piece) > max_width:
+                    settled, carry = self._break_line(current, piece, max_width)
+                    lines.append(settled)
+                    current = carry + ("" if piece.isspace() else piece)
+                else:
+                    current += piece
+        if current.strip():
+            lines.append(current.rstrip())
+        return lines
+
+    def _balance_two_lines(self, tokens: list[str], max_width: float) -> list[str] | None:
+        """2行に割るとき、左右の幅が最も揃う位置で割る。
+
+        貪欲に詰めると1行目を上限まで使うので、2行目が1文字だけになることがある
+        （実測: "Claude Opus 5 最新モデル登" / "場"）。分割位置の候補を全部試して
+        幅の差が最小のものを選ぶと "Claude Opus 5" / "最新モデル登場" になる。
+
+        候補が無ければ None を返す（貪欲の結果を使う）。1語で1行に収まらない
+        テキストは `tokens` を崩さないここでは割れないため、その経路になる。
+
+        Args:
+            tokens: `_tokenize_for_wrap` の結果
+            max_width: 1行の上限幅
+
+        Returns:
+            list[str] | None: 2行、または候補が無ければ None
+        """
+        best_key: tuple[float, int, int] | None = None
+        best_lines: list[str] | None = None
+
+        for i in range(1, len(tokens)):
+            first = "".join(tokens[:i]).rstrip()
+            second = "".join(tokens[i:]).lstrip()
+            if not first or not second:
+                continue
+            # 禁則は貪欲の場合と同じ基準で見る
+            if second[0] in self.LINE_START_FORBIDDEN or first[-1] in self.LINE_END_FORBIDDEN:
+                continue
+            first_width = self._line_width(first)
+            second_width = self._line_width(second)
+            if first_width > max_width or second_width > max_width:
+                continue
+
+            # 幅の差が同じなら、空白で割れる位置（語の境界）を優先する
+            at_space = 0 if tokens[i - 1].isspace() or tokens[i].isspace() else 1
+            key = (abs(first_width - second_width), at_space, i)
+            if best_key is None or key < best_key:
+                best_key, best_lines = key, [first, second]
+
+        return best_lines
+
+    # 行頭に置かない文字（句読点・閉じ括弧・繰り返し記号・長音など）。
+    # 直前の1文字を一緒に次の行へ送って避ける（ぶら下げにしない。
+    # ぶら下げると上限の幅を超え、フレームからはみ出しうる）。
+    LINE_START_FORBIDDEN: ClassVar[frozenset[str]] = frozenset(
+        "、。，．,.・:;?!？！）］｝」』】〕〉》”’ー〜%‰℃々ゝゞ"
+    )
+
+    # 行末に置かない文字（開き括弧）。次の行へ送る。
+    LINE_END_FORBIDDEN: ClassVar[frozenset[str]] = frozenset("（［｛「『【〔〈《“‘")
+
+    def _break_line(self, current: str, piece: str, max_width: float) -> tuple[str, str]:
+        """折り返し位置を禁則に合わせてずらす。
+
+        Args:
+            current: ここまで積んだ行
+            piece: 次の行の先頭に来る予定のもの
+            max_width: 1行の上限幅（ずらした結果がはみ出さないことの確認に使う）
+
+        Returns:
+            tuple[str, str]: (確定する行, 次の行の頭に送る文字列)
+        """
+        settled = current.rstrip()
+        carry = ""
+
+        # 行頭禁則: 次に来る文字が行頭に置けないなら、直前の1文字を一緒に送る。
+        # 1文字しか残らない行を作らないため、2文字以上あるときだけ動かす。
+        if piece[:1] in self.LINE_START_FORBIDDEN and len(settled) > 1:
+            carry, settled = settled[-1], settled[:-1].rstrip()
+
+        # 行末禁則: 開き括弧が行末に残るなら次の行へ送る。連続することがある。
+        while len(settled) > 1 and settled[-1] in self.LINE_END_FORBIDDEN:
+            carry, settled = settled[-1] + carry, settled[:-1].rstrip()
+
+        # ずらした結果が次の行に収まらないなら、ずらさない。
+        # はみ出す方が読めなくなるので、禁則より幅を優先する。
+        if carry and self._line_width(carry + piece) > max_width:
+            return current.rstrip(), ""
+        return settled, carry
+
+    # 折り返しで途中で割らない「語」。英数の連なりと、その間を繋ぐ記号
+    # （"gpt-image-2" / "MAI-Image-2.6" / "don't" を1つとして扱う）。
+    WORD_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"[0-9A-Za-z]+(?:[-'.’][0-9A-Za-z]+)*")
+
+    def _tokenize_for_wrap(self, text: str) -> list[str]:
+        """折り返しの単位に分ける。英数の語はまとめ、それ以外は1文字ずつ。"""
+        tokens: list[str] = []
+        pos = 0
+        for match in self.WORD_PATTERN.finditer(text):
+            tokens.extend(text[pos : match.start()])
+            tokens.append(match.group())
+            pos = match.end()
+        tokens.extend(text[pos:])
+        return tokens
 
     def _create_text_file(self, text: str, output_dir: Path | None = None, index: int = 0) -> Path:
         """テキストオーバーレイ用のファイルを作成する。
@@ -324,15 +546,22 @@ class VideoComposer:
         """
         wrapped_text = self._wrap_text(text)  # 自動改行を適用
 
+        # 改行は必ず LF で書く（`newline=""`）。
+        #
+        # テキストモードの既定は環境の改行に変換するため、Windows では
+        # CRLF になる。drawtext は textfile の CR を行の一部として扱わず、
+        # **改行が2つあるものとして空行を1行挟む**（実測: 2行の字幕の
+        # 縦幅が 156px → 260px）。開発は Windows でコンテナは Linux なので、
+        # 直さないと手元とクラウドで字幕の見た目が変わる。
         if output_dir:
             # 出力ディレクトリに永続ファイルとして作成
             text_path = output_dir / f"_overlay_text_{index:02d}.txt"
-            with open(text_path, "w", encoding="utf-8") as f:
+            with open(text_path, "w", encoding="utf-8", newline="") as f:
                 f.write(wrapped_text)
         else:
             # 一時ファイルに作成
             fd, temp_path = tempfile.mkstemp(suffix=".txt")
-            with open(fd, "w", encoding="utf-8") as f:
+            with open(fd, "w", encoding="utf-8", newline="") as f:
                 f.write(wrapped_text)
             text_path = Path(temp_path)
 

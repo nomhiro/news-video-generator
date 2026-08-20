@@ -43,10 +43,16 @@ dependencies = [
     "azure-identity>=1.19",
     "sqlalchemy>=2.0",
     "alembic>=1.14",
-    # --- 動画合成（Remotion）---
+    # --- 動画合成 ---
+    # 字幕の折り返し位置を決めるのに、実際のフォントの送り幅を測るため。
+    # 文字数で折り返すと半角英数が混じった行が短くなる（実測: 全角14文字で
+    # 881px に対し "Anthropicが最強AI" の14文字は 551px）。
+    # ffmpeg に幅を問う口が無いので、drawtext と同じ TTF を読んで測る。
+    # （ffmpeg レンダラの字幕用。Remotion では CSS が折り返すので使わない）
+    "pillow>=10.0",
     # 日本語の折り返し位置を決めるフレーズ分割器。Google 製・純 Python・
     # モデル同梱でオフライン動作、API 呼び出しも追加の依存も無い。
-    # `word-break: keep-all` と組んで CSS の折り返しに使う（下記参照）。
+    # `word-break: keep-all` と組んで CSS の折り返しに使う（Remotion 用）。
     "budoux>=0.9.0",
 ]
 
@@ -55,7 +61,6 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.8",
     "mypy>=1.13",
-    "pillow>=10.0", # 生成画像の寸法を検証するため
     "pytest-asyncio>=1.4.0",
 ]
 
