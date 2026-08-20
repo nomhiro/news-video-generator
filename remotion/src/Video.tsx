@@ -29,8 +29,6 @@ export type LayoutProps = {
   relation: string;
   /** 章ラベル（例: "仕組み"）。空文字列なら ChapterTag は何も描かない。 */
   chapter: string;
-  /** 手描き図形の seed のベース。シーンごとに固有の値（シーン index）を渡す。 */
-  seed: number;
   durationInFrames: number;
 };
 
@@ -95,10 +93,6 @@ export const NewsVideo: React.FC<VideoProps> = ({ illustration, scenes }) => (
             items={scene.items}
             relation={scene.relation}
             chapter={scene.chapter}
-            // シーンごとに固有の seed にする。同じ seed を全シーンで使うと、
-            // 手描き線の揺れ方が全図で同一になり、逆に「型で作った」感が
-            // 出てしまう（roughjs は seed が違えば違う揺れを返す）。
-            seed={i}
             durationInFrames={scene.durationInFrames}
           />
         </Sequence>

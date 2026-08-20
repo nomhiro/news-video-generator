@@ -23,7 +23,6 @@ export const Flow: React.FC<LayoutProps> = ({
   items,
   relation,
   chapter,
-  seed,
   durationInFrames,
 }) => {
   const { width } = useVideoConfig();
@@ -44,16 +43,13 @@ export const Flow: React.FC<LayoutProps> = ({
 
   return (
     <>
-      {hasChapter && (
-        <ChapterTag text={chapter} seed={seed * 10 + 1} startFrame={chapterStart} zone={zones.chapter} />
-      )}
+      {hasChapter && <ChapterTag text={chapter} startFrame={chapterStart} zone={zones.chapter} />}
       <Headline text={headline} startFrame={headlineStart} zone={zones.headline} />
       <RelationStrip
         items={items}
         relation={relation}
         // 因果は方向がある（原因→結果）ので矢印を付ける——`Compare` との違いはここだけ。
         arrow
-        seed={seed * 10 + 3}
         zone={zones.relation}
         frameWidth={width}
         boxA={boxA}

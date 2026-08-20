@@ -21,7 +21,6 @@ export const Compare: React.FC<LayoutProps> = ({
   items,
   relation,
   chapter,
-  seed,
   durationInFrames,
 }) => {
   const { width } = useVideoConfig();
@@ -42,16 +41,13 @@ export const Compare: React.FC<LayoutProps> = ({
 
   return (
     <>
-      {hasChapter && (
-        <ChapterTag text={chapter} seed={seed * 10 + 1} startFrame={chapterStart} zone={zones.chapter} />
-      )}
+      {hasChapter && <ChapterTag text={chapter} startFrame={chapterStart} zone={zones.chapter} />}
       <Headline text={headline} startFrame={headlineStart} zone={zones.headline} />
       <RelationStrip
         items={items}
         relation={relation}
         // 対比は対称（方向が無い）ので矢印は付けない——`Flow` との違いはここだけ。
         arrow={false}
-        seed={seed * 10 + 3}
         zone={zones.relation}
         frameWidth={width}
         boxA={boxA}

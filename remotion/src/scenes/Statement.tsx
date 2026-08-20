@@ -17,7 +17,6 @@ export const Statement: React.FC<LayoutProps> = ({
   headline,
   subtitle,
   chapter,
-  seed,
   durationInFrames,
 }) => {
   const zones = useZones("statement");
@@ -30,7 +29,6 @@ export const Statement: React.FC<LayoutProps> = ({
       {hasChapter && (
         <ChapterTag
           text={chapter}
-          seed={seed * 10 + 1}
           startFrame={beatStart(0, totalBeats, durationInFrames)}
           zone={zones.chapter}
         />

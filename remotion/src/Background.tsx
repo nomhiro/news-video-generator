@@ -16,7 +16,10 @@ import { COLORS } from "./theme";
 export const Background: React.FC = () => (
   <AbsoluteFill
     style={{
-      background: `radial-gradient(circle at 50% 38%, #2c292f 0%, ${COLORS.bg} 70%)`,
+      // 中心のハイライトは COLORS.bg より少し明るいだけの、暖色寄りだった
+      // 旧地の色（#2c292f）に代わるニュートラルな中間色。フラット化で
+      // 地を黒炭色（#1b1a1d）に寄せたので、ハイライトも同じ方向で揃える。
+      background: `radial-gradient(circle at 50% 38%, #232227 0%, ${COLORS.bg} 70%)`,
     }}
   />
 );
