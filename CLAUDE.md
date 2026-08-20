@@ -238,14 +238,23 @@ Actions を CD 専用にしたときに外した（Issue #15）。現時点で�
 **`shutdown_on` に日付を入れた時点で、気付く経路を作り直す必要がある**
 （pre-push は作業していなければ走らない）。
 
-### 動画のレンダラは2つある（既定は今も ffmpeg）
+### 動画のレンダラは2つある（既定は remotion）
 
-`VIDEO_RENDERER` で切り替える。`ffmpeg` は静止画（`gpt-image-2`）を並べる
-現行の方式、`remotion` は React で図解を描く方式。
+`VIDEO_RENDERER` で切り替える。`remotion` は React で図解を描く方式（既定）、
+`ffmpeg` は静止画（`gpt-image-2`）を並べる旧方式で、退路として残してある。
 
-`remotion` を選ぶと**画像生成 API を1回も呼ばない**。`gpt-image-2` のクォータ
-（サブスクリプション・リージョン単位で上限4）が動画の律速だったので、
-これが消えると X の画像カードとの共食いも無くなる。
+**既定を ffmpeg から remotion に変えたのは 2026-08-20。** 本番の Container App
+には `VIDEO_RENDERER` の env を置いていないので、**`config.py` の既定値が
+そのまま毎朝の自動生成の見た目を決める**。ここが ffmpeg に戻ると、レンダラを
+いくら作り込んでも毎朝の生成は静止画のスライドショーで回り続ける——CD が
+無かった頃と同じ形の「気付かないまま古いものが動き続ける」失敗になる。
+`tests/test_pipeline_renderer.py` が既定を検査している。
+
+`remotion` でも**画像生成 API は1回だけ呼ぶ**（動画全体で共有する挿絵1枚。
+`ILLUSTRATION_SIZE` の節を参照）。旧方式はショート1本で6枚使っていたので、
+`gpt-image-2` のクォータ（サブスクリプション・リージョン単位で上限4）の
+消費は6分の1になる。X の画像カードとの共食いも大幅に減る——**消えては
+いない**。
 
 実測（2026-08-17、2 vCPU / 4Gi / concurrency 2、1080x1920 / 35秒 = 1050フレーム）。
 
@@ -253,6 +262,24 @@ Actions を CD 専用にしたときに外した（Issue #15）。現時点で�
 |---|---|---|
 | 全画面 `filter: blur(40px)` あり | 598秒 | 1,519MB |
 | blur なし | **199秒** | 1,915MB |
+
+既定を remotion に切り替えるとき、**本番イメージで実際にレンダリングして
+確認した**（2026-08-20、`docker run --memory=4g --cpus=2`）。
+1080x1920 / 540フレームで **106秒**——1050フレームに外挿すると約206秒で、
+上の199秒と整合する。タイムアウト（900秒）に対して4倍以上の余裕がある。
+
+このとき Chrome の位置も実イメージで確かめた。
+`npx remotion browser ensure` は
+`/remotion/node_modules/.remotion/chrome-headless-shell/` に置くので、
+`COPY --from=remotion /remotion /app/remotion` で一緒に入る
+（`~/.cache` には**置かれない**）。`tests/test_container_image.py` は
+Dockerfile の**文面**しか見ていないので、この配置は文面からは分からない。
+
+**`remotion/public/` はイメージに存在しない。** git は空ディレクトリを
+追跡しないため。`_place_illustration` が
+`mkdir(parents=True, exist_ok=True)` で作るので実害は無いが、
+ここを `mkdir` 無しに変えると**コンテナでだけ**挿絵の配置に失敗する
+（`migrations/` を入れ忘れて起動に失敗したのと同じ形の罠）。
 
 戻すときに壊しやすい点。
 

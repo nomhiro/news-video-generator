@@ -129,16 +129,28 @@ class Config(BaseSettings):
     # --- 動画のレンダラ ---
     #
     # ffmpeg: 静止画（gpt-image-2）を並べる現行の方式。
-    # remotion: React で図解を描く方式。画像生成 API を使わない。
+    # remotion: React で図解を描く方式。画像生成 API は挿絵1枚だけに使う
+    #           （旧方式はショート1本で6枚。クォータの消費が6分の1になる）。
     #
-    # **既定は ffmpeg。** これは今日動いているパイプラインで、クラウドで
-    # 問題が出たときの退路になる。切り替えは人が明示的に行う
-    # （自動フォールバックは作っていない。理由は
-    # src/generators/video_renderer.py の docstring）。
+    # **既定は remotion**（2026-08-20 に ffmpeg から切り替えた）。
     #
-    # remotion には Node 22 と Chrome Headless Shell が必要。
+    # 切り替えの理由は「既定が ffmpeg のままだと意味が無い」ため。本番の
+    # Container App には `VIDEO_RENDERER` の env を置いていないので、
+    # **この既定値がそのまま毎朝の自動生成の見た目を決める**。ここを
+    # ffmpeg に残したままレンダラを作り込んでも、毎朝の生成は旧方式
+    # （静止画のスライドショー）で回り続ける。CD が無かった頃と同じ形の
+    # 「気付かないまま古いものが動き続ける」失敗になる。
+    #
+    # **自動フォールバックは無い。** remotion が失敗したらジョブを失敗させ、
+    # リースと再試行に任せる（理由は
+    # src/generators/video_renderer.py の docstring）。つまり本番イメージに
+    # Node 22 と Chrome Headless Shell が無ければ、毎朝の生成は丸ごと
+    # 失敗する。ffmpeg へ黙って落ちて旧見た目で回り続けるより、
+    # 失敗して気付く方を選んでいる。
+    #
     # ローカルでは `cd remotion && npm install` を一度実行する。
-    video_renderer: Literal["ffmpeg", "remotion"] = Field(default="ffmpeg")
+    # ffmpeg 方式は退路として残してあり、`VIDEO_RENDERER=ffmpeg` で戻せる。
+    video_renderer: Literal["ffmpeg", "remotion"] = Field(default="remotion")
 
     # --- 出力 ---
     #

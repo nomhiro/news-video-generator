@@ -35,15 +35,23 @@ def _config(tmp_path: Path, **overrides: object) -> Config:
     return Config(_env_file=None, output_dir=tmp_path / "output", **DUMMY_ENV, **overrides)  # type: ignore[arg-type,call-arg]
 
 
-def test_default_config_selects_ffmpeg(tmp_path: Path) -> None:
-    """マージしても見た目が変わらないこと。"""
+def test_default_config_selects_remotion(tmp_path: Path) -> None:
+    """**既定が remotion であること。**
+
+    本番の Container App には `VIDEO_RENDERER` の env を置いていないので、
+    この既定値がそのまま毎朝の自動生成の見た目を決める。ここが ffmpeg に
+    戻ると、レンダラをいくら作り込んでも毎朝の生成は旧方式（静止画の
+    スライドショー）で回り続ける——CD が無かった頃と同じ形の
+    「気付かないまま古いものが動き続ける」失敗になる。
+    """
     pipeline = Pipeline(_config(tmp_path))
-    assert isinstance(pipeline.video_renderer, FfmpegRenderer)
-
-
-def test_remotion_config_selects_remotion_renderer(tmp_path: Path) -> None:
-    pipeline = Pipeline(_config(tmp_path, video_renderer="remotion"))
     assert isinstance(pipeline.video_renderer, RemotionRenderer)
+
+
+def test_ffmpeg_config_selects_ffmpeg_renderer(tmp_path: Path) -> None:
+    """退路が生きていること（`VIDEO_RENDERER=ffmpeg` で戻せる）。"""
+    pipeline = Pipeline(_config(tmp_path, video_renderer="ffmpeg"))
+    assert isinstance(pipeline.video_renderer, FfmpegRenderer)
 
 
 class _FakeScript:
