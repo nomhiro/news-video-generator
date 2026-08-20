@@ -16,19 +16,37 @@ from src.generators.remotion_renderer import (
     build_illustration_prompt,
     resolve_frame_spans,
 )
-from src.models.scene import SceneLayout, SceneVisual
+from src.models.scene import IllustrationConcept, SceneLayout, SceneVisual
 from src.utils.line_break import ZWSP
 
 # --------------------------------------------------------------------------
-# 挿絵のプロンプト（Task 2）
+# 挿絵のプロンプト（Task 2 / フラット化と構造化）
 # --------------------------------------------------------------------------
 
 
+def _concept(**overrides: str) -> IllustrationConcept:
+    payload = {"left": "selected experts", "right": "one shared router", "relation": "routes to"}
+    payload.update(overrides)
+    return IllustrationConcept.model_validate(payload)
+
+
 def test_illustration_prompt_prepends_the_fixed_style() -> None:
-    """CardVisual と同じ二段構え。LLM の主題の前にスタイル文が来ること。"""
-    prompt = build_illustration_prompt("A single lightbulb glowing above a laptop.")
+    """CardVisual と同じ二段構え。組み立てた構図の指示の前にスタイル文が来ること。"""
+    prompt = build_illustration_prompt(_concept())
     assert prompt.startswith(ILLUSTRATION_STYLE_PROMPT)
-    assert "A single lightbulb glowing above a laptop." in prompt
+
+
+def test_illustration_prompt_names_only_the_two_elements() -> None:
+    """left/right/relation を「2要素だけを描け」という指示に組み立てること。
+
+    構図の文章自体を LLM に書かせない（コード側の権威にする）ので、
+    ここでは組み立てた結果の文言を検査する。
+    """
+    prompt = build_illustration_prompt(_concept())
+    assert "selected experts" in prompt
+    assert "one shared router" in prompt
+    assert "routes to" in prompt
+    assert "exactly two elements" in prompt
 
 
 def test_illustration_style_forbids_text() -> None:
@@ -36,8 +54,32 @@ def test_illustration_style_forbids_text() -> None:
     assert "no text" in ILLUSTRATION_STYLE_PROMPT.lower()
 
 
+def test_illustration_style_forbids_incidental_props() -> None:
+    """付随物（コーヒー・観葉植物・部屋など）を明示的に禁じること。
+
+    実際に生成した挿絵が「オフィスで働く人々」という場面を描いた反省
+    （`remotion_renderer.py` のコメント参照）を踏まえ、「場面ではない」と
+    言い切る一文を含む。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "incidental props" in lowered
+    assert "not a scene" in lowered
+
+
+def test_illustration_style_is_flat_not_hand_drawn() -> None:
+    """フラットな図であることを明示し、手描き・チョークは明示的に禁じる側にのみ
+    出てくること（旧スタイル文はチョークを肯定する側で使っていた）。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "flat" in lowered
+    assert "no hand-drawn wobble" in lowered
+    assert "no visible brush or chalk strokes" in lowered
+    assert "chalk-like" not in lowered
+    assert "hand-drawn illustrated sketch" not in lowered
+
+
 def test_illustration_style_is_not_the_card_style() -> None:
-    """カードのスタイル文を再利用しないこと（地の色が紙 vs スレートで違う）。"""
+    """カードのスタイル文を再利用しないこと（地の色が紙 vs 暗い地で違う）。"""
     from src.social.card_visual import CARD_STYLE_PROMPT
 
     assert ILLUSTRATION_STYLE_PROMPT != CARD_STYLE_PROMPT
@@ -45,9 +87,9 @@ def test_illustration_style_is_not_the_card_style() -> None:
 
 def test_illustration_style_uses_the_theme_colors() -> None:
     """テーマの実際の HEX 値を使うこと（デザインとコードがずれると気付きにくい）。"""
-    assert "#242226" in ILLUSTRATION_STYLE_PROMPT  # theme.ts の COLORS.bg
-    assert "#5ea79c" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent
-    assert "#c98a4c" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent2
+    assert "#1b1a1d" in ILLUSTRATION_STYLE_PROMPT  # theme.ts の COLORS.bg
+    assert "#2dd4bf" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent
+    assert "#f2a93c" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent2
 
 
 def test_spans_cover_the_whole_audio_without_gaps() -> None:

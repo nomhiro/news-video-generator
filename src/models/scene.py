@@ -1,7 +1,9 @@
-"""動画の1シーンに描くものの視覚指示。
+"""動画に描くものの視覚指示。1シーン単位（`SceneVisual`）と動画1本単位
 
-なぜ画像生成モデルに描かせないか
---------------------------------
+（`IllustrationConcept`）の2つを持つ。
+
+なぜ画像生成モデルに描かせないか（`SceneVisual`）
+--------------------------------------------------
 図解主体に振ったので、描く対象は「絵」ではなく「構造」である。LLM に構造を
 出させて Remotion（React）が描けば、文字は常に正確で、回ごとのブレも無く、
 `gpt-image-2` のクォータ（サブスクリプション・リージョン単位で上限4）も
@@ -10,6 +12,12 @@
 `src/social/card_visual.py` の `CardVisual` と役割は似ているが、意図的に
 別モデルにしてある。あちらは**画像生成モデルへの英語の指示**で、こちらは
 **レンダラが読む構造**。共有すると、片方の都合でもう片方が壊れる。
+
+なぜ挿絵（`IllustrationConcept`）だけは画像生成モデルに描かせるか
+--------------------------------------------------------------------
+挿絵は動画1本につき1枚だけで、`gpt-image-2` のクォータを消費してもX の
+画像カードとの共食いは小さい。ただし主題を自由文で出させると場面を作って
+しまうため、`left` / `right` / `relation` の3語に構造を固定してある。
 """
 
 from __future__ import annotations
@@ -141,4 +149,67 @@ class SceneVisual(BaseModel):
                 f"relation が長すぎます"
                 f"（{len(self.relation)}字、最大{MAX_RELATION_CHARS}字）: {self.relation!r}"
             )
+        return self
+
+
+# `IllustrationConcept` の各語（left/right/relation）1つの最大文字数。
+#
+# `SceneVisual.items` の名札（`MAX_LABEL_CHARS` = 8字）は日本語の名札用で、
+# こちらは英語1〜3語の画像生成プロンプト用の語なので別の定数にする。
+# "selected experts" のような英語1〜3語の句が収まる程度に、実物を見て
+# 決め直す前提の暫定値を置く（`MAX_LABEL_CHARS` と同じ経緯）。
+MAX_CONCEPT_WORD_CHARS = 40
+
+
+class IllustrationConcept(BaseModel):
+    """動画全体で共有する挿絵1枚の主題を「2つの要素とその関係」で表す。
+
+    `SceneVisual` が**1シーン**の図の構造であるのに対し、これは**動画1本**に
+    つき1枚だけ生成する挿絵（`remotion/src/Illustration.tsx`）の主題である。
+    どちらも「LLM に構造を出させ、コード側がスタイルを前置する」という
+    二段構えは同じだが、対象（シーン単位 / 動画単位）が違うので同じ型に
+    しない。
+
+    なぜ自由文の1文（旧 `illustration_subject`）をやめたか
+    --------------------------------------------------------
+    自由文はモデルに「場面」を作らせてしまう。ルーティングでコストを
+    1/10にする記事に対して実際に生成した挿絵は、オフィスでコーヒーを
+    片手に働く人々、観葉植物、丸いアイコン4つを描いていた——文章としては
+    主題に触れているが、絵として伝わるのは「AIっぽい何か」でしかない。
+    `CardVisual.key_details` をちょうど2個に固定した判断と同じで、範囲では
+    なく固定値の構造を強制すれば、モデルは場面を描く余地を持たない。
+
+    Attributes:
+        left: 左に描く要素（英語1〜3語）
+        right: 右に描く要素（英語1〜3語）
+        relation: 2つの関係（英語1〜3語。例: "routes to", "splits into"）
+    """
+
+    left: str
+    right: str
+    relation: str
+
+    @model_validator(mode="after")
+    def _check_words(self) -> IllustrationConcept:
+        """各語が非空・長さ上限以内であることを検証する。
+
+        `_validate_insights` と同じ理由で strip 後の長さを見る
+        （空白だけの文字列を `Field(min_length=...)` では弾けない）。
+
+        Returns:
+            IllustrationConcept: 検証済みの自身
+
+        Raises:
+            ValueError: いずれかの語が空、空白のみ、または長すぎる場合
+        """
+        for field_name in ("left", "right", "relation"):
+            value: str = getattr(self, field_name)
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError(f"{field_name} が空です")
+            if len(stripped) > MAX_CONCEPT_WORD_CHARS:
+                raise ValueError(
+                    f"{field_name} が長すぎます"
+                    f"（{len(stripped)}字、最大{MAX_CONCEPT_WORD_CHARS}字）: {stripped!r}"
+                )
         return self

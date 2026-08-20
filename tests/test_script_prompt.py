@@ -18,7 +18,7 @@ import pytest
 
 from src.generators.script_generator import ScriptGenerator, chapter_labels, segment_allocation
 from src.models.formats import SPECS, VideoFormat, get_spec
-from src.models.script import MAX_HEADLINE_CHARS, MAX_ILLUSTRATION_SUBJECT_CHARS
+from src.models.script import MAX_HEADLINE_CHARS
 
 FORMATS = ["short", "tiktok", "long"]
 LANGUAGES = ["ja", "en"]
@@ -166,28 +166,40 @@ def test_overlay_instruction_states_the_enforced_limit(video_format: str, langua
 
 
 # --------------------------------------------------------------------------
-# illustration_subject（Remotion レンダラが動画全体で共有する挿絵の主題）
+# illustration_concept（Remotion レンダラが動画全体で共有する挿絵の主題を
+# 「2つの要素とその関係」で表したもの）
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
 def test_illustration_instruction_is_injected(video_format: str, language: str) -> None:
-    """挿絵の主題を出させる指示が実際に入っていること。"""
+    """挿絵の主題を出させる指示が実際に入っていること。left/right/relation の
+    3つを求める指示であること（自由文の1文ではない）。
+    """
     prompt = _prompt(language, video_format)
-    assert "illustration_subject" in prompt
+    assert "illustration_concept" in prompt
+    illustration_rule = prompt.split("illustration_concept")[1].split("\n")[0]
+    assert "left" in illustration_rule
+    assert "right" in illustration_rule
+    assert "relation" in illustration_rule
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
-def test_illustration_instruction_states_the_enforced_limit(
+def test_illustration_instruction_forbids_scene_descriptions(
     video_format: str, language: str
 ) -> None:
-    """上限が、実際に検査している値としてプロンプトに出ていること。
+    """場面・情景の描写を明示的に禁じること。
 
-    `_overlay_spec` と同じ理由で、数値をプロンプトに直接書かず
-    `MAX_ILLUSTRATION_SUBJECT_CHARS` から作る。
+    実際に生成した挿絵で、記事の主題（ルーティングでコストを1/10にする）に
+    対して「オフィスで働く人々」という場面を描いてしまった。自由文が場面を
+    作らせる以上、構造を固定するだけでなく、この指示自体でも明示的に禁じる。
     """
     prompt = _prompt(language, video_format)
-    assert str(MAX_ILLUSTRATION_SUBJECT_CHARS) in prompt
+    illustration_rule = prompt.split("illustration_concept")[1]
+    if language == "ja":
+        assert "場面" in illustration_rule or "情景" in illustration_rule
+    else:
+        assert "scene" in illustration_rule.lower() or "setting" in illustration_rule.lower()
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
@@ -200,7 +212,7 @@ def test_illustration_instruction_forbids_style_words(video_format: str, languag
     矛盾する指示が1つのプロンプトに混ざった）と同じ壊れ方をする。
     """
     prompt = _prompt(language, video_format)
-    illustration_rule = prompt.split("illustration_subject")[1].split("\n")[0]
+    illustration_rule = prompt.split("illustration_concept")[1]
     if language == "ja":
         assert "スタイル" in illustration_rule or "画材" in illustration_rule
     else:
@@ -208,14 +220,18 @@ def test_illustration_instruction_forbids_style_words(video_format: str, languag
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
-def test_output_example_includes_illustration_subject(video_format: str, language: str) -> None:
+def test_output_example_includes_illustration_concept(video_format: str, language: str) -> None:
     """JSON 例に必須フィールドが載っていること。
 
     例に無いとモデルは例に寄せた出力をして、スキーマ違反で再試行になる。
     """
     prompt = _prompt(language, video_format)
     example = prompt.split("<output_format>")[1].split("</output_format>")[0]
-    assert '"illustration_subject"' in example
+    assert '"illustration_concept"' in example
+    illustration_example = example.split('"illustration_concept"')[1].split("}")[0]
+    assert '"left"' in illustration_example
+    assert '"right"' in illustration_example
+    assert '"relation"' in illustration_example
 
 
 def test_overlay_examples_do_not_restate_the_limit() -> None:

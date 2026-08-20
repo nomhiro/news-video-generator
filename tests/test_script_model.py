@@ -14,9 +14,9 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from src.models.scene import MAX_CONCEPT_WORD_CHARS
 from src.models.script import (
     MAX_HEADLINE_CHARS,
-    MAX_ILLUSTRATION_SUBJECT_CHARS,
     MIN_INSIGHT_CHARS,
     Script,
     ScriptDraft,
@@ -479,41 +479,49 @@ def test_script_also_rejects_too_long_headline() -> None:
 
 
 # --------------------------------------------------------------------------
-# illustration_subject（Remotion レンダラが動画全体で共有する挿絵の主題）
+# illustration_concept（Remotion レンダラが動画全体で共有する挿絵の主題を
+# 「2つの要素とその関係」で表したもの）
 # --------------------------------------------------------------------------
 
 
-def test_rejects_empty_illustration_subject() -> None:
-    with pytest.raises(ValidationError, match="illustration_subject が空です"):
-        _draft(illustration_subject="")
+def _concept(**overrides: str) -> dict[str, str]:
+    """検証を通る最小の `illustration_concept` を作る。"""
+    payload = {"left": "selected experts", "right": "one shared router", "relation": "routes to"}
+    payload.update(overrides)
+    return payload
 
 
-def test_rejects_whitespace_only_illustration_subject() -> None:
-    """空白だけの主題も空として扱うこと（`_validate_insights` と同じ理由）。"""
-    with pytest.raises(ValidationError, match="illustration_subject が空です"):
-        _draft(illustration_subject="   ")
+def test_rejects_empty_illustration_concept_field() -> None:
+    with pytest.raises(ValidationError, match="left が空です"):
+        _draft(illustration_concept=_concept(left=""))
 
 
-def test_rejects_too_long_illustration_subject() -> None:
-    with pytest.raises(ValidationError, match="illustration_subject が長すぎます"):
-        _draft(illustration_subject="a" * (MAX_ILLUSTRATION_SUBJECT_CHARS + 1))
+def test_rejects_whitespace_only_illustration_concept_field() -> None:
+    """空白だけの語も空として扱うこと（`_validate_insights` と同じ理由）。"""
+    with pytest.raises(ValidationError, match="right が空です"):
+        _draft(illustration_concept=_concept(right="   "))
 
 
-def test_accepts_illustration_subject_at_the_limit() -> None:
+def test_rejects_too_long_illustration_concept_field() -> None:
+    with pytest.raises(ValidationError, match="relation が長すぎます"):
+        _draft(illustration_concept=_concept(relation="a" * (MAX_CONCEPT_WORD_CHARS + 1)))
+
+
+def test_accepts_illustration_concept_field_at_the_limit() -> None:
     """上限ちょうどは通すこと（境界での off-by-one を防ぐ）。"""
-    draft = _draft(illustration_subject="a" * MAX_ILLUSTRATION_SUBJECT_CHARS)
-    assert len(draft.illustration_subject) == MAX_ILLUSTRATION_SUBJECT_CHARS
+    draft = _draft(illustration_concept=_concept(left="a" * MAX_CONCEPT_WORD_CHARS))
+    assert len(draft.illustration_concept.left) == MAX_CONCEPT_WORD_CHARS
 
 
-def test_to_script_preserves_illustration_subject() -> None:
-    draft = _draft(illustration_subject="A single lightbulb glowing above a laptop.")
+def test_to_script_preserves_illustration_concept() -> None:
+    draft = _draft(illustration_concept=_concept())
     script = draft.to_script("ja")
-    assert script.illustration_subject == draft.illustration_subject
+    assert script.illustration_concept == draft.illustration_concept
 
 
-def test_script_also_rejects_empty_illustration_subject() -> None:
+def test_script_also_rejects_empty_illustration_concept_field() -> None:
     """`Script` 側でも同じ検査が効くこと。JSON から読み直した経路も守る。"""
     data = _draft().to_script("ja").to_dict()
-    data["illustration_subject"] = ""
-    with pytest.raises(ValidationError, match="illustration_subject が空です"):
+    data["illustration_concept"]["left"] = ""
+    with pytest.raises(ValidationError, match="left が空です"):
         Script.model_validate(data)

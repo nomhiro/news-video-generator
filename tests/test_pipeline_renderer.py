@@ -15,6 +15,7 @@ from typing import Any
 from config import Config
 from src.generators.remotion_renderer import ILLUSTRATION_SIZE
 from src.generators.video_renderer import FfmpegRenderer, RemotionRenderer
+from src.models.scene import IllustrationConcept
 from src.pipeline import Pipeline
 
 DUMMY_ENV: dict[str, object] = {
@@ -54,7 +55,9 @@ class _FakeScript:
         self.text_overlays = ["headline"]
         self.segment_narrations = ["narration"]
         self.full_narration = "narration"
-        self.illustration_subject = "A single lightbulb glowing above a laptop."
+        self.illustration_concept = IllustrationConcept(
+            left="selected experts", right="one shared router", relation="routes to"
+        )
 
     def to_json_file(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,9 +172,9 @@ def test_pipeline_generates_one_shared_illustration_when_renderer_needs_one(
 ) -> None:
     """`image_count() == 1` のレンダラには挿絵を1枚だけ生成して渡すこと。
 
-    `image_prompts`（複数枚用）ではなく `illustration_subject`（1文）から
-    プロンプトを組み、`ImageGenerator.generate_batch` に渡す枚数も1枚だけ
-    であることを確かめる。
+    `image_prompts`（複数枚用）ではなく `illustration_concept`（2要素とその
+    関係）からプロンプトを組み、`ImageGenerator.generate_batch` に渡す枚数も
+    1枚だけであることを確かめる。
     """
     pipeline = Pipeline(_config(tmp_path, video_renderer="remotion"))
     pipeline.script_generator = _FakeScriptGenerator()  # type: ignore[assignment]

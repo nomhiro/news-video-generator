@@ -19,7 +19,6 @@ from src.models.formats import FormatSpec, get_spec
 from src.models.scene import ITEMS_PER_LAYOUT, MAX_LABEL_CHARS, MAX_RELATION_CHARS, SceneLayout
 from src.models.script import (
     MAX_HEADLINE_CHARS,
-    MAX_ILLUSTRATION_SUBJECT_CHARS,
     Script,
     ScriptDraft,
 )
@@ -185,8 +184,8 @@ class ScriptGenerator:
     # 要素数は segment_count から作る（short/tiktok は6、long は10）。
     SCENES_EXAMPLE_TOKEN = "<<SCENES_EXAMPLE>>"
 
-    # プロンプト内で挿絵（illustration_subject）の指示を差し込む位置。
-    # 上限は models/script.py の MAX_ILLUSTRATION_SUBJECT_CHARS が単一の
+    # プロンプト内で挿絵（illustration_concept）の指示を差し込む位置。
+    # 各語の長さ上限は models/scene.py の MAX_CONCEPT_WORD_CHARS が単一の
     # 情報源なので、プロンプト側には値を書かない。
     ILLUSTRATION_SPEC_TOKEN = "<<ILLUSTRATION_SPEC>>"
 
@@ -217,7 +216,7 @@ class ScriptGenerator:
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
 - hashtags: 5〜8個（"shorts"は必須）
 - scenes: <<SCENES_SPEC>>
-- illustration_subject: <<ILLUSTRATION_SPEC>>
+- illustration_concept: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -261,7 +260,7 @@ class ScriptGenerator:
         "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
+    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
     "estimated_duration": 35
 }
 </output_format>
@@ -273,7 +272,7 @@ class ScriptGenerator:
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に6個あること
-6. illustration_subject が英語1文で、スタイル語（画材・配色・技法）を含まないこと
+6. illustration_concept の left/right/relation が英語1〜3語で、場面や設定を描写せず、スタイル語（画材・配色・技法）も含まないこと
 </verification>"""
 
     SYSTEM_PROMPT_LONG_JA = """<role>
@@ -305,7 +304,7 @@ class ScriptGenerator:
 - description: 要約＋絵文字、タイムスタンプ、📌でポイント、💬でCTA、ハッシュタグ
 - hashtags: 5〜10個
 - scenes: <<SCENES_SPEC>>
-- illustration_subject: <<ILLUSTRATION_SPEC>>
+- illustration_concept: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -361,7 +360,7 @@ class ScriptGenerator:
         "画像10用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
+    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
     "estimated_duration": 300
 }
 </output_format>
@@ -373,7 +372,7 @@ class ScriptGenerator:
 3. text_overlays が正確に10個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に10個あること
-6. illustration_subject が英語1文で、スタイル語（画材・配色・技法）を含まないこと
+6. illustration_concept の left/right/relation が英語1〜3語で、場面や設定を描写せず、スタイル語（画材・配色・技法）も含まないこと
 </verification>"""
 
     SYSTEM_PROMPT_EN = """<role>
@@ -403,7 +402,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - description: Line 1 summary + emoji, 📌 for bullet points, 💬 for CTA, end with hashtags
 - hashtags: 5-8 tags (must include "shorts")
 - scenes: <<SCENES_SPEC>>
-- illustration_subject: <<ILLUSTRATION_SPEC>>
+- illustration_concept: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -447,7 +446,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
+    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
     "estimated_duration": 35
 }
 </output_format>
@@ -459,7 +458,7 @@ Before output, verify:
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
 5. scenes has exactly 6 elements
-6. illustration_subject is a single English sentence with no style words (medium, palette, technique)
+6. illustration_concept's left/right/relation are short English phrases (1-3 words) naming only the two elements and their relation, with no scene/setting description and no style words (medium, palette, technique)
 </verification>"""
 
     SYSTEM_PROMPT_LONG_EN = """<role>
@@ -491,7 +490,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - description: Summary + emoji, timestamps, 📌 for bullet points, 💬 for CTA, hashtags
 - hashtags: 5-10 tags
 - scenes: <<SCENES_SPEC>>
-- illustration_subject: <<ILLUSTRATION_SPEC>>
+- illustration_concept: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -547,7 +546,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 10 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
+    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
     "estimated_duration": 300
 }
 </output_format>
@@ -559,7 +558,7 @@ Before output, verify:
 3. text_overlays has exactly 10 elements
 4. No element is an empty string
 5. scenes has exactly 10 elements
-6. illustration_subject is a single English sentence with no style words (medium, palette, technique)
+6. illustration_concept's left/right/relation are short English phrases (1-3 words) naming only the two elements and their relation, with no scene/setting description and no style words (medium, palette, technique)
 </verification>"""
 
     SYSTEM_PROMPT_TIKTOK_JA = """<role>
@@ -590,7 +589,7 @@ TikTokの収益化には60秒以上の動画が必要です。
 - description: 1行目に要約＋絵文字、📌でポイント箇条書き、💬でCTA、最後にハッシュタグ
 - hashtags: 5〜8個（"TikTok"と"ニュース"は必須）
 - scenes: <<SCENES_SPEC>>
-- illustration_subject: <<ILLUSTRATION_SPEC>>
+- illustration_concept: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -634,7 +633,7 @@ TikTokの収益化には60秒以上の動画が必要です。
         "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
+    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
     "estimated_duration": 75
 }
 </output_format>
@@ -646,7 +645,7 @@ TikTokの収益化には60秒以上の動画が必要です。
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に6個あること
-6. illustration_subject が英語1文で、スタイル語（画材・配色・技法）を含まないこと
+6. illustration_concept の left/right/relation が英語1〜3語で、場面や設定を描写せず、スタイル語（画材・配色・技法）も含まないこと
 7. segment_narrations の合計が500〜650文字の範囲内であること
 </verification>"""
 
@@ -678,7 +677,7 @@ Each element MUST NOT be an empty string. Always include meaningful content.
 - description: Line 1 summary + emoji, 📌 for bullet points, 💬 for CTA, end with hashtags
 - hashtags: 5-8 tags (must include "TikTok" and "news")
 - scenes: <<SCENES_SPEC>>
-- illustration_subject: <<ILLUSTRATION_SPEC>>
+- illustration_concept: <<ILLUSTRATION_SPEC>>
 </content_rules>
 
 <narrative_structure>
@@ -722,7 +721,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_subject": "A single engineer sketching a glowing network diagram on a chalkboard, centred with wide margins",
+    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
     "estimated_duration": 75
 }
 </output_format>
@@ -734,7 +733,7 @@ Before output, verify:
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
 5. scenes has exactly 6 elements
-6. illustration_subject is a single English sentence with no style words (medium, palette, technique)
+6. illustration_concept's left/right/relation are short English phrases (1-3 words) naming only the two elements and their relation, with no scene/setting description and no style words (medium, palette, technique)
 7. The segment_narrations total 250-350 words
 </verification>"""
 
@@ -1052,16 +1051,24 @@ Before output, verify:
 
     @staticmethod
     def _illustration_spec(language: str) -> str:
-        """挿絵（illustration_subject）の指示を `MAX_ILLUSTRATION_SUBJECT_CHARS` から組み立てる。
+        """挿絵（illustration_concept）の指示を組み立てる。
 
         Remotion レンダラは動画1本につき挿絵を**1枚だけ**生成し、画面上部
-        52% に通しで表示する（`image_prompts` のような1シーン1枚とは違う）。
-        `CardVisual` と同じ二段構え（LLM が *what*、コード側が *how* を
-        前置する `ILLUSTRATION_STYLE_PROMPT`）にするため、ここでは主題と
-        構図だけを求め、**画材・配色・技法などのスタイル語は明示的に
-        禁じる**。書かせると、コード側が前置する固定のスタイル文と矛盾した
-        指示が1つのプロンプトに混ざる（`ImageGenerator.generate_batch` の
-        `enhance=False` の項で実際に踏んだ壊れ方と同じ構造）。
+        48% に通しで表示する（`image_prompts` のような1シーン1枚とは違う）。
+
+        以前は主題を自由文の英語1文（`illustration_subject`）で出させていた。
+        実際に生成した挿絵を見た結果、**文章としては合っているのに絵として
+        伝わらない**という壊れ方が起きた——ルーティングでコストを1/10にする
+        記事に対し、モデルは「オフィスでコーヒーを片手に働く人々」を描いた。
+        自由文は「主題」ではなく「場面」を作らせてしまう。
+
+        `left` / `right` / `relation` の3つに固定するのは、
+        `CardVisual.key_details` をちょうど2個に固定した判断と同じ——
+        構造を強制すれば場面は生まれない。**画材・配色・技法などのスタイル語は
+        明示的に禁じる**。書かせると、コード側が前置する固定のスタイル文
+        （`ILLUSTRATION_STYLE_PROMPT`）と矛盾した指示が1つのプロンプトに
+        混ざる（`ImageGenerator.generate_batch` の `enhance=False` の項で
+        実際に踏んだ壊れ方と同じ構造）。
 
         形式（short/tiktok/long）で分けない。挿絵は動画全体で共有する1枚
         であり、尺とは無関係だからである（`_overlay_spec` と同じ判断）。
@@ -1074,23 +1081,25 @@ Before output, verify:
         """
         if language == "ja":
             return (
-                "動画全体で共有する挿絵1枚の主題を英語1文で。"
-                "画面上部に通しで表示される1枚なので、動画の内容全体を象徴する"
-                "主題と構図（中央に配置し、余白を十分取ること）だけを書く。"
-                f"最大{MAX_ILLUSTRATION_SUBJECT_CHARS}文字。"
-                "**画材・配色・レンダリング技法などのスタイル語は書かないこと**"
-                "（固定のスタイル文をコード側が別途前置するため、書くと矛盾した"
-                "指示になる）"
+                "動画全体で共有する挿絵1枚の主題を、left（左の要素）・"
+                "right（右の要素）・relation（2つの関係）の3つで表す。"
+                '各語は英語1〜3語（例: left="selected experts", '
+                'right="one shared router", relation="routes to"）。'
+                "**場面や情景、設定を描写しないこと**——2つの要素とその関係だけを"
+                "名指しする。画材・配色・レンダリング技法などのスタイル語も"
+                "書かないこと（固定のスタイル文をコード側が別途前置するため、"
+                "書くと矛盾した指示になる）"
             )
         return (
-            "The subject of the single illustration shared across the whole video, "
-            "in one English sentence. It is shown once at the top of the screen "
-            "throughout, so describe only the subject and composition that "
-            "symbolizes the whole video (centred, with generous margins). "
-            f"At most {MAX_ILLUSTRATION_SUBJECT_CHARS} characters. "
-            "**Do NOT name a medium, palette, or rendering technique/style** "
-            "(code prepends a fixed style prompt separately; naming one here "
-            "produces a contradictory prompt)"
+            "The subject of the single illustration shared across the whole "
+            "video, expressed as three short English phrases (1-3 words each): "
+            'left, right, and relation between them (e.g. left="selected '
+            'experts", right="one shared router", relation="routes to"). '
+            "**Do NOT describe a scene, a setting, or any object that is not "
+            "one of the two elements** — name only the two things and how "
+            "they relate. Do NOT name a medium, palette, or rendering "
+            "technique/style (code prepends a fixed style prompt separately; "
+            "naming one here produces a contradictory prompt)"
         )
 
     @staticmethod

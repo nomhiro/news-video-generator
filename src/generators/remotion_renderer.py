@@ -25,7 +25,7 @@ from pathlib import Path
 from src.generators.script_generator import chapter_labels
 from src.generators.video_composer import _available_cpus, _tail, mux_audio
 from src.models.formats import get_spec
-from src.models.scene import SceneVisual
+from src.models.scene import IllustrationConcept, SceneVisual
 from src.utils.line_break import insert_break_opportunities
 from src.utils.logger import log_error, log_step, log_success, log_warning
 
@@ -37,30 +37,41 @@ class RemotionRenderError(Exception):
 # 挿絵1枚の固定スタイル文。**ここが単一の情報源。**
 #
 # `src/social/card_visual.py` の `CARD_STYLE_PROMPT` を再利用しない理由:
-# あちらの地は off-white の紙で、`remotion/src/theme.ts` のスレート地
-# （`COLORS.bg = "#242226"`）の上に紙色の挿絵を貼ると「貼り付けた画像」に
+# あちらの地は off-white の紙で、`remotion/src/theme.ts` の暗い地
+# （`COLORS.bg = "#1b1a1d"`）の上に紙色の挿絵を貼ると「貼り付けた画像」に
 # 見える。この動画の地の暗さはオーナーが選んだ既定であり、挿絵側がそれに
 # 合わせる。配色はテーマの実際の HEX 値（`COLORS.accent` / `COLORS.accent2`）
 # から取っており、コードとデザインを別々に触ると必ずずれるので、値を変えたら
 # ここも直す。
 #
-# 制約に「文字を一切描かない」を含める。動画の文字は React（`Headline.tsx`
-# など）が描くので、挿絵側に文字が入ると二重に描かれる、あるいは言語が
-# 揃わない不整合が起きる。
+# **手描きチョーク調から、フラットな概念図に変えた。** 実際にレンダリングした
+# 動画をオーナーが見て「スケッチっぽすぎて、一目で何を言っているか分からない」
+# という判断を受けた。原因は質感だけでなく**内容**にもあった——「エキスパートを
+# 選んでルーティングし、コストを1/10にする」という記事に対して、当時の自由文
+# プロンプト（旧 `illustration_subject`）はオフィスで働く人々・コーヒー・
+# 観葉植物・丸いアイコン4つを描いた。「AIっぽい何か」にしかならない。
+# だから2つを同時に変える: スタイルをフラットにし、主題を
+# `IllustrationConcept`（left/right/relation の3語）で強制する。
+#
+# 制約に「文字を一切描かない」に加え、**付随物（コーヒー・観葉植物・部屋など）
+# を明示的に禁じる**。以前は禁じていなかったため、モデルは主題に触れつつ
+# 「場面」を描いた。「これは場面ではない」と言い切ることで、2要素以外を
+# 描く余地を塞ぐ。
 ILLUSTRATION_STYLE_PROMPT = """\
-Medium: a hand-drawn illustrated sketch, chalk-like off-white linework on a
-  dark slate/sumi ground (near-black warm charcoal, like a blackboard).
-Palette: dark slate ground (#242226), off-white chalk linework (#f3ecdf),
-  two muted accents only — a muted teal (#5ea79c) and a muted amber
-  (#c98a4c). Flat fills only — no gradients, no glossy 3D render, no
-  photorealism.
-Composition: a single explanatory illustration, the subject centred with
-  generous margins on all sides, filling a wide (roughly 6:5) frame.
-Constraints: absolutely no text, letters, numerals, or captions anywhere in
-  the image (all text is drawn separately by the video renderer — any text
-  baked into the image would duplicate or contradict it). No watermarks, no
-  logos, no UI chrome. Do not depict any real, identifiable person; use
-  simple silhouettes if a figure is needed."""
+Medium: flat conceptual graphic. Clean geometric shapes, solid fills,
+  crisp edges. NO texture, NO grain, NO visible brush or chalk strokes,
+  NO sketchiness, NO hand-drawn wobble.
+Ground: dark charcoal (#1b1a1d). Palette strictly limited to off-white
+  (#f5f2ea), one teal (#2dd4bf), and one amber (#f2a93c) on that ground.
+  Flat fills only — no gradients, no shadows, no 3D, no perspective.
+Composition: ONE idea only. Two to four shapes at most, centred,
+  generous empty space, clearly directional or symmetrical.
+Requirement: it must be understandable in one second at phone size.
+Constraints: no text, letters, or numerals anywhere (all text is drawn
+  separately by the video renderer — any text baked into the image would
+  duplicate or contradict it). No watermarks, no logos. No real people.
+  NO incidental props — no cups, plants, desks, chairs, rooms, or
+  environments. It is not a scene."""
 
 # 挿絵の生成サイズ。**動画の出力解像度（`FormatSpec.image_size`）とは無関係に
 # 固定する。** 挿絵は縦画面（short/tiktok）でも横画面（long）でも同じ帯
@@ -78,26 +89,34 @@ Constraints: absolutely no text, letters, numerals, or captions anywhere in
 # 帯のアスペクト比（1080/920 ≈ 1.1739）に最も近い値を選んでいる
 # （1216/1040 ≈ 1.1692）。**帯の寸法を変えたら、この値も一緒に見直す**
 # （ここが単一の情報源では無いので、`zones.ts` の値とは別々にメンテする
-# 必要がある——`illustration_subject` の主題自体は言語モデルに出させているため、
+# 必要がある——`illustration_concept` の主題自体は言語モデルに出させているため、
 # ビルド時に TS 側の値をここへ自動で伝える手段が無い）。
 ILLUSTRATION_SIZE = "1216x1040"
 
 
-def build_illustration_prompt(subject: str) -> str:
+def build_illustration_prompt(concept: IllustrationConcept) -> str:
     """gpt-image-2 に渡す挿絵プロンプトを組む。
 
     `src/social/card_visual.py` の `build_card_prompt` と同じ二段構え
-    （LLM が *what*、コード側が *how* を前置する）。ここは1本の動画で
-    共有する挿絵1枚ぶんなので、`key_details` や `labels` のような
-    複数要素の構造は持たない — 主題は `illustration_subject` の1文だけ。
+    （LLM が *what*、コード側が *how* を前置する）。ただし *what* 側は
+    自由文ではなく `IllustrationConcept`（left/right/relation）——
+    コード側がここで「2要素とその関係だけを描け」という構図の指示に
+    組み立て直す。LLM に構図の文章まで書かせると、`_illustration_spec`
+    が禁じているはずの「場面」を再び作文する余地が残るため、構図の指示
+    自体もコード側の権威にする。
 
     Args:
-        subject: `Script.illustration_subject`（英語1文、スタイル語は含まない）
+        concept: `Script.illustration_concept`（英語1〜3語 × 3）
 
     Returns:
-        str: 固定のスタイル文を前置したプロンプト
+        str: 固定のスタイル文と構図の指示を組んだプロンプト
     """
-    return f"{ILLUSTRATION_STYLE_PROMPT}\nSubject: {subject}"
+    composition = (
+        f"Draw exactly two elements: {concept.left} and {concept.right}. "
+        f"Show {concept.relation} as the visual relationship between them. "
+        "Nothing else."
+    )
+    return f"{ILLUSTRATION_STYLE_PROMPT}\n{composition}"
 
 
 def resolve_frame_spans(

@@ -235,7 +235,7 @@ class Pipeline:
                 # 矛盾した指示が混ざる）。
                 log_step("挿絵を生成中...", "🎨")
                 try:
-                    prompt = build_illustration_prompt(scripts[first_lang].illustration_subject)
+                    prompt = build_illustration_prompt(scripts[first_lang].illustration_concept)
                     illustration_paths = self.image_generator.generate_batch(
                         [prompt],
                         image_dir,
