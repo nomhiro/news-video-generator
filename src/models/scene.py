@@ -17,7 +17,9 @@
 --------------------------------------------------------------------
 挿絵は動画1本につき1枚だけで、`gpt-image-2` のクォータを消費してもX の
 画像カードとの共食いは小さい。ただし主題を自由文で出させると場面を作って
-しまうため、`left` / `right` / `relation` の3語に構造を固定してある。
+しまうため、`unit` / `field` / `emphasis` の3語に構造を固定してある
+（旧 `left` / `right` / `relation` を置き換えた経緯は `IllustrationConcept`
+のdocstringを参照）。
 """
 
 from __future__ import annotations
@@ -152,17 +154,25 @@ class SceneVisual(BaseModel):
         return self
 
 
-# `IllustrationConcept` の各語（left/right/relation）1つの最大文字数。
+# `IllustrationConcept` の各語の最大文字数。
 #
 # `SceneVisual.items` の名札（`MAX_LABEL_CHARS` = 8字）は日本語の名札用で、
-# こちらは英語1〜3語の画像生成プロンプト用の語なので別の定数にする。
-# "selected experts" のような英語1〜3語の句が収まる程度に、実物を見て
-# 決め直す前提の暫定値を置く（`MAX_LABEL_CHARS` と同じ経緯）。
-MAX_CONCEPT_WORD_CHARS = 40
+# こちらは英語の画像生成プロンプト用の語なので別の定数にする。3つの
+# フィールドは役割が違う（繰り返す1形状の名前 / 全体の記述 / その一部）ので、
+# 長さの上限も1つに揃えない。
+#
+# unit は "square" のような形状1つの名前なので、複合語でも短い
+# （"rounded square" 程度）。field/emphasis は個数や範囲の言い回しを含む
+# 短い句（"a 10x10 grid", "the bottom tenth"）なので、unit より長い句が
+# 通る上限にする。いずれも実物（実際に生成した挿絵）を見て決め直す前提の
+# 暫定値であり、`MAX_LABEL_CHARS` と同じ経緯を辿る。
+MAX_UNIT_CHARS = 20
+MAX_FIELD_CHARS = 60
+MAX_EMPHASIS_CHARS = 40
 
 
 class IllustrationConcept(BaseModel):
-    """動画全体で共有する挿絵1枚の主題を「2つの要素とその関係」で表す。
+    """動画全体で共有する挿絵1枚の主題を「反復する形の中の強調」で表す。
 
     `SceneVisual` が**1シーン**の図の構造であるのに対し、これは**動画1本**に
     つき1枚だけ生成する挿絵（`remotion/src/Illustration.tsx`）の主題である。
@@ -179,15 +189,38 @@ class IllustrationConcept(BaseModel):
     `CardVisual.key_details` をちょうど2個に固定した判断と同じで、範囲では
     なく固定値の構造を強制すれば、モデルは場面を描く余地を持たない。
 
+    なぜ `left` / `right` / `relation` の3語構造もやめたか（2026-08-17）
+    --------------------------------------------------------------------
+    自由文問題は解決したが、3語構造には別の欠陥があった。「2つの要素を
+    矢印で繋ぐ」という**構図**そのものを強制してしまい、内容が何であれ
+    同じ形の絵（クリップアート的な図解）しか作れない。実際に踏んだ壊れ方は
+    3つとも構造ではなく**語の選び方**に起因していた——
+    `left="expert models"` を画像モデルは「人間の専門家」と読んで人物を描き、
+    `right="reduced compute"` は描けない抽象量なので CPU チップになり、
+    `relation="selected for"` は素の矢印に潰れて「導く」の意味しか残らな
+    かった。だが4つ目の問題は語の選び方では直らない——**2つの異なる物を
+    矢印で繋ぐこと自体が構図として凡庸**で、内容を反映しない。
+
+    代わりに「反復する同じ形の中で、一部だけが強調されている」という構図に
+    固定する。多数のマスから数個だけが際立つ図は、一目で「全体のうち一部
+    だけが特別」という関係を伝え、構図自体が作品として成立する
+    （矢印2つ＋アイコン2つの図解より意匠性が高い）。
+
     Attributes:
-        left: 左に描く要素（英語1〜3語）
-        right: 右に描く要素（英語1〜3語）
-        relation: 2つの関係（英語1〜3語。例: "routes to", "splits into"）
+        unit: 反復する描ける形の名前（例: "square", "bar", "node", "block"）。
+            人物・抽象量は禁止で、実際に描ける単純な図形1つに限る
+        field: その形が並ぶ全体（例: "a 10x10 grid", "a tall stack of 20 bars"）
+        emphasis: 全体のうち際立たせる一部（例: "four cells", "the bottom tenth"）。
+            **個数は近似でよい。** 画像生成モデルは正確な個数を守らない
+            （「100個中4個」の指示が「90個中5個」で返ることがある）。
+            図には数字を描かせないので読み手が見るのは「比率」の印象だけであり、
+            厳密さは不要。厳密さが必要になったら、それはコードで図形を描く
+            判断に切り替える場面であり、この3語では解決しない
     """
 
-    left: str
-    right: str
-    relation: str
+    unit: str
+    field: str
+    emphasis: str
 
     @model_validator(mode="after")
     def _check_words(self) -> IllustrationConcept:
@@ -202,14 +235,18 @@ class IllustrationConcept(BaseModel):
         Raises:
             ValueError: いずれかの語が空、空白のみ、または長すぎる場合
         """
-        for field_name in ("left", "right", "relation"):
+        limits = {
+            "unit": MAX_UNIT_CHARS,
+            "field": MAX_FIELD_CHARS,
+            "emphasis": MAX_EMPHASIS_CHARS,
+        }
+        for field_name, limit in limits.items():
             value: str = getattr(self, field_name)
             stripped = value.strip()
             if not stripped:
                 raise ValueError(f"{field_name} が空です")
-            if len(stripped) > MAX_CONCEPT_WORD_CHARS:
+            if len(stripped) > limit:
                 raise ValueError(
-                    f"{field_name} が長すぎます"
-                    f"（{len(stripped)}字、最大{MAX_CONCEPT_WORD_CHARS}字）: {stripped!r}"
+                    f"{field_name} が長すぎます（{len(stripped)}字、最大{limit}字）: {stripped!r}"
                 )
         return self

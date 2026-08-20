@@ -51,12 +51,21 @@ class RemotionRenderError(Exception):
 # プロンプト（旧 `illustration_subject`）はオフィスで働く人々・コーヒー・
 # 観葉植物・丸いアイコン4つを描いた。「AIっぽい何か」にしかならない。
 # だから2つを同時に変える: スタイルをフラットにし、主題を
-# `IllustrationConcept`（left/right/relation の3語）で強制する。
+# `IllustrationConcept`（unit/field/emphasis の3語）で強制する。
 #
 # 制約に「文字を一切描かない」に加え、**付随物（コーヒー・観葉植物・部屋など）
 # を明示的に禁じる**。以前は禁じていなかったため、モデルは主題に触れつつ
 # 「場面」を描いた。「これは場面ではない」と言い切ることで、2要素以外を
 # 描く余地を塞ぐ。
+#
+# **2026-08-17: `left`/`right`/`relation` を捨てて構図まで固定した経緯。**
+# 3語構造にしても、実際に生成した挿絵は「3人の人物ピクトグラム＋オレンジの
+# 矢印＋CPUチップ」だった（`IllustrationConcept` のdocstring参照）。語の
+# 選び方の問題（人物・抽象量・矢印への収束）は語を差し替えても直らない——
+# **「2つの異なる物を矢印で繋ぐ」という構図自体が凡庸**で、内容に関わらず
+# 同じ形の絵しか作れないため。だから構図の指示（Composition mandate）を
+# ここに明文化し、「人物を一切描かない」「アクセントカラーは強調部分だけ」
+# 「矢印は最後の手段」を固定する側の権威にする。
 ILLUSTRATION_STYLE_PROMPT = """\
 Medium: flat conceptual graphic. Clean geometric shapes, solid fills,
   crisp edges. NO texture, NO grain, NO visible brush or chalk strokes,
@@ -64,14 +73,27 @@ Medium: flat conceptual graphic. Clean geometric shapes, solid fills,
 Ground: dark charcoal (#1b1a1d). Palette strictly limited to off-white
   (#f5f2ea), one teal (#2dd4bf), and one amber (#f2a93c) on that ground.
   Flat fills only — no gradients, no shadows, no 3D, no perspective.
-Composition: ONE idea only. Two to four shapes at most, centred,
-  generous empty space, clearly directional or symmetrical.
+Composition: ONE system shown with internal contrast, not two different
+  objects. Either a field of identical units with a few emphasised, or
+  one large form beside a much smaller form of the same kind. Two to
+  four shapes at most, centred, generous empty space, clearly
+  directional or symmetrical. Do NOT draw two different objects joined by an arrow
+  — an arrow-and-two-objects diagram is the most generic composition
+  available and looks like clip art regardless of subject. Arrows are a last resort, never the default.
+Accent discipline: the accent colour (teal or amber) marks ONLY the
+  emphasised part of the composition. Every other shape stays dim or
+  off-white. Spreading the accent decoratively across multiple unrelated
+  shapes makes the colour carry no meaning and reads as clip art.
 Requirement: it must be understandable in one second at phone size.
 Constraints: no text, letters, or numerals anywhere (all text is drawn
   separately by the video renderer — any text baked into the image would
-  duplicate or contradict it). No watermarks, no logos. No real people.
+  duplicate or contradict it). No watermarks, no logos. NO human figures
+  of any kind — no real people, no human pictograms, no silhouettes, no
+  avatars; a pictogram of a person is still a person for this rule.
   NO incidental props — no cups, plants, desks, chairs, rooms, or
-  environments. It is not a scene."""
+  environments. It is not a scene. Do NOT depict an abstract quantity
+  (efficiency, cost, performance, "reduced compute") as an object — draw
+  only shapes that literally exist."""
 
 # 挿絵の生成サイズ。**動画の出力解像度（`FormatSpec.image_size`）とは無関係に
 # 固定する。** 挿絵は縦画面（short/tiktok）でも横画面（long）でも同じ帯
@@ -99,22 +121,24 @@ def build_illustration_prompt(concept: IllustrationConcept) -> str:
 
     `src/social/card_visual.py` の `build_card_prompt` と同じ二段構え
     （LLM が *what*、コード側が *how* を前置する）。ただし *what* 側は
-    自由文ではなく `IllustrationConcept`（left/right/relation）——
-    コード側がここで「2要素とその関係だけを描け」という構図の指示に
-    組み立て直す。LLM に構図の文章まで書かせると、`_illustration_spec`
-    が禁じているはずの「場面」を再び作文する余地が残るため、構図の指示
-    自体もコード側の権威にする。
+    自由文ではなく `IllustrationConcept`（unit/field/emphasis）——
+    コード側がここで「同じ形の反復の中で一部だけを強調する」という構図の
+    指示に組み立て直す。LLM に構図の文章まで書かせると、`_illustration_spec`
+    が禁じているはずの「場面」や「2物＋矢印」を再び作文する余地が残るため、
+    構図の指示自体もコード側の権威にする。
 
     Args:
-        concept: `Script.illustration_concept`（英語1〜3語 × 3）
+        concept: `Script.illustration_concept`（反復する形・全体・強調部分）
 
     Returns:
         str: 固定のスタイル文と構図の指示を組んだプロンプト
     """
     composition = (
-        f"Draw exactly two elements: {concept.left} and {concept.right}. "
-        f"Show {concept.relation} as the visual relationship between them. "
-        "Nothing else."
+        f"Draw {concept.field} of identical {concept.unit} shapes, with "
+        f"{concept.emphasis} emphasised in the accent colour and every "
+        "other shape left dim. The emphasis IS the subject: the contrast "
+        "between the few emphasised shapes and the many dim ones is the "
+        "entire idea. Do not draw anything else."
     )
     return f"{ILLUSTRATION_STYLE_PROMPT}\n{composition}"
 

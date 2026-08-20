@@ -25,7 +25,7 @@ from src.utils.line_break import ZWSP
 
 
 def _concept(**overrides: str) -> IllustrationConcept:
-    payload = {"left": "selected experts", "right": "one shared router", "relation": "routes to"}
+    payload = {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"}
     payload.update(overrides)
     return IllustrationConcept.model_validate(payload)
 
@@ -36,17 +36,19 @@ def test_illustration_prompt_prepends_the_fixed_style() -> None:
     assert prompt.startswith(ILLUSTRATION_STYLE_PROMPT)
 
 
-def test_illustration_prompt_names_only_the_two_elements() -> None:
-    """left/right/relation を「2要素だけを描け」という指示に組み立てること。
+def test_illustration_prompt_composes_field_unit_and_emphasis() -> None:
+    """unit/field/emphasis を「反復する形の中で一部だけを強調する」構図の
+    指示に組み立てること。
 
     構図の文章自体を LLM に書かせない（コード側の権威にする）ので、
     ここでは組み立てた結果の文言を検査する。
     """
     prompt = build_illustration_prompt(_concept())
-    assert "selected experts" in prompt
-    assert "one shared router" in prompt
-    assert "routes to" in prompt
-    assert "exactly two elements" in prompt
+    assert "a 10x10 grid" in prompt
+    assert "square" in prompt
+    assert "four cells" in prompt
+    assert "emphasised in the accent colour" in prompt
+    assert "every other shape left dim" in prompt
 
 
 def test_illustration_style_forbids_text() -> None:
@@ -90,6 +92,50 @@ def test_illustration_style_uses_the_theme_colors() -> None:
     assert "#1b1a1d" in ILLUSTRATION_STYLE_PROMPT  # theme.ts の COLORS.bg
     assert "#2dd4bf" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent
     assert "#f2a93c" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent2
+
+
+def test_illustration_style_bans_two_objects_joined_by_an_arrow() -> None:
+    """「2つの異なる物を矢印で繋ぐ」構図を明示的に禁じること。
+
+    実際に生成した挿絵（3人のピクトグラム＋矢印＋CPUチップ）が示した通り、
+    この構図は内容に関わらず同じ凡庸な形になる。矢印は最後の手段でしかない。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "joined by an arrow" in lowered
+    assert "last resort" in lowered
+
+
+def test_illustration_style_bans_human_figures_including_pictograms() -> None:
+    """人物ピクトグラムも「人物」として明示的に禁じること。
+
+    以前の「no real people」だけでは、実際の失敗（人物ピクトグラム3体）を
+    止められなかった。ピクトグラムは実在の人物ではないため。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "no human figures" in lowered
+    assert "pictogram" in lowered
+
+
+def test_illustration_style_restricts_accent_to_the_emphasis() -> None:
+    """アクセントカラーは強調部分だけに使うこと。
+
+    複数の物に装飾的に配色すると（失敗画像の3体の人物が別々の色だった
+    ように）、色が意味を運ばなくなりクリップアート的に見える。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "accent discipline" in lowered
+    assert "only" in lowered
+
+
+def test_illustration_style_bans_abstract_quantities_as_subjects() -> None:
+    """「効率」「コスト」のような抽象量を主題にすることを禁じること。
+
+    描けない量は別の物体（CPUチップなど）に置き換わり、「削減された」の
+    ような程度の情報が失われる。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "abstract quantity" in lowered
+    assert "reduced compute" in lowered
 
 
 def test_spans_cover_the_whole_audio_without_gaps() -> None:

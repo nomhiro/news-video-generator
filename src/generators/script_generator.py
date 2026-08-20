@@ -185,8 +185,9 @@ class ScriptGenerator:
     SCENES_EXAMPLE_TOKEN = "<<SCENES_EXAMPLE>>"
 
     # プロンプト内で挿絵（illustration_concept）の指示を差し込む位置。
-    # 各語の長さ上限は models/scene.py の MAX_CONCEPT_WORD_CHARS が単一の
-    # 情報源なので、プロンプト側には値を書かない。
+    # 各語の長さ上限は models/scene.py の MAX_UNIT_CHARS /
+    # MAX_FIELD_CHARS / MAX_EMPHASIS_CHARS が単一の情報源なので、
+    # プロンプト側には値を書かない。
     ILLUSTRATION_SPEC_TOKEN = "<<ILLUSTRATION_SPEC>>"
 
     SYSTEM_PROMPT_JA = """<role>
@@ -260,7 +261,7 @@ class ScriptGenerator:
         "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
+    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
     "estimated_duration": 35
 }
 </output_format>
@@ -272,7 +273,7 @@ class ScriptGenerator:
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に6個あること
-6. illustration_concept の left/right/relation が英語1〜3語で、場面や設定を描写せず、スタイル語（画材・配色・技法）も含まないこと
+6. illustration_concept の unit/field/emphasis が実際に描ける形の名前と個数・範囲の句で、人物・抽象量・矢印構図を想定せず、スタイル語（画材・配色・技法）も含まないこと
 </verification>"""
 
     SYSTEM_PROMPT_LONG_JA = """<role>
@@ -360,7 +361,7 @@ class ScriptGenerator:
         "画像10用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
+    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
     "estimated_duration": 300
 }
 </output_format>
@@ -372,7 +373,7 @@ class ScriptGenerator:
 3. text_overlays が正確に10個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に10個あること
-6. illustration_concept の left/right/relation が英語1〜3語で、場面や設定を描写せず、スタイル語（画材・配色・技法）も含まないこと
+6. illustration_concept の unit/field/emphasis が実際に描ける形の名前と個数・範囲の句で、人物・抽象量・矢印構図を想定せず、スタイル語（画材・配色・技法）も含まないこと
 </verification>"""
 
     SYSTEM_PROMPT_EN = """<role>
@@ -446,7 +447,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
+    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
     "estimated_duration": 35
 }
 </output_format>
@@ -458,7 +459,7 @@ Before output, verify:
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
 5. scenes has exactly 6 elements
-6. illustration_concept's left/right/relation are short English phrases (1-3 words) naming only the two elements and their relation, with no scene/setting description and no style words (medium, palette, technique)
+6. illustration_concept's unit/field/emphasis name a real drawable shape and a count/range phrase, with no human figure, no abstract quantity, no arrow-and-two-objects framing, and no style words (medium, palette, technique)
 </verification>"""
 
     SYSTEM_PROMPT_LONG_EN = """<role>
@@ -546,7 +547,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 10 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
+    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
     "estimated_duration": 300
 }
 </output_format>
@@ -558,7 +559,7 @@ Before output, verify:
 3. text_overlays has exactly 10 elements
 4. No element is an empty string
 5. scenes has exactly 10 elements
-6. illustration_concept's left/right/relation are short English phrases (1-3 words) naming only the two elements and their relation, with no scene/setting description and no style words (medium, palette, technique)
+6. illustration_concept's unit/field/emphasis name a real drawable shape and a count/range phrase, with no human figure, no abstract quantity, no arrow-and-two-objects framing, and no style words (medium, palette, technique)
 </verification>"""
 
     SYSTEM_PROMPT_TIKTOK_JA = """<role>
@@ -633,7 +634,7 @@ TikTokの収益化には60秒以上の動画が必要です。
         "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
+    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
     "estimated_duration": 75
 }
 </output_format>
@@ -645,7 +646,7 @@ TikTokの収益化には60秒以上の動画が必要です。
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に6個あること
-6. illustration_concept の left/right/relation が英語1〜3語で、場面や設定を描写せず、スタイル語（画材・配色・技法）も含まないこと
+6. illustration_concept の unit/field/emphasis が実際に描ける形の名前と個数・範囲の句で、人物・抽象量・矢印構図を想定せず、スタイル語（画材・配色・技法）も含まないこと
 7. segment_narrations の合計が500〜650文字の範囲内であること
 </verification>"""
 
@@ -721,7 +722,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"left": "selected experts", "right": "one shared router", "relation": "routes to"},
+    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
     "estimated_duration": 75
 }
 </output_format>
@@ -733,7 +734,7 @@ Before output, verify:
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
 5. scenes has exactly 6 elements
-6. illustration_concept's left/right/relation are short English phrases (1-3 words) naming only the two elements and their relation, with no scene/setting description and no style words (medium, palette, technique)
+6. illustration_concept's unit/field/emphasis name a real drawable shape and a count/range phrase, with no human figure, no abstract quantity, no arrow-and-two-objects framing, and no style words (medium, palette, technique)
 7. The segment_narrations total 250-350 words
 </verification>"""
 
@@ -1062,9 +1063,19 @@ Before output, verify:
         記事に対し、モデルは「オフィスでコーヒーを片手に働く人々」を描いた。
         自由文は「主題」ではなく「場面」を作らせてしまう。
 
-        `left` / `right` / `relation` の3つに固定するのは、
-        `CardVisual.key_details` をちょうど2個に固定した判断と同じ——
-        構造を強制すれば場面は生まれない。**画材・配色・技法などのスタイル語は
+        その次に `left` / `right` / `relation` の3語に固定したが、これにも
+        別の欠陥があった（2026-08-17）。同じ記事に対して実際に生成した挿絵は
+        「3人の人物ピクトグラム＋オレンジの矢印＋CPUチップ」だった——
+        `left="expert models"` は人間と読まれ、`right="reduced compute"` は
+        描けない抽象量なので物体（チップ）になり、`relation="selected for"`
+        は素の矢印に潰れた。加えて**2つの異なる物を矢印で繋ぐ構図自体が
+        凡庸**で、内容が何であれ同じ形の絵しか作れない。
+
+        だから `unit` / `field` / `emphasis` の3語に変えた——「同じ形が並ぶ
+        全体の中で、一部だけを強調する」という構図に固定する
+        （`IllustrationConcept` のdocstring参照）。3つとも
+        **実際に描ける単純な図形の名前と、その個数・範囲の言い回し**に限定し、
+        人物・抽象量・矢印は明示的に禁じる。**画材・配色・技法などのスタイル語も
         明示的に禁じる**。書かせると、コード側が前置する固定のスタイル文
         （`ILLUSTRATION_STYLE_PROMPT`）と矛盾した指示が1つのプロンプトに
         混ざる（`ImageGenerator.generate_batch` の `enhance=False` の項で
@@ -1081,25 +1092,48 @@ Before output, verify:
         """
         if language == "ja":
             return (
-                "動画全体で共有する挿絵1枚の主題を、left（左の要素）・"
-                "right（右の要素）・relation（2つの関係）の3つで表す。"
-                '各語は英語1〜3語（例: left="selected experts", '
-                'right="one shared router", relation="routes to"）。'
-                "**場面や情景、設定を描写しないこと**——2つの要素とその関係だけを"
-                "名指しする。画材・配色・レンダリング技法などのスタイル語も"
+                "動画全体で共有する挿絵1枚の主題を、unit（反復する描ける形）・"
+                "field（その形が並ぶ全体）・emphasis（そのうち際立たせる一部）"
+                "の3つで表す。"
+                '各語は短い英語の句（例: unit="square", field="a 10x10 grid", '
+                'emphasis="four cells"）。'
+                "unit は**実際に描ける単純な図形1つの名前**に限る"
+                "（square / bar / node / block など）。"
+                "**人物や人物のピクトグラムを名指ししないこと**"
+                '（"expert" "model" のような語は画像生成モデルに人間と'
+                "読まれて人物を描かせてしまう）。"
+                "**「効率」「コスト」「性能」のような抽象量を主題にしないこと**"
+                "（描けないので別の物体に置き換わり、意味が失われる）。"
+                "**2つの異なる物を矢印で繋ぐ構図を想定しないこと**"
+                "（field 全体の中の emphasis という「1つの系の中の対比」に"
+                "すること。矢印は最後の手段）。"
+                "画材・配色・レンダリング技法などのスタイル語も"
                 "書かないこと（固定のスタイル文をコード側が別途前置するため、"
-                "書くと矛盾した指示になる）"
+                "書くと矛盾した指示になる）。"
+                "emphasis の個数は近似でよい（画像生成モデルは正確な個数を"
+                "守らないため、図に数字は描かせない）"
             )
         return (
             "The subject of the single illustration shared across the whole "
-            "video, expressed as three short English phrases (1-3 words each): "
-            'left, right, and relation between them (e.g. left="selected '
-            'experts", right="one shared router", relation="routes to"). '
-            "**Do NOT describe a scene, a setting, or any object that is not "
-            "one of the two elements** — name only the two things and how "
-            "they relate. Do NOT name a medium, palette, or rendering "
+            "video, expressed as three short English phrases: unit (a single "
+            "repeatable drawable shape), field (the whole set of that shape), "
+            "and emphasis (the few that stand out within it). E.g. "
+            'unit="square", field="a 10x10 grid", emphasis="four cells". '
+            "unit MUST name **one simple shape that can literally be drawn** "
+            "(square, bar, node, block, etc). "
+            '**Never name a human figure** — words like "expert" or '
+            '"model" get read by the image model as a person and drawn as '
+            "one. **Never make an abstract quantity the subject** "
+            "(efficiency, cost, performance — these cannot be drawn and get "
+            "replaced by an unrelated object, losing the meaning). "
+            "**Do NOT frame this as two different objects joined by an "
+            "arrow** — it must be one system (the field) with internal "
+            "contrast (the emphasis), not two things connected; an arrow is "
+            "a last resort. Do NOT name a medium, palette, or rendering "
             "technique/style (code prepends a fixed style prompt separately; "
-            "naming one here produces a contradictory prompt)"
+            "naming one here produces a contradictory prompt). The count in "
+            "emphasis is approximate — image models do not honour exact "
+            "counts, and no numerals are drawn in the image anyway"
         )
 
     @staticmethod

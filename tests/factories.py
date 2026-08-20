@@ -30,9 +30,9 @@ def make_draft(**overrides: object) -> ScriptDraft:
         "text_overlays": ["overlay 1", "overlay 2", "overlay 3"],
         "estimated_duration": 35,
         "illustration_concept": {
-            "left": "selected experts",
-            "right": "one shared router",
-            "relation": "routes to",
+            "unit": "square",
+            "field": "a 10x10 grid",
+            "emphasis": "four cells",
         },
         "segment_narrations": ["文A。", "文B。", "文C。"],
         "scenes": [

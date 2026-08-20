@@ -173,33 +173,66 @@ def test_overlay_instruction_states_the_enforced_limit(video_format: str, langua
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
 def test_illustration_instruction_is_injected(video_format: str, language: str) -> None:
-    """挿絵の主題を出させる指示が実際に入っていること。left/right/relation の
-    3つを求める指示であること（自由文の1文ではない）。
+    """挿絵の主題を出させる指示が実際に入っていること。unit/field/emphasis の
+    3つを求める指示であること（自由文の1文でも、旧 left/right/relation でもない）。
     """
     prompt = _prompt(language, video_format)
     assert "illustration_concept" in prompt
     illustration_rule = prompt.split("illustration_concept")[1].split("\n")[0]
-    assert "left" in illustration_rule
-    assert "right" in illustration_rule
-    assert "relation" in illustration_rule
+    assert "unit" in illustration_rule
+    assert "field" in illustration_rule
+    assert "emphasis" in illustration_rule
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
-def test_illustration_instruction_forbids_scene_descriptions(
-    video_format: str, language: str
-) -> None:
-    """場面・情景の描写を明示的に禁じること。
+def test_illustration_instruction_forbids_human_figures(video_format: str, language: str) -> None:
+    """人物・人物のピクトグラムを主題にすることを明示的に禁じること。
 
-    実際に生成した挿絵で、記事の主題（ルーティングでコストを1/10にする）に
-    対して「オフィスで働く人々」という場面を描いてしまった。自由文が場面を
-    作らせる以上、構造を固定するだけでなく、この指示自体でも明示的に禁じる。
+    実際に生成した挿絵は、記事の主題（エキスパートを選んでルーティングする）
+    に対して`left="expert models"`を人間と読んで3人の人物ピクトグラムを
+    描いた。語の選び方の問題なので、`unit`/`field`/`emphasis`という構造に
+    変えるだけでは再発を防げず、この指示自体で明示的に禁じる必要がある。
     """
     prompt = _prompt(language, video_format)
     illustration_rule = prompt.split("illustration_concept")[1]
     if language == "ja":
-        assert "場面" in illustration_rule or "情景" in illustration_rule
+        assert "人物" in illustration_rule
     else:
-        assert "scene" in illustration_rule.lower() or "setting" in illustration_rule.lower()
+        assert "human figure" in illustration_rule.lower()
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_illustration_instruction_forbids_abstract_quantities(
+    video_format: str, language: str
+) -> None:
+    """「効率」「コスト」のような抽象量を主題にすることを明示的に禁じること。
+
+    実際に生成した挿絵では`right="reduced compute"`が描けない量なので
+    CPUチップという別の物体になり、「削減された」という意味が失われた。
+    """
+    prompt = _prompt(language, video_format)
+    illustration_rule = prompt.split("illustration_concept")[1]
+    if language == "ja":
+        assert "抽象量" in illustration_rule
+    else:
+        assert "abstract quantity" in illustration_rule.lower()
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_illustration_instruction_forbids_arrow_between_two_objects(
+    video_format: str, language: str
+) -> None:
+    """「2つの異なる物を矢印で繋ぐ」構図を想定させないこと。
+
+    語の選び方を直しても、この構図自体が凡庸で内容を反映しない
+    （`_illustration_spec` のdocstring参照）。
+    """
+    prompt = _prompt(language, video_format)
+    illustration_rule = prompt.split("illustration_concept")[1]
+    if language == "ja":
+        assert "矢印" in illustration_rule
+    else:
+        assert "arrow" in illustration_rule.lower()
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
@@ -229,9 +262,9 @@ def test_output_example_includes_illustration_concept(video_format: str, languag
     example = prompt.split("<output_format>")[1].split("</output_format>")[0]
     assert '"illustration_concept"' in example
     illustration_example = example.split('"illustration_concept"')[1].split("}")[0]
-    assert '"left"' in illustration_example
-    assert '"right"' in illustration_example
-    assert '"relation"' in illustration_example
+    assert '"unit"' in illustration_example
+    assert '"field"' in illustration_example
+    assert '"emphasis"' in illustration_example
 
 
 def test_overlay_examples_do_not_restate_the_limit() -> None:
