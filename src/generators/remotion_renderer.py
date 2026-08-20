@@ -93,22 +93,40 @@ class RemotionRenderError(Exception):
 ILLUSTRATION_STYLE_PROMPT = """Medium: flat vector diagram with the finish of a designed technical
   explainer — the quality an in-house design team publishes, not a
   whiteboard sketch or a default drawing-tool output. Solid fills, crisp
-  edges, geometric precision, consistent generous corner radius.
+  edges, exact geometric precision, small and consistent corner radius
+  (crisp and engineered, not soft and rounded).
   NO texture, NO grain, NO sketchiness, NO visible brush or chalk strokes,
   NO hand-drawn wobble.
+Register: the subject is frontier computing — AI systems, cloud
+  infrastructure, model architecture. The figure must read as modern and
+  engineered: cool palette, exact alignment, decisive contrast, generous
+  negative space. Avoid anything that reads as a textbook plate, a print
+  brochure, or friendly consumer illustration.
+Precision: align everything to an implicit grid. Keep every line and edge at
+  0, 45, or 90 degrees, with equal spacing between repeated elements. Sloppy
+  alignment is what separates a diagram that looks designed from one that
+  looks generated.
+No luminosity effects: NO gradients, NO glows, NO neon bloom, NO glassmorphism,
+  NO drop shadows. These are the stock signature of generic AI-generated
+  imagery — the exact look this project exists to avoid. The modern feel must
+  come from the cool palette, the geometry, and the contrast, staying
+  completely flat.
 Weight hierarchy: line weights MUST vary. Primary contours are thick and
   confident; secondary connectors and detail lines are noticeably thinner.
   Uniform hairlines everywhere is the signature of an undesigned figure —
   avoid it.
-Ground: warm off-white paper (#f5f2ea), filling the whole canvas edge to
-  edge. Palette: near-black ink (#1b1a1d) for contours and labels, deep teal
-  (#0d9488) and warm amber (#b45309) as the two accents, plus their pale
-  tints (#cfe9e4 teal tint, #f2ddc0 amber tint) and one warm grey (#d8d3c8)
-  for secondary areas. Use nothing outside this set.
+Ground: cool off-white (#eef1f5), filling the whole canvas edge to edge —
+  a cool technical white, NOT cream, ivory, beige, or warm paper. Palette:
+  graphite ink (#14161a) for contours and labels, electric cyan (#0891b2)
+  and electric violet (#6d4aff) as the two accents, plus their pale tints
+  (#cfe4ee cyan tint, #ded6ff violet tint) and one cool grey (#d3d9e0) for
+  secondary areas. Use nothing outside this set. NO warm colours anywhere —
+  no amber, orange, brown, or cream; the subject is frontier computing, and
+  warm tones read as print and paper rather than as technology.
 Fill, don't outline: the main shapes MUST be filled with those tints or
   accents. A figure built only from thin outlines on paper reads as unfinished
-  — mass is what makes it look designed. Flat fills only, though: NO
-  gradients, NO shadows, NO 3D, NO perspective.
+  — mass is what makes it look designed. Flat fills only, though: no
+  volume, no 3D, no perspective (see also: no luminosity effects, above).
 Composition: ONE mechanism explained in ONE diagram, front-on flat view.
   Show its named parts and how they relate, so a reader grasps how the thing
   works from the figure alone. Connections (a line, an arrow, a nesting, a
@@ -119,6 +137,15 @@ Scale and presence: the figure MUST fill the canvas — spanning at least 85%
   of its width AND at least 85% of its height, balanced across both axes.
   Do not draw a small diagram floating in a large empty field, and do not
   leave a whole empty band along any side.
+Fill it with meaning, not with filler: satisfy the size requirement by making
+  the meaningful parts LARGER, never by adding meaningless ones. Do NOT pad
+  the canvas with a row or column of identical empty boxes, placeholder
+  cards, or repeated filler shapes. Every shape you draw must be one of the
+  named parts of the mechanism or a connection between them.
+Filled shapes carry structure: a large filled block should show something
+  inside it — an internal glyph, a lattice, a set of cells, a routed path —
+  so its size means something. Several large empty rectangles look like an
+  unfinished template, however well aligned they are.
 Scale hierarchy: ONE element is clearly dominant — the largest shape, filled
   with an accent, sitting where the eye lands first. Supporting elements are
   visibly smaller and lighter. Giving every part the same size and weight
@@ -127,7 +154,7 @@ Margins: every shape and every label must sit well inside the central 90% of
   the canvas. Nothing may touch or approach the edge of the image — the
   renderer places this figure inside a band and a label at the edge gets
   clipped.
-Accent discipline: the SATURATED accents (#0d9488, #b45309) mark ONLY the
+Accent discipline: the SATURATED accents (#0891b2, #6d4aff) mark ONLY the
   part the explanation turns on. Everything else is built from near-black
   contours with pale tint or warm grey fills — filled, but quiet. Spreading
   a saturated accent decoratively across unrelated shapes makes the colour

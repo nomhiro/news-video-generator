@@ -84,6 +84,51 @@ def test_illustration_style_allows_japanese_labels_but_bans_numerals() -> None:
     assert "no sentence, caption, title, or paragraph anywhere" in lowered
 
 
+def test_illustration_style_bans_filler_to_meet_the_size_requirement() -> None:
+    """「カードを埋めろ」を意味のない反復で満たすことを禁じること。
+
+    寸法の要求（85%）を入れた直後の実測で、モデルは**空の四角6個を左に並べ、
+    空の大きな角丸2個を右に置いて**カードを埋めた。整列も配色も正しいのに
+    情報量は落ちており、その前の版（箱の中にチップの粒を描いて計算量の差を
+    伝えていた）より劣っていた。
+
+    `statement` レイアウトを半数以下に制限しているのと同じ理由——モデルは
+    要求を**楽な方**で満たす。埋め方まで指定しないと、量だけが増える。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "fill it with meaning, not with filler" in lowered
+    assert "identical empty boxes" in lowered
+    # 大きい面には中身を持たせる（大きさに意味を持たせる）。
+    assert "filled shapes carry structure" in lowered
+
+
+def test_illustration_style_bans_luminosity_effects() -> None:
+    """グラデーション・発光・ガラス質を明示的に禁じること。
+
+    「先進的」を表す最も手軽な記号がグラデーションと glow だが、それは
+    **汎用的な AI 生成画像の署名そのもの**である。このプロジェクトは
+    「AIくささが前面に出ていて見たいと思いづらい」という出発点から
+    始まっているので、そこへ戻る配色は選べない。先進性は寒色・幾何・
+    コントラストで作る。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "no gradients" in lowered
+    assert "no glows" in lowered
+    assert "no glassmorphism" in lowered
+
+
+def test_illustration_style_states_the_subject_register() -> None:
+    """題材（AI・クラウド・先端技術）を明示すること。
+
+    配色や幾何の指示だけでは「なぜ寒色なのか」が伝わらず、モデルは
+    印刷物寄りの安全な絵に寄る。題材そのものを書くと、その語彙で
+    描こうとする（実測で引き出し線などの作法が出た）。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "frontier computing" in lowered
+    assert "no warm colours anywhere" in lowered
+
+
 def test_illustration_style_demands_design_quality() -> None:
     """平板さを積極的に禁じること。
 
@@ -175,15 +220,19 @@ def test_illustration_style_uses_the_paper_palette() -> None:
     暗い画面の地が同じ HEX になるのは偶然ではなく、同じ「ほぼ黒」を
     両方で使っているためである。
     """
-    assert "#f5f2ea" in ILLUSTRATION_STYLE_PROMPT  # 紙の地（COLORS.paper と同値）
-    assert "#1b1a1d" in ILLUSTRATION_STYLE_PROMPT  # インク（COLORS.bg と同値）
-    assert "#0d9488" in ILLUSTRATION_STYLE_PROMPT  # 紙用の濃いティール
-    assert "#b45309" in ILLUSTRATION_STYLE_PROMPT  # 紙用の濃い琥珀
-    # **面を塗るための淡色。** 2026-08-20 に追加した。濃い2色しか与えないと
-    # 塗る色が無いので図が細い輪郭線だけになり、「シンプルすぎる」と判断された。
-    assert "#cfe9e4" in ILLUSTRATION_STYLE_PROMPT  # ティールの淡色
-    assert "#f2ddc0" in ILLUSTRATION_STYLE_PROMPT  # 琥珀の淡色
-    assert "#d8d3c8" in ILLUSTRATION_STYLE_PROMPT  # 副次的な面の暖色グレー
+    assert "#eef1f5" in ILLUSTRATION_STYLE_PROMPT  # 冷たい白の地（COLORS.paper と同値）
+    assert "#14161a" in ILLUSTRATION_STYLE_PROMPT  # グラファイト（COLORS.bg と同値）
+    assert "#0891b2" in ILLUSTRATION_STYLE_PROMPT  # 電気的なシアン
+    assert "#6d4aff" in ILLUSTRATION_STYLE_PROMPT  # 電気的なバイオレット
+    # **面を塗るための淡色。** 濃い2色しか与えないと塗る色が無いので図が
+    # 細い輪郭線だけになり、「シンプルすぎる」と判断された（2026-08-20）。
+    assert "#cfe4ee" in ILLUSTRATION_STYLE_PROMPT  # シアンの淡色
+    assert "#ded6ff" in ILLUSTRATION_STYLE_PROMPT  # バイオレットの淡色
+    assert "#d3d9e0" in ILLUSTRATION_STYLE_PROMPT  # 副次的な面の寒色グレー
+    # **暖色は使わせない。** クリーム・琥珀の配色は印刷物の語彙で、
+    # AI・クラウドという題材に合っていなかった（`theme.ts` の経緯を参照）。
+    assert "#f5f2ea" not in ILLUSTRATION_STYLE_PROMPT
+    assert "#b45309" not in ILLUSTRATION_STYLE_PROMPT
     # 暗地向けのアクセントは使わせない（淡すぎる）。
     assert "#2dd4bf" not in ILLUSTRATION_STYLE_PROMPT
     assert "#f2a93c" not in ILLUSTRATION_STYLE_PROMPT
