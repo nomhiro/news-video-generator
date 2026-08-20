@@ -56,7 +56,9 @@ class _FakeScript:
         self.segment_narrations = ["narration"]
         self.full_narration = "narration"
         self.illustration_concept = IllustrationConcept(
-            unit="square", field="a 10x10 grid", emphasis="four cells"
+            subject="a router directing each input to one of several stores",
+            key_details=["a small switch block", "several identical stores behind it"],
+            labels=["入力", "切替"],
         )
 
     def to_json_file(self, path: Path) -> None:

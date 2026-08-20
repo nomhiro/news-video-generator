@@ -14,7 +14,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from src.models.scene import MAX_EMPHASIS_CHARS, MAX_FIELD_CHARS, MAX_UNIT_CHARS
+from src.models.scene import MAX_DETAIL_CHARS, MAX_LABEL_CHARS
 from src.models.script import (
     MAX_HEADLINE_CHARS,
     MIN_INSIGHT_CHARS,
@@ -479,40 +479,80 @@ def test_script_also_rejects_too_long_headline() -> None:
 
 
 # --------------------------------------------------------------------------
-# illustration_concept（Remotion レンダラが動画全体で共有する挿絵の主題を
-# 「2つの要素とその関係」で表したもの）
+# illustration_concept（Remotion レンダラが動画全体で共有する挿絵を
+# 「名札付きの説明図」として表したもの。`CardVisual` と同じ形）
 # --------------------------------------------------------------------------
 
 
-def _concept(**overrides: str) -> dict[str, str]:
+def _concept(**overrides: object) -> dict[str, object]:
     """検証を通る最小の `illustration_concept` を作る。"""
-    payload = {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"}
+    payload: dict[str, object] = {
+        "subject": "a router directing each input to one of several stores",
+        "key_details": ["a small switch block", "several identical stores behind it"],
+        "labels": ["入力", "切替"],
+    }
     payload.update(overrides)
     return payload
 
 
-def test_rejects_empty_illustration_concept_field() -> None:
-    with pytest.raises(ValidationError, match="unit が空です"):
-        _draft(illustration_concept=_concept(unit=""))
+def test_rejects_empty_illustration_subject() -> None:
+    with pytest.raises(ValidationError, match="subject が空です"):
+        _draft(illustration_concept=_concept(subject=""))
 
 
-def test_rejects_whitespace_only_illustration_concept_field() -> None:
-    """空白だけの語も空として扱うこと（`_validate_insights` と同じ理由）。"""
-    with pytest.raises(ValidationError, match="field が空です"):
-        _draft(illustration_concept=_concept(field="   "))
+def test_rejects_whitespace_only_illustration_subject() -> None:
+    """空白だけの主題も空として扱うこと（`_validate_insights` と同じ理由）。"""
+    with pytest.raises(ValidationError, match="subject が空です"):
+        _draft(illustration_concept=_concept(subject="   "))
 
 
-def test_rejects_too_long_illustration_concept_field() -> None:
-    with pytest.raises(ValidationError, match="emphasis が長すぎます"):
-        _draft(illustration_concept=_concept(emphasis="a" * (MAX_EMPHASIS_CHARS + 1)))
+def test_requires_exactly_two_key_details() -> None:
+    """視覚要素はちょうど2個。
+
+    3個許すとモデルは3個使い、図が3グループに割れてスマホで読めなくなる
+    （`CardVisual.key_details` での実測）。範囲ではなく固定値にする。
+    """
+    with pytest.raises(ValidationError):
+        _draft(illustration_concept=_concept(key_details=["one"]))
+    with pytest.raises(ValidationError):
+        _draft(illustration_concept=_concept(key_details=["one", "two", "three"]))
 
 
-def test_accepts_illustration_concept_field_at_the_limit() -> None:
+def test_rejects_too_long_key_detail() -> None:
+    """長い記述は「場面の説明」なので弾くこと。
+
+    1項目にパネル1枚ぶんを書かれると、モデルはそれをコマ1枚として描く。
+    """
+    with pytest.raises(ValidationError, match="視覚要素が長すぎます"):
+        _draft(
+            illustration_concept=_concept(
+                key_details=["a" * (MAX_DETAIL_CHARS + 1), "a small switch block"]
+            )
+        )
+
+
+def test_accepts_key_detail_at_the_limit() -> None:
     """上限ちょうどは通すこと（境界での off-by-one を防ぐ）。"""
-    draft = _draft(illustration_concept=_concept(unit="a" * MAX_UNIT_CHARS))
-    assert len(draft.illustration_concept.unit) == MAX_UNIT_CHARS
-    draft = _draft(illustration_concept=_concept(field="a" * MAX_FIELD_CHARS))
-    assert len(draft.illustration_concept.field) == MAX_FIELD_CHARS
+    draft = _draft(
+        illustration_concept=_concept(key_details=["a" * MAX_DETAIL_CHARS, "a small switch block"])
+    )
+    assert len(draft.illustration_concept.key_details[0]) == MAX_DETAIL_CHARS
+
+
+def test_rejects_too_long_illustration_label() -> None:
+    """名札は名札の役割に留めること（長い文を入れると図が文字に埋まる）。"""
+    with pytest.raises(ValidationError, match="ラベルが長すぎます"):
+        _draft(illustration_concept=_concept(labels=["あ" * (MAX_LABEL_CHARS + 1)]))
+
+
+def test_accepts_illustration_without_labels() -> None:
+    """名札なしも許すこと。
+
+    絵だけで伝わる仕組みもあり、必須にすると無理に名札を付けさせる。
+    `build_illustration_prompt` は名札が無いことを明示して渡す。
+    """
+    draft = _draft(illustration_concept=_concept(labels=[]))
+    assert draft.illustration_concept.labels == []
 
 
 def test_to_script_preserves_illustration_concept() -> None:
@@ -524,6 +564,6 @@ def test_to_script_preserves_illustration_concept() -> None:
 def test_script_also_rejects_empty_illustration_concept_field() -> None:
     """`Script` 側でも同じ検査が効くこと。JSON から読み直した経路も守る。"""
     data = _draft().to_script("ja").to_dict()
-    data["illustration_concept"]["unit"] = ""
-    with pytest.raises(ValidationError, match="unit が空です"):
+    data["illustration_concept"]["subject"] = ""
+    with pytest.raises(ValidationError, match="subject が空です"):
         Script.model_validate(data)

@@ -24,8 +24,12 @@ from src.utils.line_break import ZWSP
 # --------------------------------------------------------------------------
 
 
-def _concept(**overrides: str) -> IllustrationConcept:
-    payload = {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"}
+def _concept(**overrides: object) -> IllustrationConcept:
+    payload: dict[str, object] = {
+        "subject": "a router directing each input to one of several stores",
+        "key_details": ["a small switch block", "several identical stores behind it"],
+        "labels": ["入力", "切替"],
+    }
     payload.update(overrides)
     return IllustrationConcept.model_validate(payload)
 
@@ -36,24 +40,59 @@ def test_illustration_prompt_prepends_the_fixed_style() -> None:
     assert prompt.startswith(ILLUSTRATION_STYLE_PROMPT)
 
 
-def test_illustration_prompt_composes_field_unit_and_emphasis() -> None:
-    """unit/field/emphasis を「反復する形の中で一部だけを強調する」構図の
-    指示に組み立てること。
+def test_illustration_prompt_composes_subject_details_and_labels() -> None:
+    """subject / key_details / labels を `build_card_prompt` と同じ形に
+    組み立てること。
 
     構図の文章自体を LLM に書かせない（コード側の権威にする）ので、
     ここでは組み立てた結果の文言を検査する。
     """
     prompt = build_illustration_prompt(_concept())
-    assert "a 10x10 grid" in prompt
-    assert "square" in prompt
-    assert "four cells" in prompt
-    assert "emphasised in the accent colour" in prompt
-    assert "every other shape left dim" in prompt
+    assert "Subject: a router directing each input to one of several stores" in prompt
+    assert "a small switch block; several identical stores behind it" in prompt
+    # 名札は引用符付きで並べ、「その部分の隣に描く」指示と一緒に渡す。
+    assert '"入力", "切替"' in prompt
+    assert "placed beside the element each one names" in prompt
 
 
-def test_illustration_style_forbids_text() -> None:
-    """文字は React が描くので、画像側には一切描かせないこと。"""
-    assert "no text" in ILLUSTRATION_STYLE_PROMPT.lower()
+def test_illustration_prompt_states_none_when_there_are_no_labels() -> None:
+    """名札が無いときは「無い」と明示すること。
+
+    書かないと、モデルは「説明図」という指示から勝手に見出しや注釈を
+    書き足す（カードでも同じ理由で none を明記している）。
+    """
+    prompt = build_illustration_prompt(_concept(labels=[]))
+    assert "Labels: none" in prompt
+    assert "Render no text of any kind" in prompt
+
+
+def test_illustration_style_allows_japanese_labels_but_bans_numerals() -> None:
+    """名札は日本語で描かせ、数字だけは禁じ続けること。
+
+    文字の全面禁止をやめた理由（2026-08-20）: 禁止していたために
+    「これが何か」を示す手段が構図しか残らず、絵が抽象に振れて
+    「概念図すぎる」状態になった。日本語で描かせる根拠は
+    `CardVisual._labels_must_be_short`（2026-08-16 に実画像で確認済み）。
+
+    数字を禁じ続ける理由: カードで記事に無い「¥980」が絵に描かれた
+    前例があり（880c95f）、挿絵は接地検査の対象外である。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "labels in this image must be japanese" in lowered
+    assert "no numerals or digits of any kind" in lowered
+    # 文・見出し・段落は禁じたままにする（見出しと字幕は React が描く）。
+    assert "no sentence, caption, title, or paragraph anywhere" in lowered
+
+
+def test_illustration_style_requires_an_explanatory_diagram() -> None:
+    """1つの仕組みを1枚の説明図として描かせること。
+
+    「同じ形の反復＋一部の強調」という構図の固定をやめた理由は
+    `remotion_renderer` の設計コメント（2026-08-20）を参照。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    assert "one mechanism explained in one diagram" in lowered
+    assert "one idea only" in lowered
 
 
 def test_illustration_style_forbids_incidental_props() -> None:
@@ -92,17 +131,6 @@ def test_illustration_style_uses_the_theme_colors() -> None:
     assert "#1b1a1d" in ILLUSTRATION_STYLE_PROMPT  # theme.ts の COLORS.bg
     assert "#2dd4bf" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent
     assert "#f2a93c" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent2
-
-
-def test_illustration_style_bans_two_objects_joined_by_an_arrow() -> None:
-    """「2つの異なる物を矢印で繋ぐ」構図を明示的に禁じること。
-
-    実際に生成した挿絵（3人のピクトグラム＋矢印＋CPUチップ）が示した通り、
-    この構図は内容に関わらず同じ凡庸な形になる。矢印は最後の手段でしかない。
-    """
-    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
-    assert "joined by an arrow" in lowered
-    assert "last resort" in lowered
 
 
 def test_illustration_style_bans_human_figures_including_pictograms() -> None:

@@ -30,9 +30,9 @@ def make_draft(**overrides: object) -> ScriptDraft:
         "text_overlays": ["overlay 1", "overlay 2", "overlay 3"],
         "estimated_duration": 35,
         "illustration_concept": {
-            "unit": "square",
-            "field": "a 10x10 grid",
-            "emphasis": "four cells",
+            "subject": "a router directing each input to one of several stores",
+            "key_details": ["a small switch block", "several identical stores behind it"],
+            "labels": ["入力", "切替"],
         },
         "segment_narrations": ["文A。", "文B。", "文C。"],
         "scenes": [

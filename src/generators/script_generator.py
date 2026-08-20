@@ -16,7 +16,13 @@ from tenacity import (
 )
 
 from src.models.formats import FormatSpec, get_spec
-from src.models.scene import ITEMS_PER_LAYOUT, MAX_LABEL_CHARS, MAX_RELATION_CHARS, SceneLayout
+from src.models.scene import (
+    ITEMS_PER_LAYOUT,
+    MAX_DETAIL_CHARS,
+    MAX_LABEL_CHARS,
+    MAX_RELATION_CHARS,
+    SceneLayout,
+)
 from src.models.script import (
     MAX_HEADLINE_CHARS,
     Script,
@@ -261,7 +267,7 @@ class ScriptGenerator:
         "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
+    "illustration_concept": {"subject": "...", "key_details": ["...", "..."], "labels": ["...", "..."]},
     "estimated_duration": 35
 }
 </output_format>
@@ -273,7 +279,7 @@ class ScriptGenerator:
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に6個あること
-6. illustration_concept の unit/field/emphasis が実際に描ける形の名前と個数・範囲の句で、人物・抽象量・矢印構図を想定せず、スタイル語（画材・配色・技法）も含まないこと
+6. illustration_concept の subject が図として描ける具体物で、key_details がちょうど2個の短い英語の句、labels が0〜4個の8字以内の日本語で、人物・抽象量・数字・スタイル語（画材・配色・技法）を含まないこと
 </verification>"""
 
     SYSTEM_PROMPT_LONG_JA = """<role>
@@ -361,7 +367,7 @@ class ScriptGenerator:
         "画像10用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
+    "illustration_concept": {"subject": "...", "key_details": ["...", "..."], "labels": ["...", "..."]},
     "estimated_duration": 300
 }
 </output_format>
@@ -373,7 +379,7 @@ class ScriptGenerator:
 3. text_overlays が正確に10個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に10個あること
-6. illustration_concept の unit/field/emphasis が実際に描ける形の名前と個数・範囲の句で、人物・抽象量・矢印構図を想定せず、スタイル語（画材・配色・技法）も含まないこと
+6. illustration_concept の subject が図として描ける具体物で、key_details がちょうど2個の短い英語の句、labels が0〜4個の8字以内の日本語で、人物・抽象量・数字・スタイル語（画材・配色・技法）を含まないこと
 </verification>"""
 
     SYSTEM_PROMPT_EN = """<role>
@@ -447,7 +453,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
+    "illustration_concept": {"subject": "...", "key_details": ["...", "..."], "labels": ["...", "..."]},
     "estimated_duration": 35
 }
 </output_format>
@@ -459,7 +465,7 @@ Before output, verify:
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
 5. scenes has exactly 6 elements
-6. illustration_concept's unit/field/emphasis name a real drawable shape and a count/range phrase, with no human figure, no abstract quantity, no arrow-and-two-objects framing, and no style words (medium, palette, technique)
+6. illustration_concept's subject names something literally drawable, key_details holds exactly two short English phrases, labels holds 0-4 Japanese labels of at most 8 characters each, and none of them names a human figure, an abstract quantity, a numeral, or a style word (medium, palette, technique)
 </verification>"""
 
     SYSTEM_PROMPT_LONG_EN = """<role>
@@ -547,7 +553,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 10 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
+    "illustration_concept": {"subject": "...", "key_details": ["...", "..."], "labels": ["...", "..."]},
     "estimated_duration": 300
 }
 </output_format>
@@ -559,7 +565,7 @@ Before output, verify:
 3. text_overlays has exactly 10 elements
 4. No element is an empty string
 5. scenes has exactly 10 elements
-6. illustration_concept's unit/field/emphasis name a real drawable shape and a count/range phrase, with no human figure, no abstract quantity, no arrow-and-two-objects framing, and no style words (medium, palette, technique)
+6. illustration_concept's subject names something literally drawable, key_details holds exactly two short English phrases, labels holds 0-4 Japanese labels of at most 8 characters each, and none of them names a human figure, an abstract quantity, a numeral, or a style word (medium, palette, technique)
 </verification>"""
 
     SYSTEM_PROMPT_TIKTOK_JA = """<role>
@@ -634,7 +640,7 @@ TikTokの収益化には60秒以上の動画が必要です。
         "画像6用テキスト"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
+    "illustration_concept": {"subject": "...", "key_details": ["...", "..."], "labels": ["...", "..."]},
     "estimated_duration": 75
 }
 </output_format>
@@ -646,7 +652,7 @@ TikTokの収益化には60秒以上の動画が必要です。
 3. text_overlays が正確に6個あること
 4. 全ての要素が空文字列でないこと
 5. scenes が正確に6個あること
-6. illustration_concept の unit/field/emphasis が実際に描ける形の名前と個数・範囲の句で、人物・抽象量・矢印構図を想定せず、スタイル語（画材・配色・技法）も含まないこと
+6. illustration_concept の subject が図として描ける具体物で、key_details がちょうど2個の短い英語の句、labels が0〜4個の8字以内の日本語で、人物・抽象量・数字・スタイル語（画材・配色・技法）を含まないこと
 7. segment_narrations の合計が500〜650文字の範囲内であること
 </verification>"""
 
@@ -722,7 +728,7 @@ Output ONLY the following JSON format. Do not include any text other than JSON.
         "Image 6 text"
     ],
     "scenes": <<SCENES_EXAMPLE>>,
-    "illustration_concept": {"unit": "square", "field": "a 10x10 grid", "emphasis": "four cells"},
+    "illustration_concept": {"subject": "...", "key_details": ["...", "..."], "labels": ["...", "..."]},
     "estimated_duration": 75
 }
 </output_format>
@@ -734,7 +740,7 @@ Before output, verify:
 3. text_overlays has exactly 6 elements
 4. No element is an empty string
 5. scenes has exactly 6 elements
-6. illustration_concept's unit/field/emphasis name a real drawable shape and a count/range phrase, with no human figure, no abstract quantity, no arrow-and-two-objects framing, and no style words (medium, palette, technique)
+6. illustration_concept's subject names something literally drawable, key_details holds exactly two short English phrases, labels holds 0-4 Japanese labels of at most 8 characters each, and none of them names a human figure, an abstract quantity, a numeral, or a style word (medium, palette, technique)
 7. The segment_narrations total 250-350 words
 </verification>"""
 
@@ -1057,29 +1063,30 @@ Before output, verify:
         Remotion レンダラは動画1本につき挿絵を**1枚だけ**生成し、画面上部
         48% に通しで表示する（`image_prompts` のような1シーン1枚とは違う）。
 
-        以前は主題を自由文の英語1文（`illustration_subject`）で出させていた。
-        実際に生成した挿絵を見た結果、**文章としては合っているのに絵として
-        伝わらない**という壊れ方が起きた——ルーティングでコストを1/10にする
-        記事に対し、モデルは「オフィスでコーヒーを片手に働く人々」を描いた。
-        自由文は「主題」ではなく「場面」を作らせてしまう。
+        ここまでに2つの構造を試し、どちらも実物を見て否決している。
 
-        その次に `left` / `right` / `relation` の3語に固定したが、これにも
-        別の欠陥があった（2026-08-17）。同じ記事に対して実際に生成した挿絵は
-        「3人の人物ピクトグラム＋オレンジの矢印＋CPUチップ」だった——
-        `left="expert models"` は人間と読まれ、`right="reduced compute"` は
-        描けない抽象量なので物体（チップ）になり、`relation="selected for"`
-        は素の矢印に潰れた。加えて**2つの異なる物を矢印で繋ぐ構図自体が
-        凡庸**で、内容が何であれ同じ形の絵しか作れない。
+        1. 自由文の英語1文（`illustration_subject`）——「主題」ではなく
+           「場面」を作らせた。ルーティングでコストを1/10にする記事に対し、
+           モデルは「オフィスでコーヒーを片手に働く人々」を描いた。
+        2. `unit` / `field` / `emphasis` の3語（2026-08-17）——場面は消えたが
+           **抽象化しすぎて何の話か分からない絵**になった。実際に生成したのは
+           「10本の棒のうち1本だけがティール」で、比率は伝わるが*何の*比率かは
+           絵から読めない。
 
-        だから `unit` / `field` / `emphasis` の3語に変えた——「同じ形が並ぶ
-        全体の中で、一部だけを強調する」という構図に固定する
-        （`IllustrationConcept` のdocstring参照）。3つとも
-        **実際に描ける単純な図形の名前と、その個数・範囲の言い回し**に限定し、
-        人物・抽象量・矢印は明示的に禁じる。**画材・配色・技法などのスタイル語も
-        明示的に禁じる**。書かせると、コード側が前置する固定のスタイル文
-        （`ILLUSTRATION_STYLE_PROMPT`）と矛盾した指示が1つのプロンプトに
-        混ざる（`ImageGenerator.generate_batch` の `enhance=False` の項で
-        実際に踏んだ壊れ方と同じ構造）。
+        だから `src/social/card_visual.py` の `CardVisual` と同じ形
+        （subject / key_details / labels）に寄せた（2026-08-20）。あちらは
+        「説明図＋短い日本語の名札」のために設計され、実測で「2要素＋名札」の
+        構図が最も明快だと確定している。**名札を許すことが本質的な変更**で、
+        文字を全面禁止していたから構図しか手段が残らず抽象に振れていた。
+
+        禁止として残すのは3つ。**人物**（"expert" のような語が人間と読まれて
+        ピクトグラムになる）、**抽象量**（「効率」「コスト」は描けないので
+        別の物体に置き換わる）、**数字**（カードで記事に無い「¥980」が絵に
+        描かれた前例があり、挿絵は接地検査の対象外）。**画材・配色・技法などの
+        スタイル語も禁じ続ける**——書かせると、コード側が前置する固定の
+        スタイル文（`ILLUSTRATION_STYLE_PROMPT`）と矛盾した指示が1つの
+        プロンプトに混ざる（`ImageGenerator.generate_batch` の
+        `enhance=False` の項で実際に踏んだ壊れ方と同じ構造）。
 
         形式（short/tiktok/long）で分けない。挿絵は動画全体で共有する1枚
         であり、尺とは無関係だからである（`_overlay_spec` と同じ判断）。
@@ -1092,48 +1099,56 @@ Before output, verify:
         """
         if language == "ja":
             return (
-                "動画全体で共有する挿絵1枚の主題を、unit（反復する描ける形）・"
-                "field（その形が並ぶ全体）・emphasis（そのうち際立たせる一部）"
+                "動画全体で共有する挿絵1枚を「名札付きの説明図」として、"
+                "subject（1枚で説明する仕組みを英語1文で）・"
+                "key_details（描く視覚要素とその関係を**ちょうど2個**、"
+                f"英語の短い句で、各{MAX_DETAIL_CHARS}字以内）・"
+                f"labels（画像内に描く短い**日本語**の名札を0〜4個、各{MAX_LABEL_CHARS}字以内）"
                 "の3つで表す。"
-                '各語は短い英語の句（例: unit="square", field="a 10x10 grid", '
-                'emphasis="four cells"）。'
-                "unit は**実際に描ける単純な図形1つの名前**に限る"
-                "（square / bar / node / block など）。"
+                "**記事の要約ではなく、仕組みが図として伝わる具体物に翻訳すること。**"
+                "読み手が絵だけで「どう動くのか」を掴めるのが目標で、"
+                "名札はその部分が何かを示すために付ける。"
+                "key_details は**場面やパネルの説明を書かないこと**"
+                "（1項目に複数の要素を詰めると、モデルはそれをコマ1枚として描き、"
+                "図がコマ割りになってスマホで読めなくなる。1項目 = 図の中の1要素）。"
+                "「対比する2つ」または「原因と結果の2つ」を選ぶと図として成立しやすい。"
                 "**人物や人物のピクトグラムを名指ししないこと**"
                 '（"expert" "model" のような語は画像生成モデルに人間と'
                 "読まれて人物を描かせてしまう）。"
                 "**「効率」「コスト」「性能」のような抽象量を主題にしないこと**"
                 "（描けないので別の物体に置き換わり、意味が失われる）。"
-                "**2つの異なる物を矢印で繋ぐ構図を想定しないこと**"
-                "（field 全体の中の emphasis という「1つの系の中の対比」に"
-                "すること。矢印は最後の手段）。"
+                "**数字を書かないこと**（金額・割合・日付・バージョン・個数。"
+                "記事に無い数字を絵に描かれた前例がある）。"
                 "画材・配色・レンダリング技法などのスタイル語も"
                 "書かないこと（固定のスタイル文をコード側が別途前置するため、"
-                "書くと矛盾した指示になる）。"
-                "emphasis の個数は近似でよい（画像生成モデルは正確な個数を"
-                "守らないため、図に数字は描かせない）"
+                "書くと矛盾した指示になる）"
             )
         return (
-            "The subject of the single illustration shared across the whole "
-            "video, expressed as three short English phrases: unit (a single "
-            "repeatable drawable shape), field (the whole set of that shape), "
-            "and emphasis (the few that stand out within it). E.g. "
-            'unit="square", field="a 10x10 grid", emphasis="four cells". '
-            "unit MUST name **one simple shape that can literally be drawn** "
-            "(square, bar, node, block, etc). "
-            '**Never name a human figure** — words like "expert" or '
-            '"model" get read by the image model as a person and drawn as '
-            "one. **Never make an abstract quantity the subject** "
-            "(efficiency, cost, performance — these cannot be drawn and get "
-            "replaced by an unrelated object, losing the meaning). "
-            "**Do NOT frame this as two different objects joined by an "
-            "arrow** — it must be one system (the field) with internal "
-            "contrast (the emphasis), not two things connected; an arrow is "
-            "a last resort. Do NOT name a medium, palette, or rendering "
-            "technique/style (code prepends a fixed style prompt separately; "
-            "naming one here produces a contradictory prompt). The count in "
-            "emphasis is approximate — image models do not honour exact "
-            "counts, and no numerals are drawn in the image anyway"
+            "The single illustration shared across the whole video, expressed "
+            "as a labelled explanatory diagram: subject (one English sentence "
+            "naming the mechanism to draw), key_details (**exactly two** short "
+            f"English phrases for the visual elements and their relation, at most "
+            f"{MAX_DETAIL_CHARS} characters each), and labels (0-4 short "
+            f"**Japanese** labels to render inside the image, at most "
+            f"{MAX_LABEL_CHARS} characters each). "
+            "**Translate the mechanism into something literally drawable — do "
+            "not summarise the article.** The goal is that a reader grasps how "
+            "the thing works from the figure alone; the labels name its parts. "
+            "key_details must **not describe a scene or a panel** — packing "
+            "several elements into one item makes the model draw it as a comic "
+            "frame, which is unreadable at phone size. One item = one element "
+            "of the figure. Two contrasting things, or a cause and its effect, "
+            "work best. "
+            '**Never name a human figure** — words like "expert" or "model" '
+            "get read by the image model as a person and drawn as one. "
+            "**Never make an abstract quantity the subject** (efficiency, cost, "
+            "performance — these cannot be drawn and get replaced by an "
+            "unrelated object, losing the meaning). **Never write a numeral** "
+            "(prices, percentages, dates, versions, counts) — an image has "
+            "already been produced with a figure the article never gave. "
+            "Do NOT name a medium, palette, or rendering technique/style "
+            "(code prepends a fixed style prompt separately; naming one here "
+            "produces a contradictory prompt)"
         )
 
     @staticmethod

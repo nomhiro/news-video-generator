@@ -51,7 +51,7 @@ class RemotionRenderError(Exception):
 # プロンプト（旧 `illustration_subject`）はオフィスで働く人々・コーヒー・
 # 観葉植物・丸いアイコン4つを描いた。「AIっぽい何か」にしかならない。
 # だから2つを同時に変える: スタイルをフラットにし、主題を
-# `IllustrationConcept`（unit/field/emphasis の3語）で強制する。
+# `IllustrationConcept` の構造で強制する。
 #
 # 制約に「文字を一切描かない」に加え、**付随物（コーヒー・観葉植物・部屋など）
 # を明示的に禁じる**。以前は禁じていなかったため、モデルは主題に触れつつ
@@ -66,30 +66,63 @@ class RemotionRenderError(Exception):
 # 同じ形の絵しか作れないため。だから構図の指示（Composition mandate）を
 # ここに明文化し、「人物を一切描かない」「アクセントカラーは強調部分だけ」
 # 「矢印は最後の手段」を固定する側の権威にする。
-ILLUSTRATION_STYLE_PROMPT = """\
-Medium: flat conceptual graphic. Clean geometric shapes, solid fills,
-  crisp edges. NO texture, NO grain, NO visible brush or chalk strokes,
-  NO sketchiness, NO hand-drawn wobble.
+#
+# **2026-08-20: 文字の全面禁止を解いて「名札付きの説明図」にした経緯。**
+# 3語構造（unit/field/emphasis）で生成した実物は「10本の棒のうち1本だけが
+# ティール」で、構図としては成立していたが**何の話か分からなかった**。
+# オーナーの判断は「概念図すぎる。全体解説図にすべき」。
+#
+# 抽象に振れた原因はここにあった——スタイル文が
+# `no text, letters, or numerals anywhere` で文字を全面禁止していたため、
+# 「これが何か」を示す手段が構図しか残っておらず、モデルは意味を運べる
+# 最小の形（比率のモチーフ）に収束するしかなかった。**説明図は本質的に
+# 名札を必要とする。**
+#
+# そこで禁止を「短い日本語の名札は可、ただし数字と文は禁止」に緩める。
+# 日本語で描かせる根拠は `CardVisual._labels_must_be_short`——2026-08-16 に
+# 実画像で字形の正確さとスマホでの可読性を確認しており、「英大文字のみ」
+# という以前の前提は誤りだと分かっている。
+#
+# **数字だけは禁じ続ける。** カードでは記事に無い「¥980」が絵に描かれた
+# （880c95f）。いまの接地検査はシーンのラベルにしか効いておらず、挿絵は
+# 検査の対象外なので、描かせない方が安全である。
+#
+# 構図の禁止も併せて緩める。「2つの異なる物を矢印で繋ぐな」は抽象モチーフを
+# 守るための制約だったが、仕組みを説明する図では接続そのものが内容を運ぶ。
+# 代わりに「1つの仕組みを1枚で」「必要な部分だけ」で歯止めをかける。
+ILLUSTRATION_STYLE_PROMPT = """Medium: flat conceptual diagram — a clean explanatory figure of the kind a
+  technical whitepaper would print. Solid fills, crisp edges, uniform line
+  weight. NO texture, NO grain, NO visible brush or chalk strokes, NO
+  sketchiness, NO hand-drawn wobble.
 Ground: dark charcoal (#1b1a1d). Palette strictly limited to off-white
   (#f5f2ea), one teal (#2dd4bf), and one amber (#f2a93c) on that ground.
   Flat fills only — no gradients, no shadows, no 3D, no perspective.
-Composition: ONE system shown with internal contrast, not two different
-  objects. Either a field of identical units with a few emphasised, or
-  one large form beside a much smaller form of the same kind. Two to
-  four shapes at most, centred, generous empty space, clearly
-  directional or symmetrical. Do NOT draw two different objects joined by an arrow
-  — an arrow-and-two-objects diagram is the most generic composition
-  available and looks like clip art regardless of subject. Arrows are a last resort, never the default.
-Accent discipline: the accent colour (teal or amber) marks ONLY the
-  emphasised part of the composition. Every other shape stays dim or
-  off-white. Spreading the accent decoratively across multiple unrelated
-  shapes makes the colour carry no meaning and reads as clip art.
-Requirement: it must be understandable in one second at phone size.
-Constraints: no text, letters, or numerals anywhere (all text is drawn
-  separately by the video renderer — any text baked into the image would
-  duplicate or contradict it). No watermarks, no logos. NO human figures
-  of any kind — no real people, no human pictograms, no silhouettes, no
-  avatars; a pictogram of a person is still a person for this rule.
+Composition: ONE mechanism explained in ONE diagram, centred, front-on flat
+  view, generous margins. Show its named parts and how they relate, so a
+  reader grasps how the thing works from the figure alone. Connections
+  (a line, an arrow, a nesting, a branch) are allowed when they carry the
+  mechanism — but draw only the parts the explanation needs. One idea only —
+  no comic panels, no multi-step timeline, no repeated variants of the same
+  figure.
+Accent discipline: the accent colour (teal or amber) marks ONLY the part the
+  explanation turns on. Every other shape stays dim or off-white. Spreading
+  the accent decoratively across unrelated shapes makes the colour carry no
+  meaning and reads as clip art.
+Typography: labels in this image MUST be Japanese, rendered accurately and
+  large enough to read on a phone. Correct Japanese glyphs matter more than
+  decoration — do not invent, distort, or romanise characters. Use a clean
+  geometric Japanese sans-serif. Place each label beside the part it names.
+  Keep the total amount of text small: only the short labels supplied below,
+  and no sentence, caption, title, or paragraph anywhere.
+Requirement: a reader must see what the mechanism is within one second at
+  phone size.
+Constraints: NO numerals or digits of any kind, and no invented figure — no
+  prices, percentages, dates, version numbers, counts, or statistics. If a
+  quantity matters, express it by the shapes themselves, never by writing a
+  number. No watermarks, no logos, no UI chrome, no photorealism.
+  NO human figures of any kind — no real people, no human pictograms,
+  no silhouettes, no avatars; a pictogram of a person is still a person
+  for this rule.
   NO incidental props — no cups, plants, desks, chairs, rooms, or
   environments. It is not a scene. Do NOT depict an abstract quantity
   (efficiency, cost, performance, "reduced compute") as an object — draw
@@ -120,27 +153,35 @@ def build_illustration_prompt(concept: IllustrationConcept) -> str:
     """gpt-image-2 に渡す挿絵プロンプトを組む。
 
     `src/social/card_visual.py` の `build_card_prompt` と同じ二段構え
-    （LLM が *what*、コード側が *how* を前置する）。ただし *what* 側は
-    自由文ではなく `IllustrationConcept`（unit/field/emphasis）——
-    コード側がここで「同じ形の反復の中で一部だけを強調する」という構図の
-    指示に組み立て直す。LLM に構図の文章まで書かせると、`_illustration_spec`
-    が禁じているはずの「場面」や「2物＋矢印」を再び作文する余地が残るため、
-    構図の指示自体もコード側の権威にする。
+    （LLM が *what*、コード側が *how* を前置する）。構造も同じ形に
+    寄せてあるので、組み立て方も揃える——揃えておけば、片方で見つかった
+    壊れ方をもう片方に移しやすい。
+
+    カードとの唯一の違いは `caption_ja` が無いこと。動画では見出しと字幕を
+    Remotion が絵の下に描くので、絵にも1行を描かせると同じ主張が2回出る
+    （`IllustrationConcept` のdocstring参照）。
 
     Args:
-        concept: `Script.illustration_concept`（反復する形・全体・強調部分）
+        concept: `Script.illustration_concept`（主題・視覚要素・日本語の名札）
 
     Returns:
-        str: 固定のスタイル文と構図の指示を組んだプロンプト
+        str: 固定のスタイル文を前置したプロンプト
     """
-    composition = (
-        f"Draw {concept.field} of identical {concept.unit} shapes, with "
-        f"{concept.emphasis} emphasised in the accent colour and every "
-        "other shape left dim. The emphasis IS the subject: the contrast "
-        "between the few emphasised shapes and the many dim ones is the "
-        "entire idea. Do not draw anything else."
-    )
-    return f"{ILLUSTRATION_STYLE_PROMPT}\n{composition}"
+    parts = [ILLUSTRATION_STYLE_PROMPT, f"Subject: {concept.subject}"]
+    parts.append("Key details: " + "; ".join(concept.key_details))
+    if concept.labels:
+        quoted = ", ".join(f'"{label}"' for label in concept.labels)
+        parts.append(
+            f"Labels: render exactly these Japanese words, {quoted}, in a clean "
+            "geometric Japanese sans-serif placed beside the element each one "
+            "names. Render no other text of any kind."
+        )
+    else:
+        # 名札なしを明示する。書かないと、モデルは「説明図」という指示から
+        # 勝手に見出しや注釈を書き足す（カードでも同じ理由で none を明記して
+        # いる）。
+        parts.append("Labels: none. Render no text of any kind.")
+    return "\n".join(parts)
 
 
 def resolve_frame_spans(

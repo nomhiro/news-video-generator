@@ -167,21 +167,22 @@ def test_overlay_instruction_states_the_enforced_limit(video_format: str, langua
 
 # --------------------------------------------------------------------------
 # illustration_concept（Remotion レンダラが動画全体で共有する挿絵の主題を
-# 「2つの要素とその関係」で表したもの）
+# 「名札付きの説明図」として表したもの。`CardVisual` と同じ形）
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
 def test_illustration_instruction_is_injected(video_format: str, language: str) -> None:
-    """挿絵の主題を出させる指示が実際に入っていること。unit/field/emphasis の
-    3つを求める指示であること（自由文の1文でも、旧 left/right/relation でもない）。
+    """挿絵の指示が実際に入っていること。subject/key_details/labels の
+    3つを求める指示であること（自由文の1文でも、旧 left/right/relation でも、
+    旧 unit/field/emphasis でもない）。
     """
     prompt = _prompt(language, video_format)
     assert "illustration_concept" in prompt
     illustration_rule = prompt.split("illustration_concept")[1].split("\n")[0]
-    assert "unit" in illustration_rule
-    assert "field" in illustration_rule
-    assert "emphasis" in illustration_rule
+    assert "subject" in illustration_rule
+    assert "key_details" in illustration_rule
+    assert "labels" in illustration_rule
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
@@ -190,8 +191,8 @@ def test_illustration_instruction_forbids_human_figures(video_format: str, langu
 
     実際に生成した挿絵は、記事の主題（エキスパートを選んでルーティングする）
     に対して`left="expert models"`を人間と読んで3人の人物ピクトグラムを
-    描いた。語の選び方の問題なので、`unit`/`field`/`emphasis`という構造に
-    変えるだけでは再発を防げず、この指示自体で明示的に禁じる必要がある。
+    描いた。語の選び方の問題なので、構造を差し替えるだけでは再発を防げず、
+    この指示自体で明示的に禁じる必要がある。
     """
     prompt = _prompt(language, video_format)
     illustration_rule = prompt.split("illustration_concept")[1]
@@ -219,20 +220,38 @@ def test_illustration_instruction_forbids_abstract_quantities(
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
-def test_illustration_instruction_forbids_arrow_between_two_objects(
-    video_format: str, language: str
-) -> None:
-    """「2つの異なる物を矢印で繋ぐ」構図を想定させないこと。
+def test_illustration_instruction_forbids_numerals(video_format: str, language: str) -> None:
+    """挿絵に数字を書かせないこと。
 
-    語の選び方を直しても、この構図自体が凡庸で内容を反映しない
-    （`_illustration_spec` のdocstring参照）。
+    2026-08-20 に文字の全面禁止を解いて日本語の名札を許したが、**数字だけは
+    禁じ続ける**。カードで記事に無い「¥980」が絵に描かれた前例があり
+    （880c95f）、いまの接地検査（`ungrounded_numbers`）はシーンのラベルにしか
+    効いていない。挿絵は検査の対象外なので、描かせない方が安全である。
     """
     prompt = _prompt(language, video_format)
     illustration_rule = prompt.split("illustration_concept")[1]
     if language == "ja":
-        assert "矢印" in illustration_rule
+        assert "数字" in illustration_rule
     else:
-        assert "arrow" in illustration_rule.lower()
+        assert "numeral" in illustration_rule.lower()
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_illustration_instruction_requires_japanese_labels(
+    video_format: str, language: str
+) -> None:
+    """名札は**日本語**で出させること。
+
+    読み手は日本語話者なので、英語ラベルは「読めるが分からない」状態を作る
+    だけだった（`CardVisual._labels_must_be_short` の経緯）。台本の言語が
+    英語でも、挿絵の名札の指示自体には日本語という語が現れる。
+    """
+    prompt = _prompt(language, video_format)
+    illustration_rule = prompt.split("illustration_concept")[1].split("\n")[0]
+    if language == "ja":
+        assert "日本語" in illustration_rule
+    else:
+        assert "japanese" in illustration_rule.lower()
 
 
 @pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
@@ -262,9 +281,9 @@ def test_output_example_includes_illustration_concept(video_format: str, languag
     example = prompt.split("<output_format>")[1].split("</output_format>")[0]
     assert '"illustration_concept"' in example
     illustration_example = example.split('"illustration_concept"')[1].split("}")[0]
-    assert '"unit"' in illustration_example
-    assert '"field"' in illustration_example
-    assert '"emphasis"' in illustration_example
+    assert '"subject"' in illustration_example
+    assert '"key_details"' in illustration_example
+    assert '"labels"' in illustration_example
 
 
 def test_overlay_examples_do_not_restate_the_limit() -> None:
