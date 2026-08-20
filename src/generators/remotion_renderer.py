@@ -94,9 +94,10 @@ ILLUSTRATION_STYLE_PROMPT = """Medium: flat conceptual diagram — a clean expla
   technical whitepaper would print. Solid fills, crisp edges, uniform line
   weight. NO texture, NO grain, NO visible brush or chalk strokes, NO
   sketchiness, NO hand-drawn wobble.
-Ground: dark charcoal (#1b1a1d). Palette strictly limited to off-white
-  (#f5f2ea), one teal (#2dd4bf), and one amber (#f2a93c) on that ground.
-  Flat fills only — no gradients, no shadows, no 3D, no perspective.
+Ground: warm off-white paper (#f5f2ea), filling the whole canvas edge to
+  edge. Palette strictly limited to near-black ink (#1b1a1d), one deep teal
+  (#0d9488), and one warm amber (#b45309) on that paper. Flat fills only —
+  no gradients, no shadows, no 3D, no perspective.
 Composition: ONE mechanism explained in ONE diagram, centred, front-on flat
   view, generous margins. Show its named parts and how they relate, so a
   reader grasps how the thing works from the figure alone. Connections
@@ -109,7 +110,7 @@ Margins: every shape and every label must sit well inside the central 90% of
   renderer places this figure inside a band and a label at the edge gets
   clipped.
 Accent discipline: the accent colour (teal or amber) marks ONLY the part the
-  explanation turns on. Every other shape stays dim or off-white. Spreading
+  explanation turns on. Every other shape stays in near-black ink. Spreading
   the accent decoratively across unrelated shapes makes the colour carry no
   meaning and reads as clip art.
 Typography: labels in this image MUST be Japanese, rendered accurately and
@@ -145,12 +146,12 @@ Constraints: NO numerals or digits of any kind, and no invented figure — no
 #
 # `gpt-image-2` の制約（`validate_size()` 参照: 両辺16の倍数、長辺3840以下、
 # アスペクト比3:1以下、総ピクセル数655,360〜8,294,400）を満たしつつ、
-# 帯のアスペクト比（1080/920 ≈ 1.1739）に最も近い値を選んでいる
-# （1216/1040 ≈ 1.1692）。**帯の寸法を変えたら、この値も一緒に見直す**
+# 帯のアスペクト比（1080/800 = 1.35）に最も近い値を選んでいる
+# （1216/896 ≈ 1.3571）。**帯の寸法を変えたら、この値も一緒に見直す**
 # （ここが単一の情報源では無いので、`zones.ts` の値とは別々にメンテする
 # 必要がある——`illustration_concept` の主題自体は言語モデルに出させているため、
 # ビルド時に TS 側の値をここへ自動で伝える手段が無い）。
-ILLUSTRATION_SIZE = "1216x1040"
+ILLUSTRATION_SIZE = "1216x896"
 
 
 def build_illustration_prompt(concept: IllustrationConcept) -> str:

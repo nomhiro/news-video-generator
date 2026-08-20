@@ -140,11 +140,25 @@ def test_illustration_style_is_not_the_card_style() -> None:
     assert ILLUSTRATION_STYLE_PROMPT != CARD_STYLE_PROMPT
 
 
-def test_illustration_style_uses_the_theme_colors() -> None:
-    """テーマの実際の HEX 値を使うこと（デザインとコードがずれると気付きにくい）。"""
-    assert "#1b1a1d" in ILLUSTRATION_STYLE_PROMPT  # theme.ts の COLORS.bg
-    assert "#2dd4bf" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent
-    assert "#f2a93c" in ILLUSTRATION_STYLE_PROMPT  # COLORS.accent2
+def test_illustration_style_uses_the_paper_palette() -> None:
+    """挿絵は**紙の配色**で描かせること。地（暗い画面）の配色と一致させない。
+
+    2026-08-20 に挿絵を白地の紙のカードにした。それまでは地の HEX
+    （`theme.ts` の `COLORS`）をそのまま使わせていたが、暗地向けの
+    アクセント（`#2dd4bf` / `#f2a93c`）は**紙の上では淡すぎて読めない**。
+    そのため挿絵だけは意図的に別の配色（濃いティール・濃い琥珀）を使う。
+
+    地の色（`#1b1a1d` = `COLORS.bg`）は線の色として残る。紙の上のインクと
+    暗い画面の地が同じ HEX になるのは偶然ではなく、同じ「ほぼ黒」を
+    両方で使っているためである。
+    """
+    assert "#f5f2ea" in ILLUSTRATION_STYLE_PROMPT  # 紙の地（COLORS.text と同値）
+    assert "#1b1a1d" in ILLUSTRATION_STYLE_PROMPT  # インク（COLORS.bg と同値）
+    assert "#0d9488" in ILLUSTRATION_STYLE_PROMPT  # 紙用の濃いティール
+    assert "#b45309" in ILLUSTRATION_STYLE_PROMPT  # 紙用の濃い琥珀
+    # 暗地向けのアクセントは使わせない（淡すぎる）。
+    assert "#2dd4bf" not in ILLUSTRATION_STYLE_PROMPT
+    assert "#f2a93c" not in ILLUSTRATION_STYLE_PROMPT
 
 
 def test_illustration_style_bans_human_figures_including_pictograms() -> None:
