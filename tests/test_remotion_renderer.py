@@ -84,6 +84,29 @@ def test_illustration_style_allows_japanese_labels_but_bans_numerals() -> None:
     assert "no sentence, caption, title, or paragraph anywhere" in lowered
 
 
+def test_illustration_style_demands_design_quality() -> None:
+    """平板さを積極的に禁じること。
+
+    2026-08-20、白地の説明図は正確だが「シンプルすぎる」と判断された。原因は
+    スタイル文が**平板さを指示していた**ことにある——`uniform line weight`
+    （線幅を揃えろ）で階層を禁じ、濃い2色だけのパレットで面を塗る色を与えず、
+    大きさの指定が無いので図がカードの中で小さく浮いていた。
+
+    3つを解いて、代わりに階層・面・寸法を要求する。ここが緩むと元の平板さに
+    戻るので、名前で狙い撃つ検査を置く（`test_remotion_design_rules.py` と
+    同じ、近似的だが退行に気付ける程度の網）。
+    """
+    lowered = ILLUSTRATION_STYLE_PROMPT.lower()
+    # 線幅の階層（旧 "uniform line weight" は削除済み）
+    assert "line weights must vary" in lowered
+    assert "uniform line weight" not in lowered
+    # 輪郭だけにしない
+    assert "fill, don't outline" in lowered
+    # カードを埋める寸法と、大きさの階層
+    assert "at least 85%" in lowered
+    assert "clearly dominant" in lowered
+
+
 def test_illustration_style_demands_margins() -> None:
     """図と名札を画像の端に寄せさせないこと。
 
@@ -152,10 +175,15 @@ def test_illustration_style_uses_the_paper_palette() -> None:
     暗い画面の地が同じ HEX になるのは偶然ではなく、同じ「ほぼ黒」を
     両方で使っているためである。
     """
-    assert "#f5f2ea" in ILLUSTRATION_STYLE_PROMPT  # 紙の地（COLORS.text と同値）
+    assert "#f5f2ea" in ILLUSTRATION_STYLE_PROMPT  # 紙の地（COLORS.paper と同値）
     assert "#1b1a1d" in ILLUSTRATION_STYLE_PROMPT  # インク（COLORS.bg と同値）
     assert "#0d9488" in ILLUSTRATION_STYLE_PROMPT  # 紙用の濃いティール
     assert "#b45309" in ILLUSTRATION_STYLE_PROMPT  # 紙用の濃い琥珀
+    # **面を塗るための淡色。** 2026-08-20 に追加した。濃い2色しか与えないと
+    # 塗る色が無いので図が細い輪郭線だけになり、「シンプルすぎる」と判断された。
+    assert "#cfe9e4" in ILLUSTRATION_STYLE_PROMPT  # ティールの淡色
+    assert "#f2ddc0" in ILLUSTRATION_STYLE_PROMPT  # 琥珀の淡色
+    assert "#d8d3c8" in ILLUSTRATION_STYLE_PROMPT  # 副次的な面の暖色グレー
     # 暗地向けのアクセントは使わせない（淡すぎる）。
     assert "#2dd4bf" not in ILLUSTRATION_STYLE_PROMPT
     assert "#f2a93c" not in ILLUSTRATION_STYLE_PROMPT

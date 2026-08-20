@@ -90,29 +90,48 @@ class RemotionRenderError(Exception):
 # 構図の禁止も併せて緩める。「2つの異なる物を矢印で繋ぐな」は抽象モチーフを
 # 守るための制約だったが、仕組みを説明する図では接続そのものが内容を運ぶ。
 # 代わりに「1つの仕組みを1枚で」「必要な部分だけ」で歯止めをかける。
-ILLUSTRATION_STYLE_PROMPT = """Medium: flat conceptual diagram — a clean explanatory figure of the kind a
-  technical whitepaper would print. Solid fills, crisp edges, uniform line
-  weight. NO texture, NO grain, NO visible brush or chalk strokes, NO
-  sketchiness, NO hand-drawn wobble.
+ILLUSTRATION_STYLE_PROMPT = """Medium: flat vector diagram with the finish of a designed technical
+  explainer — the quality an in-house design team publishes, not a
+  whiteboard sketch or a default drawing-tool output. Solid fills, crisp
+  edges, geometric precision, consistent generous corner radius.
+  NO texture, NO grain, NO sketchiness, NO visible brush or chalk strokes,
+  NO hand-drawn wobble.
+Weight hierarchy: line weights MUST vary. Primary contours are thick and
+  confident; secondary connectors and detail lines are noticeably thinner.
+  Uniform hairlines everywhere is the signature of an undesigned figure —
+  avoid it.
 Ground: warm off-white paper (#f5f2ea), filling the whole canvas edge to
-  edge. Palette strictly limited to near-black ink (#1b1a1d), one deep teal
-  (#0d9488), and one warm amber (#b45309) on that paper. Flat fills only —
-  no gradients, no shadows, no 3D, no perspective.
-Composition: ONE mechanism explained in ONE diagram, centred, front-on flat
-  view, generous margins. Show its named parts and how they relate, so a
-  reader grasps how the thing works from the figure alone. Connections
-  (a line, an arrow, a nesting, a branch) are allowed when they carry the
-  mechanism — but draw only the parts the explanation needs. One idea only —
-  no comic panels, no multi-step timeline, no repeated variants of the same
-  figure.
+  edge. Palette: near-black ink (#1b1a1d) for contours and labels, deep teal
+  (#0d9488) and warm amber (#b45309) as the two accents, plus their pale
+  tints (#cfe9e4 teal tint, #f2ddc0 amber tint) and one warm grey (#d8d3c8)
+  for secondary areas. Use nothing outside this set.
+Fill, don't outline: the main shapes MUST be filled with those tints or
+  accents. A figure built only from thin outlines on paper reads as unfinished
+  — mass is what makes it look designed. Flat fills only, though: NO
+  gradients, NO shadows, NO 3D, NO perspective.
+Composition: ONE mechanism explained in ONE diagram, front-on flat view.
+  Show its named parts and how they relate, so a reader grasps how the thing
+  works from the figure alone. Connections (a line, an arrow, a nesting, a
+  branch) are allowed when they carry the mechanism — but draw only the parts
+  the explanation needs. One idea only — no comic panels, no multi-step
+  timeline, no repeated variants of the same figure.
+Scale and presence: the figure MUST fill the canvas — spanning at least 85%
+  of its width AND at least 85% of its height, balanced across both axes.
+  Do not draw a small diagram floating in a large empty field, and do not
+  leave a whole empty band along any side.
+Scale hierarchy: ONE element is clearly dominant — the largest shape, filled
+  with an accent, sitting where the eye lands first. Supporting elements are
+  visibly smaller and lighter. Giving every part the same size and weight
+  makes the figure read as a default diagram rather than a designed one.
 Margins: every shape and every label must sit well inside the central 90% of
   the canvas. Nothing may touch or approach the edge of the image — the
   renderer places this figure inside a band and a label at the edge gets
   clipped.
-Accent discipline: the accent colour (teal or amber) marks ONLY the part the
-  explanation turns on. Every other shape stays in near-black ink. Spreading
-  the accent decoratively across unrelated shapes makes the colour carry no
-  meaning and reads as clip art.
+Accent discipline: the SATURATED accents (#0d9488, #b45309) mark ONLY the
+  part the explanation turns on. Everything else is built from near-black
+  contours with pale tint or warm grey fills — filled, but quiet. Spreading
+  a saturated accent decoratively across unrelated shapes makes the colour
+  carry no meaning and reads as clip art.
 Typography: labels in this image MUST be Japanese, rendered accurately and
   large enough to read on a phone. Correct Japanese glyphs matter more than
   decoration — do not invent, distort, or romanise characters. Use a clean
