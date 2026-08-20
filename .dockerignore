@@ -18,6 +18,12 @@ data/news/*.json
 __pycache__/
 *.py[cod]
 
+# Remotion の node_modules は Remotion ステージで npm install する。
+# Windows でビルドした node_modules（remotion/ 自体は除外しない）は
+# Linux では動かないので、ホストのものを持ち込まない。
+remotion/node_modules
+remotion/out
+
 # ツールのキャッシュ
 .pytest_cache/
 .mypy_cache/

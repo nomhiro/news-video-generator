@@ -8,6 +8,11 @@
 
 固有名詞は同じ方法では検証できない（記事の言い換えを許す必要がある）。
 そちらは「モデルに URL と媒体名を渡さない」ことで防いでいる。
+
+`src/social/` ではなく `src/utils/` に置いている理由: 台本生成
+（`src/generators/script_generator.py`）もシーンのラベルの数値検査に使う。
+generators から social を import すると横方向の依存になる。
+この関数は文字列しか触らないので、置き場所は中立でよい。
 """
 
 from __future__ import annotations

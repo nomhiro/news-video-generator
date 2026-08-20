@@ -9,8 +9,9 @@ if TYPE_CHECKING:
 
 from config import Config
 from src.generators.image_generator import ImageGenerator
+from src.generators.remotion_renderer import ILLUSTRATION_SIZE, build_illustration_prompt
 from src.generators.script_generator import ScriptGenerator
-from src.generators.video_composer import VideoComposer
+from src.generators.video_renderer import VideoRenderer, build_video_renderer
 from src.generators.voice_generator import VoiceGenerator
 from src.models.formats import get_spec
 from src.models.script import Script
@@ -32,7 +33,7 @@ class Pipeline:
         script_generator: 台本生成器
         voice_generator: 音声生成器
         image_generator: 画像生成器
-        video_composer: 動画合成器
+        video_renderer: 動画レンダラ（ffmpeg または remotion。設定で差し替える）
     """
 
     def __init__(self, config: Config, artifact_store: ArtifactStore | None = None):
@@ -72,7 +73,8 @@ class Pipeline:
             deployment=config.azure_openai_image_deployment,
             max_concurrency=config.image_max_concurrency,
         )
-        self.video_composer = VideoComposer()
+        # レンダラは設定で差し替える。既定は ffmpeg（今日動いている方式）。
+        self.video_renderer: VideoRenderer = build_video_renderer(config.video_renderer)
 
     def _sanitize_filename(self, name: str, max_length: int = 50) -> str:
         """ファイル名として安全な文字列に変換する。
@@ -193,8 +195,15 @@ class Pipeline:
             script_paths: dict[str, Path] = {}
 
             for lang in languages:
+                # 数値の根拠の強制はレンダラに従う。ラベルを描かない
+                # レンダラ（既定の ffmpeg）では、画面に出ない数値のために
+                # 台本生成を失敗させない（警告だけ残る）。
                 script = self.script_generator.generate(
-                    news_topic, lang, video_format, source_url=source_url
+                    news_topic,
+                    lang,
+                    video_format,
+                    source_url=source_url,
+                    enforce_scene_grounding=self.video_renderer.draws_scene_text,
                 )
                 scripts[lang] = script
 
@@ -203,16 +212,55 @@ class Pipeline:
                 script.to_json_file(script_path)
                 script_paths[lang] = script_path
 
-            # 2. Generate images (use first language's prompts)
-            log_step("画像を生成中...", "🎨")
+            # 2. 画像を生成する（レンダラが必要とする枚数だけ）
+            #
+            # ffmpeg はセグメントごとに1枚（`image_prompts` そのまま）、
+            # Remotion は図解を React で描くので画像は使わず、動画全体で
+            # 共有する挿絵を1枚だけ生成する。1本6枚だったのが1枚になり、
+            # gpt-image-2 のクォータ（リージョン単位で上限4）が
+            # X の画像カードと共食いする度合いが下がる。
             first_lang = languages[0]
+            image_count = self.video_renderer.image_count(len(scripts[first_lang].scenes))
             image_dir = self.config.output_dir / "images" / base_name
-            image_paths = self.image_generator.generate_batch(
-                scripts[first_lang].image_prompts,
-                image_dir,
-                language=first_lang,
-                video_format=video_format,
-            )
+            image_paths: list[Path] = []
+            illustration_path: Path | None = None
+
+            if image_count == 0:
+                log_step("画像生成は不要です（レンダラが図解を描きます）", "🎨")
+            elif image_count == 1:
+                # 動画全体で共有する挿絵1枚。`enhance=False` にする理由は
+                # `build_illustration_prompt` が medium/palette/技法まで
+                # 書き切った完結済みプロンプトだから（`_enhance_prompt` を
+                # 重ねると、画像カードの `enhance=False` と同じ理由で
+                # 矛盾した指示が混ざる）。
+                log_step("挿絵を生成中...", "🎨")
+                try:
+                    prompt = build_illustration_prompt(scripts[first_lang].illustration_concept)
+                    illustration_paths = self.image_generator.generate_batch(
+                        [prompt],
+                        image_dir,
+                        language=first_lang,
+                        video_format=video_format,
+                        # 挿絵は動画のアスペクト比（9:16 / 16:9）ではなく、
+                        # 表示先の帯（`remotion/src/zones.ts` の
+                        # `shared.illustration`）のアスペクト比で生成する。
+                        # `ILLUSTRATION_SIZE` の根拠は `remotion_renderer.py` を参照。
+                        size=ILLUSTRATION_SIZE,
+                        enhance=False,
+                    )
+                    illustration_path = illustration_paths[0]
+                except Exception as e:
+                    # 章ラベルと同じ判断: 装飾的な要素の生成失敗で
+                    # 本体（動画生成）を落とさない。地のみで続行する。
+                    log_error(f"挿絵の生成に失敗しました。地のみで続行します: {e}")
+            else:
+                log_step("画像を生成中...", "🎨")
+                image_paths = self.image_generator.generate_batch(
+                    scripts[first_lang].image_prompts,
+                    image_dir,
+                    language=first_lang,
+                    video_format=video_format,
+                )
 
             # 3. Generate voices for each language (with timing if available)
             log_step("音声を生成中...", "🎙️")
@@ -246,14 +294,17 @@ class Pipeline:
 
             for lang in languages:
                 video_path = self.config.output_dir / "videos" / f"{base_name}_{lang}.mp4"
-                self.video_composer.compose(
-                    audio_paths[lang],
-                    image_paths,
-                    video_path,
+                self.video_renderer.render(
+                    audio_path=audio_paths[lang],
+                    output_path=video_path,
+                    image_paths=image_paths,
+                    scenes=scripts[lang].scenes,
                     text_overlays=scripts[lang].text_overlays,
+                    segment_narrations=scripts[lang].segment_narrations,
+                    segment_timings=segment_timings.get(lang, []),
                     language=lang,
-                    segment_timings=segment_timings.get(lang),
                     video_format=video_format,
+                    illustration_path=illustration_path,
                 )
                 video_paths[lang] = video_path
 

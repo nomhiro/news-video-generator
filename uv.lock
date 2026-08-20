@@ -185,6 +185,15 @@ wheels = [
 ]
 
 [[package]]
+name = "budoux"
+version = "0.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/98/5149f70707903a63be1dcdb916afa2bbf7d2d8c10cd60d5d3dcb26efdf08/budoux-0.9.0.tar.gz", hash = "sha256:88c7d269ed5c1737a0787c325c3d51f9aa2f225eab4699e1c40c181717e3f29a", size = 108253, upload-time = "2026-08-07T06:03:56.403Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/3c/796ca1530359d5adb2e50c0e430940022045c4bd98ffa9073ca4bcf688bb/budoux-0.9.0-py3-none-any.whl", hash = "sha256:e22928a2565f61a00fa594807c7cd319ac777edacab0541be7abfd8ae30170a7", size = 103549, upload-time = "2026-08-07T06:03:55.151Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -1120,6 +1129,7 @@ dependencies = [
     { name = "azure-cognitiveservices-speech" },
     { name = "azure-identity" },
     { name = "azure-storage-blob" },
+    { name = "budoux" },
     { name = "fastapi" },
     { name = "feedparser" },
     { name = "google-api-python-client" },
@@ -1155,6 +1165,7 @@ requires-dist = [
     { name = "azure-cognitiveservices-speech", specifier = ">=1.51.1" },
     { name = "azure-identity", specifier = ">=1.19" },
     { name = "azure-storage-blob", specifier = ">=12.24" },
+    { name = "budoux", specifier = ">=0.9.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "feedparser", specifier = ">=6.0" },
     { name = "google-api-python-client", specifier = ">=2.100" },

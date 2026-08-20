@@ -126,6 +126,32 @@ class Config(BaseSettings):
     azure_speech_voice_ja: str = Field(default="ja-JP-NanamiNeural")
     azure_speech_voice_en: str = Field(default="en-US-AvaNeural")
 
+    # --- 動画のレンダラ ---
+    #
+    # ffmpeg: 静止画（gpt-image-2）を並べる現行の方式。
+    # remotion: React で図解を描く方式。画像生成 API は挿絵1枚だけに使う
+    #           （旧方式はショート1本で6枚。クォータの消費が6分の1になる）。
+    #
+    # **既定は remotion**（2026-08-20 に ffmpeg から切り替えた）。
+    #
+    # 切り替えの理由は「既定が ffmpeg のままだと意味が無い」ため。本番の
+    # Container App には `VIDEO_RENDERER` の env を置いていないので、
+    # **この既定値がそのまま毎朝の自動生成の見た目を決める**。ここを
+    # ffmpeg に残したままレンダラを作り込んでも、毎朝の生成は旧方式
+    # （静止画のスライドショー）で回り続ける。CD が無かった頃と同じ形の
+    # 「気付かないまま古いものが動き続ける」失敗になる。
+    #
+    # **自動フォールバックは無い。** remotion が失敗したらジョブを失敗させ、
+    # リースと再試行に任せる（理由は
+    # src/generators/video_renderer.py の docstring）。つまり本番イメージに
+    # Node 22 と Chrome Headless Shell が無ければ、毎朝の生成は丸ごと
+    # 失敗する。ffmpeg へ黙って落ちて旧見た目で回り続けるより、
+    # 失敗して気付く方を選んでいる。
+    #
+    # ローカルでは `cd remotion && npm install` を一度実行する。
+    # ffmpeg 方式は退路として残してあり、`VIDEO_RENDERER=ffmpeg` で戻せる。
+    video_renderer: Literal["ffmpeg", "remotion"] = Field(default="remotion")
+
     # --- 出力 ---
     #
     # output_dir は「生成の作業場所」。ffmpeg は subprocess で動く外部

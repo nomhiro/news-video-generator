@@ -182,3 +182,38 @@ def test_composer_passes_a_thread_limit() -> None:
     source = (REPO_ROOT / "src" / "generators" / "video_composer.py").read_text(encoding="utf-8")
     assert '"-threads",' in source
     assert "_available_cpus()" in source
+
+
+# --------------------------------------------------------------------------
+# Remotion レンダラ（Node + Chrome）を載せること
+#
+# ローカルには Node が常にあるため、コンテナに載せたときだけ露見する
+# （migrations/ を入れ忘れて起動できなかったのと同じ種類の失敗）。
+# --------------------------------------------------------------------------
+
+
+def test_dockerfile_installs_node() -> None:
+    """Node が無いと remotion レンダラは起動時ではなく**生成時**に落ちる。"""
+    # 実行ステージは python:3.13-slim = Debian 13 (trixie)。
+    # node:22-slim は bookworm なので glibc とライブラリ名が合わない。
+    assert "node:22-trixie-slim" in DOCKERFILE
+
+
+def test_dockerfile_bakes_chrome_and_node_modules() -> None:
+    """Chrome と依存を実行時に取得させない。ネットワークに依存し、初回生成が遅くなる。"""
+    assert "remotion browser ensure" in DOCKERFILE
+    # node_modules 自体はビルドステージにしか書かれない（COPY --from=remotion で
+    # まるごと持ってくるため）。実際の裏付けはビルドステージからの COPY と、
+    # その行き先が Python コードの期待するパスに一致していること。
+    assert "COPY --from=remotion" in DOCKERFILE
+    assert "/app/remotion" in DOCKERFILE
+
+
+def test_dockerfile_copies_the_remotion_project() -> None:
+    assert "remotion/src" in DOCKERFILE
+
+
+def test_dockerfile_installs_chrome_native_deps() -> None:
+    """Chrome Headless Shell のネイティブ依存。1つ欠けても起動しない。"""
+    for package in ("libnss3", "libgbm-dev", "libatk-bridge2.0-0", "libcups2"):
+        assert package in DOCKERFILE, f"{package} が Dockerfile にない"

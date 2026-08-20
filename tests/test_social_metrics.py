@@ -153,6 +153,22 @@ def test_応答に無い投稿もレコードとして残す(
     assert saved["records"][0]["metrics"] == {}
 
 
+def test_対象が無くても走ったことはログに残る(
+    repository: SocialPostRepository, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ファイルは書かないが、無音にはしない。
+
+    無人で回すものは、動いている証跡が無いのが一番困る。実際に初日の 11:00 に
+    走ったかどうかがログから判断できず、「対象0件だった」と「そもそも走って
+    いない」を区別できなかった。
+    """
+    with caplog.at_level("INFO"):
+        measured = collect_metrics(repository, FakeMetricsClient(), FakeStore(), tmp_path, now=NOW)
+
+    assert measured == 0
+    assert any("対象の投稿がありません" in record.message for record in caplog.records)
+
+
 def test_対象が無ければ何も書かない(repository: SocialPostRepository, tmp_path: Path) -> None:
     """空のファイルを毎日置くと、Blob にごみが積もる。"""
     store = FakeStore()

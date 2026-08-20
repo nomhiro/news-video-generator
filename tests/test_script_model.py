@@ -14,39 +14,27 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from src.models.scene import MAX_DETAIL_CHARS, MAX_LABEL_CHARS
 from src.models.script import (
+    MAX_HEADLINE_CHARS,
     MIN_INSIGHT_CHARS,
     Script,
     ScriptDraft,
     _join_narration,
     estimate_duration_sec,
 )
+from tests.factories import make_draft
 
 
 def _draft(**overrides: object) -> ScriptDraft:
-    """検証を通る最小の下書きを作り、必要な項目だけ差し替える。"""
-    payload: dict[str, object] = {
-        "title": "テストタイトル",
-        "description": "テスト説明",
-        "hashtags": ["shorts", "test"],
-        "hook": "冒頭のフック",
-        "main_points": ["ポイント1", "ポイント2"],
-        "conclusion": "締めの一言",
-        "technical_insight": (
-            "内部では既存モデルの推論結果をキャッシュして再利用する仕組みになっているため、"
-            "2回目以降の応答が速い。"
-        ),
-        "practical_impact": (
-            "現場では手作業だったレビュー工程を自動化でき、日次の運用コストが下がる。"
-            "レビュー担当は判断だけに集中できる。"
-        ),
-        "image_prompts": ["Scene 1", "Scene 2", "Scene 3"],
-        "text_overlays": ["overlay 1", "overlay 2", "overlay 3"],
-        "estimated_duration": 35,
-        "segment_narrations": ["文A。", "文B。", "文C。"],
-    }
-    payload.update(overrides)
-    return ScriptDraft.model_validate(payload)
+    """検証を通る最小の下書きを作る。payload の実体は `tests.factories.make_draft`。
+
+    payload をファクトリに置いているのは、複数のテストファイルが同じ
+    「検証を通る最小の下書き」を必要とするため（ここに置いたままだと、
+    `scenes` のような必須フィールドを足すたびに同じ ~25行を複製することになる）。
+    このファイルの既存呼び出しがそのまま動くよう、薄い委譲だけ残してある。
+    """
+    return make_draft(**overrides)
 
 
 def test_valid_draft_passes() -> None:
@@ -398,3 +386,184 @@ def test_to_script_without_source_leaves_description_untouched() -> None:
     script = draft.to_script("ja")
     assert script.description == "要約文"
     assert script.source_url == ""
+
+
+# --------------------------------------------------------------------------
+# scenes（Remotion レンダラ向けの図解構造）
+# --------------------------------------------------------------------------
+
+
+def test_scenes_must_match_segment_count() -> None:
+    """scenes も他の3配列と同じ数でなければならない。
+
+    シーンの数が合わないと、レンダラが参照するインデックスが範囲外になる。
+    """
+    with pytest.raises(ValidationError, match="配列長の不一致"):
+        _draft(scenes=[{"layout": "compare", "items": ["前", "後"], "relation": "変化"}])
+
+
+def test_too_many_statement_scenes_is_rejected() -> None:
+    """figure を持たない statement ばかりだと、静止画スライドショーに戻る。
+
+    モデルは楽な選択肢に寄るので、指示ではなく検査で抑える。
+    """
+    with pytest.raises(ValidationError, match="statement が多すぎます"):
+        _draft(
+            scenes=[
+                {"layout": "statement", "items": [], "relation": ""},
+                {"layout": "statement", "items": [], "relation": ""},
+                {"layout": "compare", "items": ["前", "後"], "relation": "変化"},
+            ]
+        )
+
+
+def test_scenes_survive_to_script() -> None:
+    """to_script が scenes をそのまま引き継ぐこと。"""
+    script = _draft().to_script("ja")
+    assert [s.layout.value for s in script.scenes] == ["compare", "flow", "statement"]
+
+
+# --------------------------------------------------------------------------
+# text_overlays（Remotion では 92〜112px の見出しとして描かれる）
+# --------------------------------------------------------------------------
+
+
+def test_rejects_too_long_headline() -> None:
+    """長すぎる見出しを弾くこと。
+
+    ffmpeg レンダラは14文字で機械的に折り返していたので、どれだけ長くても
+    症状が出なかった。Remotion の `AbsoluteFill` はスクロールしないため、
+    伸びた見出しは字幕のスクリムに重なるか画面外に切れる。
+    """
+    with pytest.raises(ValidationError, match="text_overlays の2番目が長すぎます"):
+        _draft(
+            text_overlays=[
+                "overlay 1",
+                "あ" * (MAX_HEADLINE_CHARS + 1),
+                "overlay 3",
+            ]
+        )
+
+
+def test_accepts_headline_at_the_limit() -> None:
+    """上限ちょうどは通すこと（境界での off-by-one を防ぐ）。"""
+    draft = _draft(
+        text_overlays=["あ" * MAX_HEADLINE_CHARS, "overlay 2", "overlay 3"],
+    )
+    assert len(draft.text_overlays[0]) == MAX_HEADLINE_CHARS
+
+
+def test_headline_limit_accepts_a_realistic_english_headline() -> None:
+    """英語の見出しが通ること。
+
+    `ScriptDraft` は意図的に `language` を持たないので、上限は言語非依存に
+    なる。日本語だけを見て決めると英語側が壊れる（`Pipeline.run` の既定は
+    `["ja", "en"]` なので EN の動画も実際に作られる）。
+    """
+    headline = "Inference costs drop by an order of magnitude"
+    assert len(headline) <= MAX_HEADLINE_CHARS
+    draft = _draft(text_overlays=[headline, "overlay 2", "overlay 3"])
+    assert draft.text_overlays[0] == headline
+
+
+def test_script_also_rejects_too_long_headline() -> None:
+    """`Script` 側でも同じ検査が効くこと。
+
+    レンダラが読むのは `Script` なので、`ScriptDraft` だけに置くと
+    JSON から読み直した経路が素通りする。
+    """
+    data = _draft().to_script("ja").to_dict()
+    data["text_overlays"] = ["あ" * (MAX_HEADLINE_CHARS + 1), "overlay 2", "overlay 3"]
+    with pytest.raises(ValidationError, match="長すぎます"):
+        Script.model_validate(data)
+
+
+# --------------------------------------------------------------------------
+# illustration_concept（Remotion レンダラが動画全体で共有する挿絵を
+# 「名札付きの説明図」として表したもの。`CardVisual` と同じ形）
+# --------------------------------------------------------------------------
+
+
+def _concept(**overrides: object) -> dict[str, object]:
+    """検証を通る最小の `illustration_concept` を作る。"""
+    payload: dict[str, object] = {
+        "subject": "a router directing each input to one of several stores",
+        "key_details": ["a small switch block", "several identical stores behind it"],
+        "labels": ["入力", "切替"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_rejects_empty_illustration_subject() -> None:
+    with pytest.raises(ValidationError, match="subject が空です"):
+        _draft(illustration_concept=_concept(subject=""))
+
+
+def test_rejects_whitespace_only_illustration_subject() -> None:
+    """空白だけの主題も空として扱うこと（`_validate_insights` と同じ理由）。"""
+    with pytest.raises(ValidationError, match="subject が空です"):
+        _draft(illustration_concept=_concept(subject="   "))
+
+
+def test_requires_exactly_two_key_details() -> None:
+    """視覚要素はちょうど2個。
+
+    3個許すとモデルは3個使い、図が3グループに割れてスマホで読めなくなる
+    （`CardVisual.key_details` での実測）。範囲ではなく固定値にする。
+    """
+    with pytest.raises(ValidationError):
+        _draft(illustration_concept=_concept(key_details=["one"]))
+    with pytest.raises(ValidationError):
+        _draft(illustration_concept=_concept(key_details=["one", "two", "three"]))
+
+
+def test_rejects_too_long_key_detail() -> None:
+    """長い記述は「場面の説明」なので弾くこと。
+
+    1項目にパネル1枚ぶんを書かれると、モデルはそれをコマ1枚として描く。
+    """
+    with pytest.raises(ValidationError, match="視覚要素が長すぎます"):
+        _draft(
+            illustration_concept=_concept(
+                key_details=["a" * (MAX_DETAIL_CHARS + 1), "a small switch block"]
+            )
+        )
+
+
+def test_accepts_key_detail_at_the_limit() -> None:
+    """上限ちょうどは通すこと（境界での off-by-one を防ぐ）。"""
+    draft = _draft(
+        illustration_concept=_concept(key_details=["a" * MAX_DETAIL_CHARS, "a small switch block"])
+    )
+    assert len(draft.illustration_concept.key_details[0]) == MAX_DETAIL_CHARS
+
+
+def test_rejects_too_long_illustration_label() -> None:
+    """名札は名札の役割に留めること（長い文を入れると図が文字に埋まる）。"""
+    with pytest.raises(ValidationError, match="ラベルが長すぎます"):
+        _draft(illustration_concept=_concept(labels=["あ" * (MAX_LABEL_CHARS + 1)]))
+
+
+def test_accepts_illustration_without_labels() -> None:
+    """名札なしも許すこと。
+
+    絵だけで伝わる仕組みもあり、必須にすると無理に名札を付けさせる。
+    `build_illustration_prompt` は名札が無いことを明示して渡す。
+    """
+    draft = _draft(illustration_concept=_concept(labels=[]))
+    assert draft.illustration_concept.labels == []
+
+
+def test_to_script_preserves_illustration_concept() -> None:
+    draft = _draft(illustration_concept=_concept())
+    script = draft.to_script("ja")
+    assert script.illustration_concept == draft.illustration_concept
+
+
+def test_script_also_rejects_empty_illustration_concept_field() -> None:
+    """`Script` 側でも同じ検査が効くこと。JSON から読み直した経路も守る。"""
+    data = _draft().to_script("ja").to_dict()
+    data["illustration_concept"]["subject"] = ""
+    with pytest.raises(ValidationError, match="subject が空です"):
+        Script.model_validate(data)

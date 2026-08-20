@@ -11,6 +11,8 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field, model_validator
 
+from src.models.scene import IllustrationConcept, SceneLayout, SceneVisual
+
 
 def _join_narration(segments: list[str], language: str) -> str:
     """セグメントを連結して完全なナレーションを作る。
@@ -30,7 +32,7 @@ def _join_narration(segments: list[str], language: str) -> str:
 
 
 class _HasAlignedSegments(Protocol):
-    """整合性検証が必要とする3フィールドだけを表す構造的な型。
+    """整合性検証が必要とする4フィールドだけを表す構造的な型。
 
     ScriptDraft と Script の両方がこれを満たす。
     """
@@ -38,6 +40,7 @@ class _HasAlignedSegments(Protocol):
     segment_narrations: list[str]
     image_prompts: list[str]
     text_overlays: list[str]
+    scenes: list[SceneVisual]
 
 
 class _HasInsights(Protocol):
@@ -57,6 +60,36 @@ class _HasInsights(Protocol):
 # 40文字は「一言で流していない」ことの担保であって、質の保証ではない
 # （質はスキーマでは担保できないので、生成物を読む工程が必要）。
 MIN_INSIGHT_CHARS = 40
+
+
+# 見出し（`text_overlays` の1要素）の最大文字数。
+#
+# なぜ必要か: Remotion では `text_overlays[i]` が画面中央の見出しとして
+# 92px（`statement` は112px）で描かれる。`AbsoluteFill` はスクロールしないので、
+# 伸びた見出しは下の字幕スクリムに重なるか画面外に切れる。**ffmpeg レンダラでは
+# 症状が出なかった**（`video_composer._wrap_text` が14文字で機械的に折り返して
+# 吸収していた）ため、この制約が無いことに気付きにくい。
+#
+# 45 の根拠（**実際にレンダリングしたフレームから逆算した値**。以前の 60 は
+# 描画幅からの算術的な見積りで、レンダリングして確かめておらず、
+# 実際には描画不可能な値だった）:
+#   - BudouX のフレーズ境界改行（ZWSP 挿入、`Headline.tsx` の
+#     `CHARS_PER_LINE_AT_BASE` 参照）は行を理論上の文字数まで詰められない。
+#     実測では92pxのとき1行あたり約8字（10字ではない）。
+#   - 上限まで縮めたとき（`MIN_SCALE = 0.5`）でも1行約16字 × 3行 = 48字が
+#     描画できる限度。60字はこの限度を超えており、**3行のどの組み合わせでも
+#     収まらず末尾の文字が無音で消える**ことを実測で確認した
+#     （43字の見出しで末尾「根本から変わることになった」が切れて描かれなかった）。
+#   - 行の折れ端に余裕を残すため 45 を上限にする。
+#   - `ScriptDraft` は意図的に `language` を持たないため、閾値は言語非依存で
+#     なければならない（`MIN_INSIGHT_CHARS` と同じ制約）。英語の妥当な見出し
+#     （例: "Inference costs drop by an order of magnitude" = 45字）がちょうど
+#     境界に来る値になっている。文字数ではなく語数で切ると日本語側が
+#     表現できない。
+#
+# `MAX_LABEL_CHARS` と同じく**実物を見て決め直す前提の暫定値**。カードでは
+# 上限90字が正常な出力を3回連続で弾いた前例があるので、渋りすぎも害になる。
+MAX_HEADLINE_CHARS = 45
 
 
 # 話速 1.1〜1.25 での実測に基づく読み上げ速度。
@@ -104,6 +137,7 @@ def _validate_aligned_segments(model: _HasAlignedSegments) -> None:
         "segment_narrations": len(segments),
         "image_prompts": len(model.image_prompts),
         "text_overlays": len(model.text_overlays),
+        "scenes": len(model.scenes),
     }
     if len(set(counts.values())) != 1:
         detail = ", ".join(f"{k}={v}" for k, v in counts.items())
@@ -136,6 +170,49 @@ def _validate_insights(model: _HasInsights) -> None:
             raise ValueError(
                 f"{field_name} が短すぎます: {len(stripped)}文字 (最低{MIN_INSIGHT_CHARS}文字)"
             )
+
+
+def _validate_headlines(overlays: list[str]) -> None:
+    """見出しが画面に収まる長さか検証する。
+
+    空の検査は `_validate_aligned_segments` が持っているので、ここは長さだけ見る。
+    上限の根拠は `MAX_HEADLINE_CHARS` のコメントを参照。
+
+    Args:
+        overlays: 見出しの配列（`text_overlays`）
+
+    Raises:
+        ValueError: 上限を超える要素がある場合
+    """
+    for i, text in enumerate(overlays, 1):
+        if len(text.strip()) > MAX_HEADLINE_CHARS:
+            raise ValueError(
+                f"text_overlays の{i}番目が長すぎます"
+                f"（{len(text.strip())}字、最大{MAX_HEADLINE_CHARS}字）: {text!r}"
+            )
+
+
+def _validate_scenes(scenes: list[SceneVisual]) -> None:
+    """図を持たないシーンが多すぎないか検証する。
+
+    `statement` は図を持たない。モデルが全部これを選べば図が1枚も出ず、
+    **静止画スライドショーだった頃と同じ紙芝居に戻る**。これは実在する
+    劣化経路で、モデルは常に楽な選択肢に寄る。`check_length_budget` と
+    同じ判断で、指示ではなく検査で抑える。
+
+    Args:
+        scenes: 検証するシーン
+
+    Raises:
+        ValueError: statement が半数を超える場合
+    """
+    limit = len(scenes) // 2
+    statements = sum(1 for scene in scenes if scene.layout is SceneLayout.STATEMENT)
+    if statements > limit:
+        raise ValueError(
+            f"図を持たない statement が多すぎます: {statements}個"
+            f"（{len(scenes)}シーン中 最大{limit}個）"
+        )
 
 
 def _with_source(description: str, source_url: str, language: str) -> str:
@@ -180,6 +257,10 @@ class ScriptDraft(BaseModel):
       記事のタイトルと本文だけ）。出させれば捏造する。`language` と同じく
       呼び出し元が権威を持つ値として `to_script` で受ける。
 
+    `image_prompts` は Remotion レンダラでは使わないが**残してある**。
+    `VIDEO_RENDERER=ffmpeg` への退路を生かすため、両レンダラが同じ台本から
+    動く状態を保つ。
+
     `technical_insight` / `practical_impact` を必須にしている理由:
     ニュースをなぞるだけの出力は埋もれるうえ、YouTube の
     「再利用されたコンテンツ」ポリシーに抵触するリスクがある。
@@ -199,6 +280,14 @@ class ScriptDraft(BaseModel):
         text_overlays: 各画像に表示するテキスト
         estimated_duration: 推定秒数
         segment_narrations: 各画像に対応するナレーションセグメント
+        scenes: 各セグメントの図解の構造（レンダラが読む）
+        illustration_concept: 動画全体で共有する挿絵1枚の主題を
+            「2つの要素とその関係」で表したもの。Remotion レンダラが
+            1本につき1枚だけ生成する挿絵の「何を描くか」。
+            `CardVisual.subject` と同じ二段構え（LLM が主題、コード側が
+            スタイルを前置）の *what* 側で、スタイルの語（medium / palette /
+            rendering technique）は含めない。検証は `IllustrationConcept`
+            自身が持つ（ネストした pydantic モデルなので自動で走る）
     """
 
     title: str
@@ -213,24 +302,28 @@ class ScriptDraft(BaseModel):
     text_overlays: list[str]
     estimated_duration: int
     segment_narrations: list[str]
+    scenes: list[SceneVisual]
+    illustration_concept: IllustrationConcept
 
     @model_validator(mode="after")
     def _check_content(self) -> "ScriptDraft":
         """セグメントの整合性と独自解説の実質を検証する。
 
         音声のタイミング同期と動画合成が
-        「segment_narrations / image_prompts / text_overlays の
+        「segment_narrations / image_prompts / text_overlays / scenes の
         要素数が一致していること」に依存しているため、ここで担保する。
 
         Returns:
             ScriptDraft: 検証済みの自身
 
         Raises:
-            ValueError: 要素数が一致しない、空要素がある、
-                または独自解説が空・短すぎる場合
+            ValueError: 要素数が一致しない、空要素がある、見出しが長すぎる、
+                独自解説が空・短すぎる、または statement が多すぎる場合
         """
         _validate_aligned_segments(self)
+        _validate_headlines(self.text_overlays)
         _validate_insights(self)
+        _validate_scenes(self.scenes)
         return self
 
     def narration_length(self, language: str) -> int:
@@ -333,6 +426,9 @@ class Script(BaseModel):
         text_overlays: 各画像に表示するテキスト
         estimated_duration: 推定秒数
         segment_narrations: 各画像に対応するナレーションセグメント（音声タイミング同期用）
+        scenes: 各セグメントの図解の構造（レンダラが読む）
+        illustration_concept: 動画全体で共有する挿絵1枚の主題を
+            「2つの要素とその関係」で表したもの
     """
 
     language: str
@@ -350,6 +446,8 @@ class Script(BaseModel):
     text_overlays: list[str]
     estimated_duration: int
     segment_narrations: list[str]
+    scenes: list[SceneVisual]
+    illustration_concept: IllustrationConcept
 
     @model_validator(mode="after")
     def _check_content(self) -> "Script":
@@ -359,11 +457,13 @@ class Script(BaseModel):
             Script: 検証済みの自身
 
         Raises:
-            ValueError: 要素数が一致しない、空要素がある、
-                または独自解説が空・短すぎる場合
+            ValueError: 要素数が一致しない、空要素がある、見出しが長すぎる、
+                独自解説が空・短すぎる、または statement が多すぎる場合
         """
         _validate_aligned_segments(self)
+        _validate_headlines(self.text_overlays)
         _validate_insights(self)
+        _validate_scenes(self.scenes)
         return self
 
     def to_dict(self) -> dict:
