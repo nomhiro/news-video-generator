@@ -42,6 +42,7 @@ class FakeRemoteStore:
         self.contents = contents
         self.lent_paths: list[Path] = []
         self.fail_list = False
+        self.fail_delete = False
 
     def publish(self, local_path: Path, key: str) -> str:
         self.contents[key] = local_path.read_bytes()
@@ -68,6 +69,11 @@ class FakeRemoteStore:
 
     def exists(self, key: str) -> bool:
         return key in self.contents
+
+    def delete(self, key: str) -> bool:
+        if self.fail_delete:
+            raise ArtifactStoreError("削除に失敗しました")
+        return self.contents.pop(key, None) is not None
 
     @contextmanager
     def fetch(self, key: str) -> Iterator[Path]:
@@ -133,6 +139,8 @@ def client(store: FakeRemoteStore) -> Iterator[tuple[TestClient, RecordingUpload
     class FakeConfig:
         youtube_default_privacy = "public"
         tiktok_default_privacy = "SELF_ONLY"
+        # 生成時刻は運用者のタイムゾーンで出す（投稿キューと揃える）
+        schedule_timezone = "Asia/Tokyo"
 
         def is_tiktok_configured(self) -> bool:
             return True
@@ -420,3 +428,149 @@ def test_video_list_offers_a_preview_url(client: tuple[TestClient, RecordingUplo
     test_client, _ = client
     body = test_client.get("/videos").text
     assert 'data-preview-url="/artifacts/videos/20260814_010000_en.mp4"' in body
+
+
+# --------------------------------------------------------------------------
+# 削除
+#
+# 生成物は消えない限り溜まり続ける。一覧は新しい20件しか出さないので、
+# 古い失敗作は画面から見えないまま Blob の課金だけが増えていく。
+# --------------------------------------------------------------------------
+
+
+def test_deleting_a_video_removes_it_from_the_store_and_the_list(
+    client: tuple[TestClient, RecordingUploader], store: FakeRemoteStore
+) -> None:
+    test_client, _ = client
+
+    response = test_client.delete("/videos/videos/20260814_010000_en.mp4")
+
+    assert response.status_code == 200
+    assert "videos/20260814_010000_en.mp4" not in store.contents
+    assert "20260814_010000_en.mp4" not in response.text
+
+
+def test_deleting_a_video_also_removes_its_script_and_audio(
+    client: tuple[TestClient, RecordingUploader], store: FakeRemoteStore
+) -> None:
+    """孤児になった台本と音声を残さない（同じ stem のものだけ）。"""
+    test_client, _ = client
+
+    test_client.delete("/videos/videos/20260814_000000_ja.mp4")
+
+    assert "scripts/20260814_000000_ja.json" not in store.contents
+    assert "audio/20260814_000000_ja.mp3" not in store.contents
+
+
+def test_deleting_a_video_keeps_the_images(
+    client: tuple[TestClient, RecordingUploader], store: FakeRemoteStore
+) -> None:
+    """画像は言語をまたいで共有されるので消さない。"""
+    store.contents["images/20260814_000000_1.png"] = b"png"
+    test_client, _ = client
+
+    test_client.delete("/videos/videos/20260814_000000_ja.mp4")
+
+    assert "images/20260814_000000_1.png" in store.contents
+
+
+def test_a_missing_companion_does_not_fail_the_delete(
+    client: tuple[TestClient, RecordingUploader], store: FakeRemoteStore
+) -> None:
+    """台本の無い動画（手で置いたもの）も消せること。"""
+    store.contents["videos/20260814_020000_ja.mp4"] = b"orphan"
+    test_client, _ = client
+
+    response = test_client.delete("/videos/videos/20260814_020000_ja.mp4")
+
+    assert response.status_code == 200
+    assert "videos/20260814_020000_ja.mp4" not in store.contents
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "scripts/20260814_000000_ja.json",  # 台本は消させない
+        "audio/20260814_000000_ja.mp3",  # 音声も消させない
+        "social/cards/a-1.png",
+        "videos/../scripts/20260814_000000_ja.json",
+        "videos/20260814_000000_ja.txt",  # 拡張子が違う
+    ],
+)
+def test_only_videos_can_be_deleted(
+    client: tuple[TestClient, RecordingUploader], store: FakeRemoteStore, key: str
+) -> None:
+    """「保存先の中身なら何でも消せる」形にしないこと。
+
+    キーは HTML 経由でフォームから戻ってくる値なので、プレフィックスと
+    拡張子で縛る。台本と音声は動画を消したときに**付随物として**消える
+    だけで、直接指名して消せてはいけない。
+    """
+    test_client, _ = client
+    before = dict(store.contents)
+
+    response = test_client.delete(f"/videos/{key}")
+
+    assert response.status_code == 404
+    assert store.contents == before
+
+
+def test_a_store_failure_is_reported_not_swallowed(
+    client: tuple[TestClient, RecordingUploader], store: FakeRemoteStore
+) -> None:
+    """消えていないのに一覧が更新されると、消したつもりの動画が残る。"""
+    store.fail_delete = True
+    test_client, _ = client
+
+    response = test_client.delete("/videos/videos/20260814_010000_en.mp4")
+
+    assert response.status_code == 502
+
+
+def test_the_list_offers_a_delete_that_asks_first(
+    client: tuple[TestClient, RecordingUploader],
+) -> None:
+    """取り消せない操作なので確認を挟む。"""
+    test_client, _ = client
+    body = test_client.get("/videos").text
+
+    assert "hx-delete=" in body
+    assert "hx-confirm=" in body
+
+
+def test_the_list_leads_with_the_article_title(
+    client: tuple[TestClient, RecordingUploader],
+) -> None:
+    """見出しがファイル名だと、どの記事の動画か分からない。"""
+    test_client, _ = client
+    body = test_client.get("/videos").text
+
+    heading = body.index("台本のタイトル")
+    filename = body.index("20260814_000000_ja.mp4")
+    assert heading < filename, "タイトルはファイル名より前に出す"
+
+
+def test_the_list_shows_when_it_was_made(
+    client: tuple[TestClient, RecordingUploader],
+) -> None:
+    """キーの `20260814_000000` は区切りもタイムゾーンも無く、人が読む形ではない。
+
+    保存先が返すのは UTC なので、運用者のタイムゾーン（投稿キューと同じ）に
+    直す。フェイクは 2026-08-14 00:00Z から1分ずつずらすので、動画2件は
+    00:01Z / 00:02Z ——JST では 09:01 / 09:02 になる。UTC のまま出していると
+    00:01 / 00:02 が並ぶので、この検査は9時間の差を見ている。
+    """
+    test_client, _ = client
+    body = test_client.get("/videos").text
+
+    assert "08/14 09:02" in body
+    assert "08/14 09:01" in body
+    assert "08/14 00:0" not in body
+
+
+def test_a_video_without_a_script_still_shows_its_filename(
+    client: tuple[TestClient, RecordingUploader],
+) -> None:
+    """台本の無い動画（手で置いたもの）でも一覧に出ること。"""
+    test_client, _ = client
+    assert "20260814_010000_en.mp4" in test_client.get("/videos").text

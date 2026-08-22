@@ -1,0 +1,5 @@
+{#
+  「戻す」の応答。カードに戻し、件数も直す。
+#}
+{% include "partials/news_card.html" %}
+<span id="news-count" hx-swap-oob="innerHTML" class="tnum">{{ remaining }}件</span>

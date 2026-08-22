@@ -1,0 +1,12 @@
+{#
+  カテゴリを切り替えたときの応答。
+
+  一覧本体（対象に入る）と、カテゴリの帯（out-of-band）を1回で返す。
+  アクティブなカテゴリを知っているのはサーバーだけなので、帯もここから
+  更新する。以前は `onclick` でクラスを手書きで付け替えていたため、
+  同じことを2箇所（サーバーのテンプレートと JS）で決めていた。
+#}
+{% include "partials/news_list.html" %}
+<div id="category-tabs" hx-swap-oob="innerHTML">
+    {% include "partials/category_tabs.html" %}
+</div>

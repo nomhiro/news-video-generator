@@ -7,7 +7,12 @@
   同じ画像生成クォータ（gpt-image-2、リージョン単位で上限4）を争うため。
   帯を見た瞬間に「今ちょうど両方が走っている」ことが分かる。
 -->
-<div id="day-band" class="rounded-lg bg-raised border border-ink/10 p-4">
+{#
+  帯の高さは記事プールの高さと引き合う（右カラムのカードはビューポートから
+  帯の分を引いた高さになる）。点と時刻とラベルが読めれば役目は果たすので、
+  余白は詰める。
+#}
+<div id="day-band" class="rounded-lg bg-raised border border-ink/10 p-3">
     <div class="flex items-baseline justify-between mb-3">
         <h2 class="font-display font-semibold text-ink text-sm tracking-wide">今日の時間軸</h2>
         <span class="text-xs text-ink/50 tnum">いま {{ now.strftime('%H:%M') }}</span>
@@ -37,28 +42,43 @@
     </div>
     {% endif %}
 
-    <div class="relative h-20 rounded bg-ink/5 overflow-x-auto">
-        {% for hour in range(0, 25, 6) %}
-        <span class="absolute top-1 -translate-x-1/2 text-[10px] text-ink/40 tnum"
-              style="left: {{ (hour / 24 * 100) }}%">{{ "%02d:00" | format(hour) }}</span>
-        {% endfor %}
+    {#
+      軸の目盛りと点は**内側の箱**に対して置く。
 
-        {# 「いま」の線。動くのはここだけ #}
-        <div class="now-marker absolute inset-y-0 w-px bg-vermilion"
-             style="left: {{ now_ratio * 100 }}%" aria-hidden="true"></div>
+      以前は `overflow-x-auto` を付けた箱に直接 `left: 100%` の
+      `24:00` を置いていた。ラベルは `-translate-x-1/2` で中央合わせに
+      するので右へ半分はみ出し、実測で scrollWidth 1227 > clientWidth 1214
+      ——**予定が0件でも常に 15px の横スクロールバーが出て**、帯の下に
+      意味のないグレーの棒が見えていた。
 
-        {% for slot in slots %}
-        <div class="absolute top-6 -translate-x-1/2 flex flex-col items-center gap-0.5"
-             style="left: {{ ((slot.at.hour * 60 + slot.at.minute) / (24 * 60) * 100) }}%">
-            <span class="w-2.5 h-2.5 rounded-full
-                {% if slot.status in ('posted', 'succeeded') %}bg-teal
-                {% elif slot.status in ('needs_review', 'failed') %}bg-vermilion
-                {% else %}bg-amber{% endif %}"
-                  title="{{ slot.label }} ・ {{ slot.status_label }}"></span>
-            <span class="text-[10px] text-ink/70 tnum whitespace-nowrap">{{ slot.at.strftime('%H:%M') }}</span>
-            <span class="text-[10px] text-ink/50 whitespace-nowrap">{{ slot.status_label }}</span>
+      内側に左右の余白（`mx-7`）を作れば、両端の目盛りとその時刻に来た点は
+      余白の中に収まる。はみ出す経路が無くなるので `overflow-hidden` で
+      閉じられる（`auto` に戻すとスクロールバーが復活する）。
+    #}
+    <div class="relative h-16 rounded bg-ink/5 overflow-hidden">
+        <div class="relative h-full mx-7">
+            {% for hour in range(0, 25, 6) %}
+            <span class="absolute top-1 -translate-x-1/2 text-[10px] text-ink/40 tnum"
+                  style="left: {{ (hour / 24 * 100) }}%">{{ "%02d:00" | format(hour) }}</span>
+            {% endfor %}
+
+            {# 「いま」の線。動くのはここだけ #}
+            <div class="now-marker absolute inset-y-0 w-px bg-vermilion"
+                 style="left: {{ now_ratio * 100 }}%" aria-hidden="true"></div>
+
+            {% for slot in slots %}
+            <div class="absolute top-6 -translate-x-1/2 flex flex-col items-center gap-0.5"
+                 style="left: {{ ((slot.at.hour * 60 + slot.at.minute) / (24 * 60) * 100) }}%">
+                <span class="w-2.5 h-2.5 rounded-full
+                    {% if slot.status in ('posted', 'succeeded') %}bg-teal
+                    {% elif slot.status in ('needs_review', 'failed') %}bg-vermilion
+                    {% else %}bg-amber{% endif %}"
+                      title="{{ slot.label }} ・ {{ slot.status_label }}"></span>
+                <span class="text-[10px] text-ink/70 tnum whitespace-nowrap">{{ slot.at.strftime('%H:%M') }}</span>
+                <span class="text-[10px] text-ink/50 whitespace-nowrap">{{ slot.status_label }}</span>
+            </div>
+            {% endfor %}
         </div>
-        {% endfor %}
     </div>
 
     {% if not slots %}

@@ -115,6 +115,10 @@ class ArtifactStore(Protocol):
         """キーが存在するか。"""
         ...
 
+    def delete(self, key: str) -> bool:
+        """生成物を消す。無かったら False（存在しないことは失敗ではない）。"""
+        ...
+
     @contextmanager
     def fetch(self, key: str) -> Iterator[Path]:
         """ローカルパスを借りる。ブロックを抜けたら一時ファイルは消える。"""
@@ -198,6 +202,30 @@ class LocalArtifactStore:
     def exists(self, key: str) -> bool:
         """キーが存在するか。"""
         return self._path_for(key).is_file()
+
+    def delete(self, key: str) -> bool:
+        """ファイルを消す。
+
+        `_path_for` が `normalize_key` を通すので、`..` や絶対パスで
+        root の外を消すことはできない。
+
+        Args:
+            key: ストア内のキー
+
+        Returns:
+            bool: 実際に消したら True、無かったら False
+
+        Raises:
+            ArtifactStoreError: 削除に失敗した場合
+        """
+        path = self._path_for(key)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            raise ArtifactStoreError(f"削除に失敗しました ({key}): {e}") from e
+        return True
 
     @contextmanager
     def fetch(self, key: str) -> Iterator[Path]:
@@ -349,6 +377,32 @@ class BlobArtifactStore:
             return bool(self._container.get_blob_client(normalize_key(key)).exists())
         except AzureError as e:
             raise ArtifactStoreError(f"存在確認に失敗しました ({key}): {e}") from e
+
+    def delete(self, key: str) -> bool:
+        """Blob を消す。
+
+        ソフトデリート（7日）が有効なので、誤って消しても
+        `az storage blob undelete` で戻せる。
+
+        Args:
+            key: Blob 名
+
+        Returns:
+            bool: 実際に消したら True、無かったら False
+
+        Raises:
+            ArtifactStoreError: 削除に失敗した場合
+        """
+        from azure.core.exceptions import AzureError, ResourceNotFoundError
+
+        blob_name = normalize_key(key)
+        try:
+            self._container.delete_blob(blob_name)
+        except ResourceNotFoundError:
+            return False
+        except AzureError as e:
+            raise ArtifactStoreError(f"削除に失敗しました ({blob_name}): {e}") from e
+        return True
 
     @contextmanager
     def fetch(self, key: str) -> Iterator[Path]:

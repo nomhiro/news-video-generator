@@ -5,7 +5,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
@@ -32,6 +32,15 @@ from src.utils.logger import log_error, log_step, log_success
 #
 # フィードで埋めるカテゴリを増やすなら、ここに足す。
 AUTO_SOURCE_CATEGORIES: tuple[NewsCategory, ...] = (NewsCategory.AI,)
+
+# 消費済み（投稿した・動画にした）記事を、フィードから流れたあとも
+# どれだけ保持するか。
+#
+# `consumed` は「もう出した」の権威なので、失うと同じ記事で投稿が作り直される。
+# 一方で永久に残すと記事プールが単調増加する（毎日5件前後 = 年1,800件）。
+# フィードが運ぶのは数日ぶんの項目なので、それを大きく超えたものが
+# もう一度取得されることは実質的に無い。
+CONSUMED_RETENTION = timedelta(days=90)
 
 
 def _sort_key(article: NewsArticle) -> datetime:
@@ -263,8 +272,15 @@ class NewsAggregator:
     ) -> list[NewsArticle]:
         """取得した記事に、既存の状態を引き継ぐ。
 
-        同じ記事を再取得したときに、ユーザーの選択や生成済みフラグ、
-        すでにスクレイピングした本文を失わないようにする。
+        引き継ぎは2方向ある。**片方だけだと状態が消える。**
+
+        - 再取得できた記事: 選択・消費の記録・本文・サムネイルを引き継ぐ
+        - 取得できなくなった記事: 残すべきものだけ残す
+          （判断は `_must_survive_refetch`）
+
+        後者が無かった間、ここは取得できた記事だけを返し、それを
+        `_save_category` がストアに上書きしていた。フィードは新しい順に
+        数件しか返さないので、**選択中の記事と `consumed` が黙って消えていた**。
 
         Args:
             new_articles: 新しく取得した記事
@@ -279,22 +295,137 @@ class NewsAggregator:
             if old is not None:
                 article.is_selected = old.is_selected
                 article.consumed = dict(old.consumed)
+                # 外した記録も引き継ぐ。落とすと、まだフィードに載っている
+                # 記事が取得のたびに戻ってきて「外す」が効かなくなる。
+                article.dismissed = old.dismissed
                 article.content = old.content or article.content
                 article.thumbnail_url = old.thumbnail_url or article.thumbnail_url
             merged.append(article)
+
+        fetched_ids = {article.id for article in new_articles}
+        merged.extend(
+            old
+            for article_id, old in existing_by_id.items()
+            if article_id not in fetched_ids and NewsAggregator._must_survive_refetch(old)
+        )
         return merged
 
-    def get_articles_by_category(self, category: NewsCategory) -> list[NewsArticle]:
+    @staticmethod
+    def _must_survive_refetch(article: NewsArticle) -> bool:
+        """取得結果に無くなった既存記事を残すべきか。
+
+        フィードは新しい順に数件しか返さないので、記事は数時間で入れ替わる。
+        取得できたものだけを保存すると、**選択中の記事も消費の記録も消える**。
+
+        - 選択中の記事が消える: 記事を選んで「最新ニュースを取得」を押すと
+          選択が黙って減る。画面には何の説明も出ない
+        - `consumed` が消える: これは「もう投稿した」の権威で、SQLite では
+          なく記事データに置いてあるのがこの設計の要点
+          （CLAUDE.md「もう投稿したの権威は Azure Files 上の記事データ」）。
+          失うと、同じ記事の投稿が作り直されて二重投稿になりうる
+
+        **無条件に全件残してはいけない。** 単にフィードから流れていっただけの
+        記事まで残すと一覧が単調増加し、記事プールが読めなくなる
+        （実測で AI カテゴリは53件で 8,633px の高さになっていた）。
+
+        消費済みには保持期間を置く。フィードが運べるのは数日ぶんの項目なので、
+        それを大きく超えて経ったものは「もう一度取得されて再投稿される」
+        経路が実質的に無い。選択中のものは期間で切らない——人が意図して
+        選んだものが日付で消えるのは、この画面で最も分かりにくい壊れ方になる。
+
+        Args:
+            article: 取得結果に含まれなかった既存の記事
+
+        Returns:
+            bool: 残すなら True
+        """
+        if article.is_selected:
+            return True
+        if not article.consumed:
+            return False
+
+        # 消費時刻が読めないなら残す。判断できないときに落とす方向へ倒すと、
+        # 二重投稿という取り返しのつかない方の失敗に寄る。
+        stamps = []
+        for value in article.consumed.values():
+            try:
+                at = datetime.fromisoformat(value)
+            except (TypeError, ValueError):
+                return True
+            stamps.append(at if at.tzinfo else at.replace(tzinfo=UTC))
+        if not stamps:
+            return True
+
+        return datetime.now(UTC) - max(stamps) < CONSUMED_RETENTION
+
+    def get_articles_by_category(
+        self, category: NewsCategory, include_dismissed: bool = False
+    ) -> list[NewsArticle]:
         """カテゴリの記事を取得する。
+
+        外した記事（`dismissed`）は既定で返さない。畳めない一覧では、
+        題材の合わない記事を毎回読み飛ばすことになる。
+
+        **自動生成の記事選択（`pick_unconsumed`）はここを通らない。**
+        あちらは `_load_category` を直接読むので、外した記事も候補に入る。
+        「画面で畳む」ことと「自動生成に使わせない」ことは別の判断で、
+        後者を人の操作に紐づけると、外し忘れが生成の停止に化ける。
 
         Args:
             category: ニュースカテゴリ
+            include_dismissed: 外した記事も含めるか
 
         Returns:
             List[NewsArticle]: 記事のリスト（公開日時の降順）
         """
         articles = self._load_category(category)
+        if not include_dismissed:
+            articles = [a for a in articles if not a.dismissed]
         return sorted(articles, key=_sort_key, reverse=True)
+
+    def set_dismissed(self, article_id: str, dismissed: bool) -> NewsArticle | None:
+        """記事を一覧から外す / 戻す。
+
+        外すときは選択も外す。「使わない」と決めた記事が生成の対象に
+        残っていると、押した操作と画面の状態が食い違う。
+
+        Args:
+            article_id: 記事ID
+            dismissed: 外すなら True、戻すなら False
+
+        Returns:
+            NewsArticle | None: 更新後の記事。見つからなければ None
+        """
+
+        def apply(article: NewsArticle) -> None:
+            article.dismissed = dismissed
+            if dismissed:
+                article.is_selected = False
+
+        return self._update_article(article_id, apply)
+
+    def clear_all_selections(self) -> int:
+        """選択をすべて外す。
+
+        1件ずつ解除するしかない状態だと、選び直すたびに選択の数だけ操作が
+        要る。カテゴリごとに read-modify-write を1回で済ませる
+        （`clear_selection` を件数ぶん呼ぶと保存も件数ぶん走る）。
+
+        Returns:
+            int: 解除した件数
+        """
+        cleared = 0
+        for category in NewsCategory:
+            with self._category_lock(category):
+                articles = self._load_category(category)
+                selected = [a for a in articles if a.is_selected]
+                if not selected:
+                    continue
+                for article in selected:
+                    article.is_selected = False
+                cleared += len(selected)
+                self._save_category(category, articles)
+        return cleared
 
     def get_all_articles(self) -> dict[NewsCategory, list[NewsArticle]]:
         """全カテゴリの記事を取得する。

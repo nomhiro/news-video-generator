@@ -1,0 +1,16 @@
+{#
+  選択の切り替えに対する応答。
+
+  カード本体（対象に入る）と、選択パネル（out-of-band）を1回の応答で返す。
+  押した場所と、件数・生成ボタンを持つ場所の両方を同時に正しくする必要が
+  あるため。片方だけだと「押したのに何も起きない」か「件数が古いまま」に
+  なる。
+
+  **out-of-band 側は置き場所の id を持つ**（これが照合の仕組み）。
+  通常の差し替えで入るフラグメントが id を持ってはいけない、という
+  ルールとは別で、`partials/x_status.html` が同じ形でヘッダーを更新している。
+#}
+{% include "partials/news_card.html" %}
+<div id="selected-panel" hx-swap-oob="innerHTML">
+    {% include "partials/selected_panel.html" %}
+</div>

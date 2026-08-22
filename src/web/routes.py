@@ -80,27 +80,31 @@ async def get_news_by_category(
 ):
     """カテゴリ別ニュース一覧を取得する（HTMXパーシャル）。
 
+    カテゴリの帯も out-of-band で返す（`news_list_swap.html`）。
+    アクティブなカテゴリを知っているのはサーバーだけなので、帯の見た目を
+    クライアント側の `onclick` で付け替えると権威が2つになる。
+
     Args:
         request: FastAPIリクエスト
         category: カテゴリ名
         aggregator: ニュース取得インスタンス
 
     Returns:
-        HTMLResponse: ニュース一覧パーシャルHTML
+        HTMLResponse: ニュース一覧 + カテゴリの帯（out-of-band）
     """
     try:
         cat = NewsCategory(category)
     except ValueError:
         cat = NewsCategory.GENERAL
 
-    articles = aggregator.get_articles_by_category(cat)
-
     return templates.TemplateResponse(
         request,
-        "partials/news_list.html",
+        "partials/news_list_swap.html",
         {
-            "articles": articles,
+            "articles": aggregator.get_articles_by_category(cat),
             "category": cat,
+            "categories": list(NewsCategory),
+            "active_category": cat,
         },
     )
 
@@ -113,12 +117,16 @@ async def fetch_news(
 ):
     """最新ニュースを取得する（HTMXパーシャル）。
 
+    **取得した一覧を返す。** 以前はカテゴリタブだけを返していたので、
+    取得しても一覧は古いまま残り、何件になったのかも分からなかった
+    （唯一の合図が「✅ 取得完了」の点滅だった）。
+
     Args:
         request: FastAPIリクエスト
         aggregator: ニュース取得インスタンス
 
     Returns:
-        HTMLResponse: カテゴリタブパーシャルHTML
+        HTMLResponse: ニュース一覧 + カテゴリの帯（out-of-band）
     """
     # 通常カテゴリのニュースを取得
     await aggregator.fetch_and_store()
@@ -126,17 +134,19 @@ async def fetch_news(
     # AI関連の記事も取得（発信元のフィードから。理由は src/news/feeds.py）
     await aggregator.fetch_ai_news_and_store(limit_per_feed=config.ai_news_limit_per_feed)
 
-    categories = list(NewsCategory)
-    selected_count = aggregator.get_selected_count()
+    # 取得後に見せるのは AI。自動生成が記事を選ぶのはこのカテゴリだけ
+    # （`AUTO_SOURCE_CATEGORIES`）。
+    active = NewsCategory.AI
 
     return templates.TemplateResponse(
         request,
-        "partials/category_tabs.html",
+        "partials/news_list_swap.html",
         {
-            "categories": categories,
-            "active_category": NewsCategory.AI,  # AIカテゴリをデフォルトに
-            "selected_count": selected_count,
-            "fetch_success": True,
+            "articles": aggregator.get_articles_by_category(active),
+            "category": active,
+            "categories": list(NewsCategory),
+            "active_category": active,
+            "fetched": True,
         },
     )
 
@@ -147,25 +157,156 @@ async def toggle_article_selection(
 ):
     """記事の選択状態を切り替える（HTMXパーシャル）。
 
+    **押したカードそのものを返す。** 以前は選択パネルだけを返していたので、
+    カードのラベルと背景は `article.is_selected` に依存しているのに再描画
+    されず、カテゴリを読み直すまで古い見た目のまま残った。実測では唯一の
+    反映（件数のバッジ）がビューポートから 9,088px 下にあり、画面上の
+    フィードバックが無かった。
+
+    選択パネルは out-of-band で一緒に更新する（`news_card_swap.html`）。
+
     Args:
         request: FastAPIリクエスト
         article_id: 記事ID
         aggregator: ニュース取得インスタンス
 
     Returns:
-        HTMLResponse: 選択パネルパーシャルHTML
+        HTMLResponse: 記事カード + 選択パネル（out-of-band）
+
+    Raises:
+        HTTPException: 記事が見つからない場合（404）
     """
-    aggregator.toggle_selection(article_id)
+    if aggregator.toggle_selection(article_id) is None:
+        raise HTTPException(status_code=404, detail="記事が見つかりません")
+
+    article = aggregator.get_article_by_id(article_id)
+    if article is None:
+        raise HTTPException(status_code=404, detail="記事が見つかりません")
 
     selected_articles = aggregator.get_selected_articles()
-    selected_count = len(selected_articles)
 
     return templates.TemplateResponse(
         request,
-        "partials/selected_panel.html",
+        "partials/news_card_swap.html",
         {
+            "article": article,
             "selected_articles": selected_articles,
-            "selected_count": selected_count,
+            "selected_count": len(selected_articles),
+        },
+    )
+
+
+@router.post("/news/{article_id}/dismiss", response_class=HTMLResponse)
+async def dismiss_article(
+    request: Request, article_id: str, aggregator: NewsAggregator = Depends(get_aggregator)
+):
+    """記事を一覧から外す（HTMXパーシャル）。
+
+    消えるのではなく「外しました ・ 戻す」の行に変わる。取り消せる形に
+    しておけば確認のダイアログが要らず、押し間違いが1クリックで戻る。
+
+    Args:
+        request: FastAPIリクエスト
+        article_id: 記事ID
+        aggregator: ニュース取得インスタンス
+
+    Returns:
+        HTMLResponse: 外した行 + 件数と選択パネル（out-of-band）
+
+    Raises:
+        HTTPException: 記事が見つからない場合（404）
+    """
+    article = aggregator.set_dismissed(article_id, True)
+    if article is None:
+        raise HTTPException(status_code=404, detail="記事が見つかりません")
+
+    selected_articles = aggregator.get_selected_articles()
+
+    return templates.TemplateResponse(
+        request,
+        "partials/news_card_dismissed.html",
+        {
+            "article": article,
+            # 件数は外した記事のカテゴリで数える。畳んだ直後に「53件」と
+            # 出たままだと、画面に出ている数と実際の数が食い違う。
+            "remaining": len(aggregator.get_articles_by_category(article.category)),
+            "selected_articles": selected_articles,
+            "selected_count": len(selected_articles),
+        },
+    )
+
+
+@router.post("/news/{article_id}/restore", response_class=HTMLResponse)
+async def restore_article(
+    request: Request, article_id: str, aggregator: NewsAggregator = Depends(get_aggregator)
+):
+    """外した記事を一覧に戻す（HTMXパーシャル）。
+
+    Args:
+        request: FastAPIリクエスト
+        article_id: 記事ID
+        aggregator: ニュース取得インスタンス
+
+    Returns:
+        HTMLResponse: 記事カード + 件数（out-of-band）
+
+    Raises:
+        HTTPException: 記事が見つからない場合（404）
+    """
+    article = aggregator.set_dismissed(article_id, False)
+    if article is None:
+        raise HTTPException(status_code=404, detail="記事が見つかりません")
+
+    return templates.TemplateResponse(
+        request,
+        "partials/news_card_restored.html",
+        {
+            "article": article,
+            "remaining": len(aggregator.get_articles_by_category(article.category)),
+        },
+    )
+
+
+@router.post("/selected/clear", response_class=HTMLResponse)
+async def clear_all_selections(
+    request: Request,
+    category: str = Form("ai"),
+    aggregator: NewsAggregator = Depends(get_aggregator),
+):
+    """選択をすべて外す（HTMXパーシャル）。
+
+    一括操作なので一覧を作り直す。1件の解除では out-of-band でそのカードだけを
+    戻すが、ここでは何枚が「選択中」の見た目で残っているか分からない。
+
+    表示中のカテゴリは画面から受け取る（`#category-tabs` の hidden input）。
+    サーバーはどのカテゴリが出ているかを知らないので、推測すると別の
+    カテゴリの一覧に差し替わる。
+
+    Args:
+        request: FastAPIリクエスト
+        category: いま表示しているカテゴリ
+        aggregator: ニュース取得インスタンス
+
+    Returns:
+        HTMLResponse: ニュース一覧 + カテゴリの帯・選択パネル（out-of-band）
+    """
+    aggregator.clear_all_selections()
+
+    try:
+        cat = NewsCategory(category)
+    except ValueError:
+        cat = NewsCategory.AI
+
+    return templates.TemplateResponse(
+        request,
+        "partials/selection_cleared.html",
+        {
+            "articles": aggregator.get_articles_by_category(cat),
+            "category": cat,
+            "categories": list(NewsCategory),
+            "active_category": cat,
+            "selected_articles": [],
+            "selected_count": 0,
         },
     )
 
@@ -200,25 +341,31 @@ async def remove_from_selection(
 ):
     """記事を選択から削除する（HTMXパーシャル）。
 
+    一覧に出ているカードも out-of-band で戻す。戻さないと、解除したのに
+    一覧では「選択中」の見た目が残る（選択したときにカードが変わらなかった
+    のと同じ壊れ方の裏返し）。
+
     Args:
         request: FastAPIリクエスト
         article_id: 記事ID
         aggregator: ニュース取得インスタンス
 
     Returns:
-        HTMLResponse: 選択パネルパーシャルHTML
+        HTMLResponse: 選択パネル + 記事カード（out-of-band）
     """
     aggregator.clear_selection(article_id)
 
     selected_articles = aggregator.get_selected_articles()
-    selected_count = len(selected_articles)
 
     return templates.TemplateResponse(
         request,
-        "partials/selected_panel.html",
+        "partials/selected_panel_swap.html",
         {
+            # 記事が既にストアから消えていても選択パネルは返す（解除は成立
+            # している）。カードの out-of-band は article が無ければ出ない。
+            "article": aggregator.get_article_by_id(article_id),
             "selected_articles": selected_articles,
-            "selected_count": selected_count,
+            "selected_count": len(selected_articles),
         },
     )
 
@@ -440,6 +587,7 @@ async def youtube_authenticate(
 async def list_videos(
     request: Request,
     artifact_store: ArtifactStore = Depends(get_artifact_store),
+    config: Config = Depends(get_config),
 ):
     """生成済み動画一覧を表示する。
 
@@ -450,6 +598,7 @@ async def list_videos(
     Args:
         request: FastAPIリクエスト
         artifact_store: 生成物の保存先
+        config: アプリ設定（生成時刻を出すタイムゾーンに使う）
 
     Returns:
         HTMLResponse: 動画一覧パーシャルHTML
@@ -464,6 +613,12 @@ async def list_videos(
     # ダウンロードが走るため、表示しない分は読まない。
     recent = [a for a in found if a.key.endswith(".mp4")][:20]
 
+    # 生成時刻は運用者のタイムゾーンで出す。保存先が返すのは UTC なので、
+    # そのまま出すと投稿キュー（`astimezone` している）と9時間ずれた時刻が
+    # 同じ画面に並ぶ。キーの先頭にも日時は入っているが、区切りもタイム
+    # ゾーンも無い文字列なので人が読む形ではない。
+    zone = ZoneInfo(config.schedule_timezone)
+
     videos = [
         {
             "filename": artifact.name,
@@ -471,6 +626,7 @@ async def list_videos(
             "language": _language_from_key(artifact.key),
             "size_mb": round(artifact.size_bytes / (1024 * 1024), 2),
             "created": artifact.modified_at.timestamp(),
+            "created_at": artifact.modified_at.astimezone(zone).strftime("%m/%d %H:%M"),
             **_script_metadata(artifact_store, artifact.key),
         }
         for artifact in recent
@@ -483,6 +639,64 @@ async def list_videos(
             "videos": videos,
         },
     )
+
+
+@router.delete("/videos/{key:path}", response_class=HTMLResponse)
+async def delete_video(
+    request: Request,
+    key: str,
+    artifact_store: ArtifactStore = Depends(get_artifact_store),
+    config: Config = Depends(get_config),
+):
+    """動画とその付随物を削除して、一覧を返す。
+
+    削除できるのは `videos/*.mp4` **だけ**。キーは HTML 経由でフォームから
+    戻ってくる値なので `normalize_key` で `..` と絶対パスを弾き、そのうえで
+    プレフィックスと拡張子を縛る（`serve_artifact` と同じ姿勢）。
+    「保存先の中身なら何でも消せる」形にすると、台本も音声もトークンも
+    画面から消せる経路が黙って出来上がる。
+
+    付随物は**同じ stem を持つ台本と音声だけ**を消す。画像
+    （`images/`）は消さない——言語をまたいで共有されるため、片方の動画を
+    消した拍子にもう片方の素材を落としうる。
+
+    付随物の削除に失敗しても動画の削除は成功として扱う。消したい対象は
+    動画で、孤児になった台本が残ることは実害が小さい。
+
+    Args:
+        request: FastAPIリクエスト
+        key: 動画のキー（`videos/....mp4`）
+        artifact_store: 生成物の保存先
+        config: アプリ設定（一覧の再描画にそのまま渡す）
+
+    Returns:
+        HTMLResponse: 更新後の動画一覧パーシャル
+
+    Raises:
+        HTTPException: 削除対象にできないキー（404）
+    """
+    try:
+        normalized = normalize_key(key)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail="削除できないキーです") from e
+
+    if not normalized.startswith("videos/") or PurePosixPath(normalized).suffix.lower() != ".mp4":
+        raise HTTPException(status_code=404, detail="削除できない生成物です")
+
+    try:
+        artifact_store.delete(normalized)
+    except ArtifactStoreError as e:
+        log_error(f"動画を削除できません: {e}")
+        raise HTTPException(status_code=502, detail="削除に失敗しました") from e
+
+    stem = PurePosixPath(normalized).stem
+    for companion in (f"scripts/{stem}.json", f"audio/{stem}.mp3"):
+        try:
+            artifact_store.delete(companion)
+        except ArtifactStoreError as e:
+            log_error(f"付随物を削除できません（{companion}）: {e}")
+
+    return await list_videos(request, artifact_store, config)
 
 
 def _language_from_key(key: str) -> str:

@@ -235,13 +235,13 @@ class GoogleNewsSource:
                 except (TypeError, ValueError):
                     pass
 
-            # サマリーを取得
+            # サマリーを取得。
+            #
+            # HTML の除去はここでは行わない。`NewsArticle.__post_init__` が
+            # 構築の時点で落とす（情報源ごとに書くと片方だけが腐る。実際に
+            # ここには除去があり `RssSource` には無かったため、フィードに
+            # 切り替えた時点で画面にタグが出た）。
             summary = entry.get("summary", "")
-            # HTMLタグを簡易的に除去
-            if summary:
-                import re
-
-                summary = re.sub(r"<[^>]+>", "", summary)
 
             return NewsArticle(
                 id=NewsArticle.generate_id(url),

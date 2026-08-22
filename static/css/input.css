@@ -114,17 +114,31 @@
     overflow: hidden;
 }
 
-/* スクロールバー（WebKit系のみ） */
+/*
+ * スクロールバー。
+ *
+ * 記事一覧をカードの中でスクロールさせるようにしたので、スクロールバーは
+ * 画面の縁ではなく**カードの中**に出る。既定のグレー（#888 の親指と
+ * #f1f1f1 の溝）はどのアプリでも同じ既定値で、紙の面の上では帯として
+ * 目立ちすぎた。インクの薄い階調に落とし、溝は塗らない。
+ */
 ::-webkit-scrollbar {
     width: 8px;
+    height: 8px;
 }
 ::-webkit-scrollbar-track {
-    background: #f1f1f1;
+    background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-    background: #888;
+    background: rgb(22 35 43 / 0.18);
     border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-    background: #555;
+    background: rgb(22 35 43 / 0.32);
+}
+
+/* Firefox は擬似要素を持たないので、こちらで同じ意図を伝える */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(22 35 43 / 0.18) transparent;
 }

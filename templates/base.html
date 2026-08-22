@@ -17,6 +17,13 @@
         npm run build:css
       アプリの実行に Node は不要。
     #}
+    {#
+      favicon。無いとブラウザが毎回 /favicon.ico を取りに来て 404 になり、
+      コンソールにエラーが残る（開発中に本物のエラーを見落とす原因になる）。
+      SVG にしているのは、この画面のモチーフ（「いま」の線）を2色で描くだけで
+      足りるため。
+    #}
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/css/app.css">
     <script src="/static/vendor/htmx.min.js" defer></script>
 </head>
@@ -51,10 +58,17 @@
                     <div class="text-paper/50">読み込み中...</div>
                 </div>
 
+                {#
+                  取得したら一覧も差し替える（応答は
+                  `partials/news_list_swap.html` で、カテゴリの帯を
+                  out-of-band で更新する）。以前はタブだけを差し替えていた
+                  ので、取得しても一覧は古いまま残り、何件増えたのかも
+                  分からなかった。
+                #}
                 <button
                     hx-post="/news/fetch"
-                    hx-target="#category-tabs"
-                    hx-swap="outerHTML"
+                    hx-target="#news-list"
+                    hx-swap="innerHTML"
                     hx-indicator="#fetch-indicator"
                     class="bg-raised text-ink px-4 py-2 rounded font-medium text-sm
                            hover:bg-paper transition-colors flex items-center gap-2

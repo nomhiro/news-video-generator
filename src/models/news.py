@@ -2,11 +2,13 @@
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+from src.utils.html_text import strip_html
 
 
 class NewsCategory(StrEnum):
@@ -88,6 +90,35 @@ class NewsArticle:
     # デプロイ直後に同じ記事が再投稿される。記事データは Azure Files に
     # あるので残る。
     consumed: dict[str, str] = field(default_factory=dict)
+    # 人が「この記事は使わない」と決めた記録。
+    #
+    # **消費済み（`consumed`）とは別。** あちらは「もう出した」で、こちらは
+    # 「出さない」。AI カテゴリは実測53件あり、題材の合わない記事（芸能・
+    # PR 転載）を毎回読み飛ばすことになるので、畳む手段が要る。
+    #
+    # 権威は `consumed` と同じくこの記事データ（Azure Files 上の JSON）。
+    # SQLite に置くとリビジョン更新で消え、外したはずの記事が翌日戻る。
+    dismissed: bool = False
+
+    def __post_init__(self) -> None:
+        """要約から HTML を落とす。
+
+        **正規化はここ1箇所で行う。** RSS の `summary` は HTML を含んでよい
+        仕様で、note.com のフィードは本文の先頭を要素ごと渡してくる。
+        画面はテンプレートで正しくエスケープするため、素で持つと
+        `<h2 id="dc8acd71-...">` がそのまま文字として見える（実測）。
+
+        情報源ごとに落とすと片方だけが腐る。実際に `GoogleNewsSource` は
+        インラインの正規表現で落としていた一方 `RssSource` は素で入れており、
+        フィードに切り替えた時点で症状が出た。**構築の時点**で正規化すれば、
+        `from_dict`（保存済み JSON の読み込み）も同じ経路を通るので、
+        すでに汚れているデータも読んだ瞬間から読めるようになり、
+        次の保存で自然に直る。
+
+        タイトルと本文には掛けない。タイトルは HTML を含まず、本文は
+        trafilatura が抽出した平文なので、どちらも対象ではない。
+        """
+        self.summary = strip_html(self.summary)
 
     @property
     def video_generated(self) -> bool:
@@ -195,7 +226,17 @@ class NewsArticle:
             stamp = fetched.isoformat() if isinstance(fetched, datetime) else ""
             data["consumed"] = {CHANNEL_VIDEO: stamp or datetime.now().isoformat()}
 
-        return cls(**data)
+        # 知らないキーは捨てる。
+        #
+        # 以前は `cls(**data)` だったので、**新しいフィールドを足した版で
+        # 保存した JSON を古い版が読めなかった**（`unexpected keyword
+        # argument` で `_load_category` の捕まえない例外になり、記事一覧・
+        # 動画の計画・投稿の計画がまとめて落ちる）。CLAUDE.md が
+        # 「切り戻しを安全にしたいなら2段階で入れる」と書いているのはこの罠で、
+        # その1段目がこれ。**ここから先に足すフィールドは切り戻しても壊れない**
+        # （このコードを含むイメージまで戻せる限り）。
+        known = {f.name for f in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in known})
 
     def to_json_file(self, path: Path) -> None:
         """JSONファイルに保存する。
