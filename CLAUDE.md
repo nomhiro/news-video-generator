@@ -1611,6 +1611,27 @@ Azure Files 上の `data/x_posting.json` にあり（有効化は画面から）
 アプリを巻き戻す（`consumed` キーを読めない旧コードでは記事 JSON が全部読めなくなる。
 「切り戻しについて」の項を参照）。
 
+**azd は元のチェックアウトから実行する。git worktree からは実行しない。**
+`.azure/` は gitignore されているので**worktree には存在しない**。azd は環境が
+無いと判断すると、**ディレクトリ名から新しい空の環境を作って既定に設定する**
+——止めるプロンプトは出ず、出るのは
+`New environment '...' created and set as default` の1行だけ。
+
+2026-08-22 に実際に踏んだ。上の同期のつもりで worktree から
+`azd env set SERVICE_WEB_IMAGE_NAME` を打ったところ、環境
+`fix-video-subtitle-clipping` が新規に作られてそこに値が入り、**本物の
+`newsvideo-img` は `gh-8de1e4d` を指したまま**だった（当時の稼働は
+`gh-0d329f2` で12コミット前。しかも `dismissed` を読めない世代なので、
+その値で provision すると記事 JSON が全部読めなくなる）。
+
+- **害は「同期されない」だけではない。** その worktree に残った空の環境が
+  既定になるので、そこから `azd provision` を打つとサブスクリプションと
+  リージョンを聞かれ、**リソースを一式新規に払い出しに行く**。
+- 打つ前に `azd env list` で既定が `newsvideo-img` であることを確認する。
+  実行後は `azd env get-value SERVICE_WEB_IMAGE_NAME` で反映を確かめる
+  （新しい環境ができていたら `.azure/` ごと消して、元のチェックアウトから
+  やり直す）。
+
 **状態の置き場所は3つに分かれている。**
 
 | 何を | どこに | 理由 |
