@@ -5,7 +5,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
@@ -32,6 +32,15 @@ from src.utils.logger import log_error, log_step, log_success
 #
 # フィードで埋めるカテゴリを増やすなら、ここに足す。
 AUTO_SOURCE_CATEGORIES: tuple[NewsCategory, ...] = (NewsCategory.AI,)
+
+# 消費済み（投稿した・動画にした）記事を、フィードから流れたあとも
+# どれだけ保持するか。
+#
+# `consumed` は「もう出した」の権威なので、失うと同じ記事で投稿が作り直される。
+# 一方で永久に残すと記事プールが単調増加する（毎日5件前後 = 年1,800件）。
+# フィードが運ぶのは数日ぶんの項目なので、それを大きく超えたものが
+# もう一度取得されることは実質的に無い。
+CONSUMED_RETENTION = timedelta(days=90)
 
 
 def _sort_key(article: NewsArticle) -> datetime:
@@ -263,8 +272,15 @@ class NewsAggregator:
     ) -> list[NewsArticle]:
         """取得した記事に、既存の状態を引き継ぐ。
 
-        同じ記事を再取得したときに、ユーザーの選択や生成済みフラグ、
-        すでにスクレイピングした本文を失わないようにする。
+        引き継ぎは2方向ある。**片方だけだと状態が消える。**
+
+        - 再取得できた記事: 選択・消費の記録・本文・サムネイルを引き継ぐ
+        - 取得できなくなった記事: 残すべきものだけ残す
+          （判断は `_must_survive_refetch`）
+
+        後者が無かった間、ここは取得できた記事だけを返し、それを
+        `_save_category` がストアに上書きしていた。フィードは新しい順に
+        数件しか返さないので、**選択中の記事と `consumed` が黙って消えていた**。
 
         Args:
             new_articles: 新しく取得した記事
@@ -282,7 +298,62 @@ class NewsAggregator:
                 article.content = old.content or article.content
                 article.thumbnail_url = old.thumbnail_url or article.thumbnail_url
             merged.append(article)
+
+        fetched_ids = {article.id for article in new_articles}
+        merged.extend(
+            old
+            for article_id, old in existing_by_id.items()
+            if article_id not in fetched_ids and NewsAggregator._must_survive_refetch(old)
+        )
         return merged
+
+    @staticmethod
+    def _must_survive_refetch(article: NewsArticle) -> bool:
+        """取得結果に無くなった既存記事を残すべきか。
+
+        フィードは新しい順に数件しか返さないので、記事は数時間で入れ替わる。
+        取得できたものだけを保存すると、**選択中の記事も消費の記録も消える**。
+
+        - 選択中の記事が消える: 記事を選んで「最新ニュースを取得」を押すと
+          選択が黙って減る。画面には何の説明も出ない
+        - `consumed` が消える: これは「もう投稿した」の権威で、SQLite では
+          なく記事データに置いてあるのがこの設計の要点
+          （CLAUDE.md「もう投稿したの権威は Azure Files 上の記事データ」）。
+          失うと、同じ記事の投稿が作り直されて二重投稿になりうる
+
+        **無条件に全件残してはいけない。** 単にフィードから流れていっただけの
+        記事まで残すと一覧が単調増加し、記事プールが読めなくなる
+        （実測で AI カテゴリは53件で 8,633px の高さになっていた）。
+
+        消費済みには保持期間を置く。フィードが運べるのは数日ぶんの項目なので、
+        それを大きく超えて経ったものは「もう一度取得されて再投稿される」
+        経路が実質的に無い。選択中のものは期間で切らない——人が意図して
+        選んだものが日付で消えるのは、この画面で最も分かりにくい壊れ方になる。
+
+        Args:
+            article: 取得結果に含まれなかった既存の記事
+
+        Returns:
+            bool: 残すなら True
+        """
+        if article.is_selected:
+            return True
+        if not article.consumed:
+            return False
+
+        # 消費時刻が読めないなら残す。判断できないときに落とす方向へ倒すと、
+        # 二重投稿という取り返しのつかない方の失敗に寄る。
+        stamps = []
+        for value in article.consumed.values():
+            try:
+                at = datetime.fromisoformat(value)
+            except (TypeError, ValueError):
+                return True
+            stamps.append(at if at.tzinfo else at.replace(tzinfo=UTC))
+        if not stamps:
+            return True
+
+        return datetime.now(UTC) - max(stamps) < CONSUMED_RETENTION
 
     def get_articles_by_category(self, category: NewsCategory) -> list[NewsArticle]:
         """カテゴリの記事を取得する。
