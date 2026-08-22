@@ -59,12 +59,14 @@ WORST_SUBTITLE = (
 WORST_ITEMS = ["従来型の推論基盤", "混合専門家方式へ"]
 WORST_RELATION = "資源配分の最適化"
 
-# 字幕ゾーンの上端（`remotion/src/zones.ts` の `subtitle.top` = 1570/1920）。
+# 字幕ゾーンの上端（`remotion/src/zones.ts` の `subtitle.top` = 1480/1920）。
 # **TS 側と Python 側で同じ値を持つ単一の情報源が無い**——ゾーンの定義は
 # レンダラ（TS）にあり、ビルド時に Python へ伝える手段がない
 # （`ILLUSTRATION_SIZE` と同じ構造の重複）。ずれたらこのテストが
 # 「切れていない」を誤って通すので、`zones.ts` を触ったらここも直す。
-SUBTITLE_ZONE_TOP = 1570
+# 算術の不変条件を見る `tests/test_remotion_design_rules.py` の方は、
+# 同じ値を `zones.ts` から正規表現で読んでいる（写していない）。
+SUBTITLE_ZONE_TOP = 1480
 
 # 「切れていたら必ずインクが出る」帯。字幕の文字は最速でも
 # ゾーン上端 + `PADDING_TOP`(12px) から始まるので、ここは本来つねに
@@ -74,15 +76,24 @@ CLIP_PROBE_TOP = SUBTITLE_ZONE_TOP + 2
 CLIP_PROBE_BOTTOM = SUBTITLE_ZONE_TOP + 10
 
 # 見出しゾーンの上端（`zones.ts`）。レイアウトで違う。
-# statement は図が無いぶん広い（1050〜1570）、compare/flow は挿絵の下の
-# 帯（970〜1370）。上の `SUBTITLE_ZONE_TOP` と同じ理由で値を写している。
-HEADLINE_ZONE_TOP = {"statement": 1050, "strip": 970}
+# statement は図が無いぶん広い（960〜1480）、compare/flow は挿絵の下の
+# 帯（920〜1320）。上の `SUBTITLE_ZONE_TOP` と同じ理由で値を写している。
+HEADLINE_ZONE_TOP = {"statement": 960, "strip": 920}
 
 # 見出しの溢れを見る帯の深さ。**行送りより広く取る必要がある**（下の
 # `test_headline_is_not_clipped_at_the_zone_boundary` の docstring 参照）。
 # 収まっているときの余裕（45字・400pxゾーンで上下44pxずつ）より小さく、
 # 溢れたときに字面が現れる位置（ゾーン上端 + 十数px）より大きい値。
 HEADLINE_PROBE_DEPTH = 34
+
+# プラットフォームの UI が覆う帯の高さ（`zones.ts` の `SAFE_BOTTOM.short`）。
+# 上の2つと同じ理由で値を写している。
+SAFE_BOTTOM_PX = 150
+
+# UI の帯の上端。**ここより下に字幕のインクが1画素もあってはいけない。**
+# 実測（オーナーの端末の Shorts 再生画面）で、チャンネルアイコン・
+# チャンネル名・タイトル・シークバーの上端が y=1768 だった。
+SAFE_LINE_TOP = 1920 - SAFE_BOTTOM_PX
 
 # 白文字（`COLORS.text` = #eef1f5）の閾値。地は #14161a なので大きく離れている。
 INK_THRESHOLD = 170
@@ -359,6 +370,38 @@ def test_subtitle_is_not_clipped_at_the_zone_boundary(
     assert ink == 0, (
         f"{layout} の字幕がゾーン上端（y={SUBTITLE_ZONE_TOP}）で切れている: "
         f"y={CLIP_PROBE_TOP}..{CLIP_PROBE_BOTTOM} に白い画素が{ink}個ある"
+    )
+
+
+@pytest.mark.parametrize(
+    ("at_sec", "layout"),
+    [(0.45, "statement"), (1.15, "compare"), (1.85, "flow")],
+)
+def test_subtitle_stays_above_the_platform_ui(
+    rendered: tuple[Path, Path], tmp_path: Path, at_sec: float, layout: str
+) -> None:
+    """字幕のインクが、プラットフォームの UI が覆う帯に入っていないこと。
+
+    Issue #44 の受け入れ条件。YouTube Shorts はフレーム下端の約150pxを
+    自前の UI（チャンネルアイコン・チャンネル名・タイトル・シークバー）で
+    覆うので、そこに文字を置くと**尺の全体にわたって最終行が読めない**。
+    直す前は文字の下端が y=1848 にあり、1行の字幕ならその1行が、
+    複数行なら最終行が丸ごと隠れていた。
+
+    **目視で判定しない。** 挿絵の切り取りで「切れている / 切れていない」の
+    目視判断を2回とも外した前例がある（CLAUDE.md「挿絵の切り取りだけは
+    目視に頼らない方がよい」）。フレームの帯にインクがあるかは機械的に
+    測れるので、測る。
+
+    上の「ゾーン上端で切れていない」検査と対になっている——**下から
+    持ち上げれば上で切れうる**ので、両方が同時に通らなければ意味がない。
+    """
+    output, _ = rendered
+    frame = _extract_frame(output, at_sec, tmp_path / f"{layout}-safe.png")
+    ink = _ink_in_band(frame, SAFE_LINE_TOP, 1919)
+    assert ink == 0, (
+        f"{layout} の字幕が UI の帯（y={SAFE_LINE_TOP}..1919）に入っている: "
+        f"白い画素が{ink}個ある。Shorts の再生画面で最終行が読めなくなる"
     )
 
 

@@ -21,6 +21,7 @@ export const Compare: React.FC<LayoutProps> = ({
   items,
   relation,
   chapter,
+  format,
   durationInFrames,
 }) => {
   const { width } = useVideoConfig();
@@ -54,7 +55,7 @@ export const Compare: React.FC<LayoutProps> = ({
         boxB={boxB}
         relationReveal={relationReveal}
       />
-      <Subtitle text={subtitle} zone={zones.subtitle} />
+      <Subtitle text={subtitle} zone={zones.subtitle} format={format} />
     </>
   );
 };

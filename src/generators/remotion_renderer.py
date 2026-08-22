@@ -24,7 +24,7 @@ from pathlib import Path
 
 from src.generators.script_generator import chapter_labels
 from src.generators.video_composer import _available_cpus, _tail, mux_audio
-from src.models.formats import get_spec
+from src.models.formats import get_spec, resolve_format
 from src.models.scene import IllustrationConcept, SceneVisual
 from src.utils.line_break import insert_break_opportunities
 from src.utils.logger import log_error, log_step, log_success, log_warning
@@ -181,12 +181,12 @@ Constraints: NO numerals or digits of any kind, and no invented figure — no
 
 # 挿絵の生成サイズ。**動画の出力解像度（`FormatSpec.image_size`）とは無関係に
 # 固定する。** 挿絵は縦画面（short/tiktok）でも横画面（long）でも同じ帯
-# （`remotion/src/zones.ts` の `shared.illustration`、1080x920 ≒ 1.174:1）に
+# （`remotion/src/zones.ts` の `shared.illustration`、1080x800 = 1.35:1）に
 # 表示するので、生成サイズもその帯のアスペクト比に合わせるべきで、動画の
 # アスペクト比（9:16 や 16:9）に合わせるべきではない。
 #
 # 以前は `FormatSpec.image_size`（9:16 の 1152x2048）で生成していた。
-# 帯（1080x920）に収めるには縦方向の55%しか使わず、残り45%は捨てていた。
+# 帯（当時 1080x920）に収めるには縦方向の55%しか使わず、残り45%は捨てていた。
 # たまたま被写体が画像の中央55%に収まっていたので破綻していなかったが、
 # それは運であって保証ではない（実物で確認して気付いた）。
 #
@@ -414,6 +414,13 @@ class RemotionRenderer:
             "width": spec.output_width,
             "height": spec.output_height,
             "fps": self.FRAME_RATE,
+            # 形式名そのものを渡す。**解像度からは決められない**——short と
+            # tiktok は同じ 1080x1920 だが、プラットフォームの UI が覆う高さ
+            # （`zones.ts` の `SAFE_BOTTOM`）は形式ごとの値である。
+            # `resolve_format` を通すのは、未知の名前で TS 側の表を引いて
+            # undefined を掴ませないため（あちらにもフォールバックはあるが、
+            # 落とす規則を2箇所で別々に決めない）。
+            "format": resolve_format(video_format).value,
             "durationInFrames": total_frames,
             "illustration": illustration_filename,
             "scenes": [

@@ -179,11 +179,33 @@ SPECS: dict[VideoFormat, FormatSpec] = {
 }
 
 
-def get_spec(video_format: str | VideoFormat) -> FormatSpec:
-    """形式名から仕様を取得する。
+def resolve_format(video_format: str | VideoFormat) -> VideoFormat:
+    """形式名を正規化する。
 
     未知の形式は SHORT として扱う。CLI は choices で制限しているが、
     Web のフォームからは任意の文字列が来る可能性がある。
+
+    `get_spec` から分けてあるのは、**仕様ではなく形式名そのものが必要な
+    呼び出し元がある**ため（`RemotionRenderer` は props に形式名を載せる。
+    TS 側の `SAFE_BOTTOM` がそれで引く表なので、ここで落とす規則と
+    ずれると別の形式の値が使われる）。
+
+    Args:
+        video_format: 形式名
+
+    Returns:
+        VideoFormat: 正規化した形式
+    """
+    try:
+        return VideoFormat(video_format)
+    except ValueError:
+        return VideoFormat.SHORT
+
+
+def get_spec(video_format: str | VideoFormat) -> FormatSpec:
+    """形式名から仕様を取得する。
+
+    未知の形式は SHORT として扱う（`resolve_format`）。
 
     Args:
         video_format: 形式名
@@ -191,8 +213,4 @@ def get_spec(video_format: str | VideoFormat) -> FormatSpec:
     Returns:
         FormatSpec: 対応する仕様
     """
-    try:
-        key = VideoFormat(video_format)
-    except ValueError:
-        key = VideoFormat.SHORT
-    return SPECS[key]
+    return SPECS[resolve_format(video_format)]
