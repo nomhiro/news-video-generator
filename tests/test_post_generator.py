@@ -5,7 +5,13 @@ import json
 import pytest
 
 from src.models.news import NewsArticle, NewsCategory
-from src.models.social import PostKind
+from src.models.social import (
+    URL_PATTERN,
+    X_MAX_WEIGHTED_LENGTH,
+    NewPost,
+    PostKind,
+    weighted_length,
+)
 from src.social.post_generator import (
     BUDGETS,
     GroundingError,
@@ -42,10 +48,17 @@ def _reply(gen: PostGenerator, monkeypatch: pytest.MonkeyPatch, payload: dict) -
     monkeypatch.setattr(gen, "_complete", lambda *a, **k: json.dumps(payload))
 
 
-def test_単発ポストに_出典が付く(
+def test_単発ポストにリンクが付く(
     generator: PostGenerator, article: NewsArticle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """出典の媒体名はコード側が差し込む（モデルに渡すと捏造する）。"""
+    """記事のリンクはコード側が差し込む。
+
+    モデルには URL を渡していない（渡せば捏造する）。**媒体名（`出典: 〜`）は
+    書かない**——読み手が元記事に到達するのに必要なのはリンクだけで、
+    媒体名は最長22カウントを食う。**リンクは全投稿に付くので `has_link` は
+    常に True** で、単価は13倍の階層（$0.20）が全件に効く。
+    `x_monthly_budget_usd` の既定はこれを前提に決めてある。
+    """
     _reply(
         generator,
         monkeypatch,
@@ -56,11 +69,14 @@ def test_単発ポストに_出典が付く(
         },
     )
 
-    posts = generator.generate(article, PostKind.SINGLE, hashtags=["#AI"])
+    posts = generator.generate(article, PostKind.SINGLE)
 
     assert len(posts) == 1
-    assert "出典: TechCrunch" in posts[0].body
-    assert posts[0].has_link is False
+    assert posts[0].body.endswith("\n\nhttps://example.com/openai")
+    assert "出典" not in posts[0].body
+    assert "TechCrunch" not in posts[0].body
+    assert posts[0].has_link is True
+    assert posts[0].weighted_length <= X_MAX_WEIGHTED_LENGTH
     assert posts[0].kind is PostKind.SINGLE
 
 
@@ -78,7 +94,7 @@ def test_記事に無い数値があれば_GroundingError(
     )
 
     with pytest.raises(GroundingError) as excinfo:
-        generator.generate(article, PostKind.SINGLE, hashtags=["#AI"])
+        generator.generate(article, PostKind.SINGLE)
 
     assert "85" in str(excinfo.value)
 
@@ -98,7 +114,7 @@ def test_字数が下限を割ったら_PostGenerationError(
     )
 
     with pytest.raises(PostGenerationError):
-        generator.generate(article, PostKind.SINGLE, hashtags=["#AI"])
+        generator.generate(article, PostKind.SINGLE)
 
 
 def test_practical_use_が短いと_PostGenerationError(
@@ -116,7 +132,7 @@ def test_practical_use_が短いと_PostGenerationError(
     )
 
     with pytest.raises(PostGenerationError):
-        generator.generate(article, PostKind.SINGLE, hashtags=["#AI"])
+        generator.generate(article, PostKind.SINGLE)
 
 
 def test_スレッドは_投稿ごとに_position_が付く(
@@ -133,24 +149,24 @@ def test_スレッドは_投稿ごとに_position_が付く(
         },
     )
 
-    posts = generator.generate(article, PostKind.THREAD, hashtags=["#AI"])
+    posts = generator.generate(article, PostKind.THREAD)
 
     assert [p.position for p in posts] == [0, 1, 2]
-    # 出典は先頭にだけ付ける（毎投稿に付けると字数を食う）
-    assert "出典: TechCrunch" in posts[0].body
-    assert "出典" not in posts[1].body
+    # リンクは先頭にだけ付ける（毎投稿に付けると字数を食う）
+    assert posts[0].body.endswith("\n\nhttps://example.com/openai")
+    assert "https://" not in posts[1].body
 
 
-def test_httpだけを含み_を欠く本文は_has_link_がFalse(
+def test_裸のhttpはURLとして数えない(
     generator: PostGenerator, article: NewsArticle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """has_link と weighted_length は同じ URL_PATTERN を共有しなければならない。
 
-    has_link はコスト単価（$0.015 と $0.20、13倍差）を選ぶフラグ。
-    weighted_length が数えない「裸の http」を has_link が数えると、
-    リンク無し扱いで課金されるべき投稿がリンクありの単価になる
-    （このケースは逆方向: 単純な部分文字列検査だとリンクあり判定に
-    なってしまうが、weighted_length は URL として数えない）。
+    記事の元リンクを全投稿に付けるようにしたので、`has_link` はもう
+    False にならない（この検査は以前 has_link=False を見ていた）。
+    **共有しなければならない不変条件は残っている**: 単純な部分文字列検査で
+    URL を数えると、`://` を欠く裸の "http" が1件分（23カウント）として
+    数えられ、文字数の予算が実際より 23 少なく見える。
     """
     _reply(
         generator,
@@ -162,15 +178,17 @@ def test_httpだけを含み_を欠く本文は_has_link_がFalse(
         },
     )
 
-    posts = generator.generate(article, PostKind.SINGLE, hashtags=[])
+    posts = generator.generate(article, PostKind.SINGLE)
 
-    assert posts[0].has_link is False
+    # 数えられる URL は、コード側が足した元リンクの1件だけ。
+    assert len(URL_PATTERN.findall(posts[0].body)) == 1
+    assert posts[0].has_link is True
 
 
-def test_実在するURLを含む本文は_has_link_がTrue(
+def test_本文にもURLがあれば2件として数える(
     generator: PostGenerator, article: NewsArticle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`https://...` の形を持つ本文は has_link=True になること。"""
+    """本文中の URL も 23 カウントを消費する（予算計算の前提）。"""
     _reply(
         generator,
         monkeypatch,
@@ -182,45 +200,39 @@ def test_実在するURLを含む本文は_has_link_がTrue(
         },
     )
 
-    posts = generator.generate(article, PostKind.SINGLE, hashtags=[])
+    posts = generator.generate(article, PostKind.SINGLE)
 
+    assert len(URL_PATTERN.findall(posts[0].body)) == 2
     assert posts[0].has_link is True
 
 
-def test_出典とハッシュタグを足すと上限を超えるなら_PostGenerationError(
-    generator: PostGenerator, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """本文だけなら予算内でも、出典名が長く・タグが多いと280を超えうる。
+def test_最終長の検査は_文字数ではなくweighted_lengthで見る() -> None:
+    """`_validate` の予算は `len()`、この検査は weighted length。**単位が違う。**
 
-    キューに「健全」に見える行を積んでしまい、投稿予定時刻になって
-    初めて X API に拒否される事故を防ぐ。切り詰めては直さない
-    （出典や文の断片を作ることになるため）ので、引き直しの対象にする。
+    予算の上限（125字）とリンク（23カウント固定）＋区切り（2）を足しても
+    275 なので、いまの `BUDGETS` では `generate()` 経由でこの検査に
+    到達できない。**それでも消さない**——`len()` で125字以内でも
+    weighted では 280 を超える組み合わせが存在するため（本文に短い URL が
+    複数混じると、URL は実際の文字数より多い23カウントで数えられる）。
+    プロンプトは URL を書くなと指示しているが、指示は守られないことがある。
+
+    到達できないので `generate()` からではなく検査を直接呼ぶ。
+    **`BUDGETS` の上限を上げるときは、この検査が効く境界も一緒に測ること。**
     """
-    long_source_article = NewsArticle(
-        id="a2",
-        title="OpenAI が推論コストを40%削減",
-        url="https://example.com/openai",
-        source="グローバル・テクノロジー・ニュース・メディア",
-        category=NewsCategory.AI,
-        content="OpenAI は新しいキャッシュ方式で推論コストを 40% 削減したと発表した。"
-        "開発者は同じ入力を繰り返す用途で恩恵を受ける。",
-    )
-    _reply(
-        generator,
-        monkeypatch,
-        {
-            "body": "OpenAI がキャッシュ方式で推論コストを40%削減。" + "あ" * 90,
-            "practical_use": "同じ入力を繰り返すバッチ処理を持つ開発者が、推論費用をそのまま下げられる。",
-            "why_now": "推論需要が急増し、コスト構造が事業継続の制約として表面化してきたため。",
-        },
+    over = "あ" * 93 + " ".join(["http://a.b"] * 3)  # len=125、weighted=257
+    assert len(over) == 125
+    assert weighted_length(over) > 125 * 2 - 25
+
+    post = NewPost(
+        article_id="a1",
+        article_title="記事",
+        kind=PostKind.SINGLE,
+        body=f"{over}\n\nhttps://example.com/openai",
+        has_link=True,
     )
 
     with pytest.raises(PostGenerationError):
-        generator.generate(
-            long_source_article,
-            PostKind.SINGLE,
-            hashtags=["#人工知能ニュース", "#生成AIウォッチ", "#テクノロジー最前線"],
-        )
+        PostGenerator._validate_final_length([post])
 
 
 def test_全ての型に予算が定義されている():
@@ -255,7 +267,7 @@ def test_引き直しでは同じプロンプトを送り直さない(
     monkeypatch.setattr(generator, "_complete", record)
 
     with pytest.raises(PostGenerationError):
-        generator.generate(article, PostKind.SINGLE, hashtags=["#AI"])
+        generator.generate(article, PostKind.SINGLE)
 
     assert len(prompts) >= 2, "引き直していない"
     assert prompts[0] != prompts[1], "同じプロンプトを送り直している"
@@ -289,7 +301,7 @@ def test_長すぎたときは削る指示になる(
     monkeypatch.setattr(generator, "_complete", record)
 
     with pytest.raises(PostGenerationError):
-        generator.generate(article, PostKind.SINGLE, hashtags=["#AI"])
+        generator.generate(article, PostKind.SINGLE)
 
     assert "200字だった" in prompts[1]
     assert "削って" in prompts[1]

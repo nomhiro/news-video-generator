@@ -1,5 +1,7 @@
 """投稿ワーカーの挙動。実際の X は叩かない。"""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -268,9 +270,61 @@ def test_画像カードは_メディアを先に上げる(
     )
     client = FakeClient()
 
-    post_due_once(repository, client, EnabledSwitch(), now=now, fetch_image=lambda key: image)
+    @contextmanager
+    def lend(key: str) -> Iterator[Path]:
+        yield image
+
+    post_due_once(repository, client, EnabledSwitch(), now=now, fetch_image=lend)
 
     assert client.uploaded == [image]
+
+
+def test_画像は_withの内側でアップロードされる(
+    repository: SocialPostRepository, tmp_path: Path
+) -> None:
+    """Blob 保存では `fetch` が一時ファイルを貸すだけで、抜けたら消える。
+
+    パスだけ受け取って `with` の外でアップロードすると、ローカル保存では
+    通るのに **Blob 構成でだけ**ファイルが消えた後を触ることになる。
+    ここでは「抜けた時点でファイルを消す」貸し手を渡し、アップロードが
+    内側で終わっていることを、実体があるうちに読めたかで確かめる。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    image = tmp_path / "card.png"
+    image.write_bytes(b"png")
+
+    @contextmanager
+    def lend(key: str) -> Iterator[Path]:
+        try:
+            yield image
+        finally:
+            image.unlink()
+
+    read: list[bytes] = []
+
+    class ReadingClient(FakeClient):
+        def upload_media(self, path: Path) -> str:
+            read.append(path.read_bytes())
+            return super().upload_media(path)
+
+    repository.enqueue(
+        [
+            NewPost(
+                article_id="a1",
+                article_title="記事",
+                kind=PostKind.CARD,
+                body="本文",
+                has_link=False,
+                image_key="social/cards/card.png",
+            )
+        ],
+        {0: now},
+    )
+
+    post_due_once(repository, ReadingClient(), EnabledSwitch(), now=now, fetch_image=lend)
+
+    assert read == [b"png"]
+    assert not image.exists()  # 貸し出しは終わっている
 
 
 def test_遅れすぎた投稿はワーカーの1周で見送られる(repository: SocialPostRepository) -> None:

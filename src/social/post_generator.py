@@ -59,9 +59,22 @@ from src.utils.grounding import ungrounded_numbers
 # 105 のままだと 96・99 を弾き、実際に1日3件の予定が1件になった
 # （引き直しを3回しても収束しない。帯が狭いほど当てにくい）。
 # 95 なら見出しの言い換えは余裕を持って除外できる。
+#
+# **上限は記事の元リンクを足したあとの実測で決めた**（2026-08-22）。
+# **上限 125 は「本文 + リンクだけ」を前提にした値。**
+# 先頭の投稿は 本文 / 空行 / URL の形で、本文以外は 25 カウント固定
+# （URL は t.co 短縮で23カウント、区切りが2）。本文125字（250カウント）で
+# 275 なので5カウント余る。**媒体名を書いていた頃は 110 が限界だった**
+# （`出典: {媒体名}` が最長22カウントで、予約が 54 に膨らんでいた）。
+# 媒体名を投稿から外したぶんが本文に戻っている。書き戻すなら上限を
+# 110 に下げる必要がある。
+
 BUDGETS: dict[PostKind, tuple[int, int]] = {
     PostKind.SINGLE: (95, 125),
-    PostKind.THREAD: (100, 130),  # 1投稿あたり
+    # THREAD も先頭の投稿だけがリンクを背負うので、上限は SINGLE と同じ
+    # 制約を受ける。130 のままでは先頭が 285 で必ず溢れる
+    # （未配線なので露見していなかった。`KIND_ROTATION` を参照）。
+    PostKind.THREAD: (100, 125),  # 1投稿あたり
     PostKind.CARD: (60, 90),
     PostKind.PROMO: (70, 100),
 }
@@ -114,12 +127,17 @@ class _ThreadPayload(BaseModel):
 # 記事タイトルの言い換え1文（70〜80字）で返ってきて、下限105字を割り続けた。
 # 文数（「2文以上」など）で縛る書き方も試したが、カードの予算（60〜90字）とは
 # 衝突する。含めるべき要素を挙げるのが、型ごとの予算と喧嘩しない書き方だった。
-_COMMON_RULES_JA = """- 各投稿は単独で文として言い切ること（断片にしない）
+_COMMON_RULES_JA = """- **投稿は必ず日本語で書くこと。** 記事が英語（海外メディア、企業の
+  公式ブログ、arXiv の論文）でも、投稿は日本語にする。読み手は日本語話者で、
+  情報源の半分以上が英語のフィードになっている（`src/news/feeds.py`）
+- 各投稿は単独で文として言い切ること（断片にしない）
 - 本文には「何が起きたか」と「誰がどの作業でどう使えるか」の両方を含めること。
   記事タイトルの言い換えで終わらせないこと（引用元の要約をなぞるだけの投稿は
   伸びないうえ、元記事の価値を横取りするだけになる）
 - 記事本文に無い数値・固有名詞を書かないこと
-- 出典表記とハッシュタグはこちらで付けるので書かないこと"""
+- 記事のリンクは本文に書かないこと（こちらで付ける）
+- **ハッシュタグを書かないこと。** タグは1つも付けない"""
+
 
 SYSTEM_PROMPT_SINGLE = f"""<role>
 あなたはX（旧Twitter）向けにニュース解説の投稿文を書くライターです。
@@ -131,9 +149,9 @@ SYSTEM_PROMPT_SINGLE = f"""<role>
 
 <content_rules>
 {_COMMON_RULES_JA}
-- URL を書かないこと（別途システムが必要に応じて付加する）
+- URL を書かないこと（記事の元リンクはこちらで末尾に付ける）
 - body は<<BUDGET>>文字の範囲に収めること（下限を割ると文が断片化する、
-  上限を超えると出典表記とハッシュタグを追加する余地が無くなる）
+  上限を超えるとリンクを追加する余地が無くなる）
 - practical_use: 実務でどう役立つかの独自解説（{MIN_INSIGHT_CHARS}文字以上）
 - why_now: なぜ今このニュースが重要かの独自解説（{MIN_INSIGHT_CHARS}文字以上）
 </content_rules>
@@ -158,9 +176,9 @@ SYSTEM_PROMPT_THREAD = f"""<role>
 
 <content_rules>
 {_COMMON_RULES_JA}
-- URL を書かないこと（別途システムが必要に応じて付加する）
+- URL を書かないこと（記事の元リンクはこちらで末尾に付ける）
 - posts は{THREAD_MIN_POSTS}〜{THREAD_MAX_POSTS}件。各要素は<<BUDGET>>文字の範囲に収めること
-  （下限を割ると文が断片化する、上限を超えると出典表記の余地が無くなる）
+  （下限を割ると文が断片化する、上限を超えるとリンクの余地が無くなる）
 - 1件目で結論、2件目以降で仕組みや根拠を展開する構成にすること
 - practical_use: 実務でどう役立つかの独自解説（{MIN_INSIGHT_CHARS}文字以上）
 - why_now: なぜ今このニュースが重要かの独自解説（{MIN_INSIGHT_CHARS}文字以上）
@@ -187,9 +205,9 @@ SYSTEM_PROMPT_CARD = f"""<role>
 
 <content_rules>
 {_COMMON_RULES_JA}
-- URL を書かないこと（別途システムが必要に応じて付加する）
+- URL を書かないこと（記事の元リンクはこちらで末尾に付ける）
 - body は<<BUDGET>>文字の範囲に収めること（下限を割ると文が断片化する、
-  上限を超えると出典表記とハッシュタグを追加する余地が無くなる）
+  上限を超えるとリンクを追加する余地が無くなる）
 - practical_use: 実務でどう役立つかの独自解説（{MIN_INSIGHT_CHARS}文字以上）
 - why_now: なぜ今このニュースが重要かの独自解説（{MIN_INSIGHT_CHARS}文字以上）
 </content_rules>
@@ -215,9 +233,9 @@ SYSTEM_PROMPT_PROMO = f"""<role>
 <content_rules>
 {_COMMON_RULES_JA}
 - body は<<BUDGET>>文字の範囲に収めること（下限を割ると文が断片化する、
-  上限を超えると出典表記とハッシュタグを追加する余地が無くなる）
-- リンクの挿入は別途システムが行うので、本文中にリンクやその案内文言
-  （「詳細はこちら」等）を書く必要はない
+  上限を超えるとリンクを追加する余地が無くなる）
+- URL を書かないこと（記事の元リンクはこちらで末尾に付ける）。
+  「詳細はこちら」等の案内文言も不要
 - practical_use: 実務でどう役立つかの独自解説（{MIN_INSIGHT_CHARS}文字以上）
 - why_now: なぜ今このニュースが重要かの独自解説（{MIN_INSIGHT_CHARS}文字以上）
 </content_rules>
@@ -296,7 +314,6 @@ class PostGenerator:
         self,
         article: NewsArticle,
         kind: PostKind,
-        hashtags: list[str],
         caption: str | None = None,
     ) -> list[NewPost]:
         """記事から投稿の下書きを生成する。
@@ -304,8 +321,6 @@ class PostGenerator:
         Args:
             article: 元記事
             kind: 投稿の型
-            hashtags: 先頭の投稿に付けるハッシュタグ。モデルには作らせない
-                （無関係なタグはスパム判定を受ける）
             caption: 画像カード用に別途生成済みの日本語キャプション文。
                 指定があればユーザープロンプトのヒントに追加する
                 （画像カード生成タスクが本文生成へ渡す用途。この引数自体は
@@ -338,7 +353,7 @@ class PostGenerator:
                 bodies, insights = self._parse_payload(kind, raw)
                 for body in bodies:
                     self._validate(body, insights, kind, source_text)
-                posts = self._assemble(article, kind, bodies, hashtags)
+                posts = self._assemble(article, kind, bodies)
                 self._validate_final_length(posts)
             except PostGenerationError as e:
                 last_error = e
@@ -560,20 +575,24 @@ class PostGenerator:
             raise GroundingError(f"記事本文に根拠の無い数値が含まれています: {sorted(ungrounded)}")
 
     @staticmethod
-    def _assemble(
-        article: NewsArticle, kind: PostKind, bodies: list[str], hashtags: list[str]
-    ) -> list[NewPost]:
+    def _assemble(article: NewsArticle, kind: PostKind, bodies: list[str]) -> list[NewPost]:
         """検証済みの本文から `NewPost` のリストを組み立てる。
 
-        出典表記とハッシュタグは先頭（position 0）にだけ付ける。
-        スレッドの全件に付けると字数を食うだけで、2件目以降は
-        1件目からの続きとして読まれるため出典の重複は不要。
+        記事のリンクは先頭（position 0）にだけ付ける。スレッドの全件に
+        付けると字数を食うだけで、2件目以降は1件目からの続きとして
+        読まれるため重複は不要。
+
+        **`出典: {媒体名}` は書かない。** 以前は媒体名とリンクを並べていたが、
+        媒体名は最長22カウントを食う一方、読み手が元記事に到達するのに
+        必要なのはリンクだけ。書き戻すなら `BUDGETS` の上限を 110 に下げる。
+
+        **ハッシュタグは付けない**（このモジュールに付ける経路が無い）。
+        理由は CLAUDE.md「ハッシュタグは付けない」を参照。
 
         Args:
             article: 元記事
             kind: 投稿の型
             bodies: 検証済みの本文（1件、またはスレッドの複数件）
-            hashtags: 先頭の投稿に付けるハッシュタグ
 
         Returns:
             list[NewPost]: 積む準備ができた投稿
@@ -582,10 +601,9 @@ class PostGenerator:
         for position, body in enumerate(bodies):
             final_body = body.strip()
             if position == 0:
-                extras = [f"出典: {article.source}"]
-                if hashtags:
-                    extras.append(" ".join(hashtags))
-                final_body = "\n\n".join([final_body, *extras])
+                # `article.url` はモデルに渡していない（渡せば捏造する）。
+                # ここがリンクの唯一の出所。
+                final_body = "\n\n".join([final_body, article.url])
             posts.append(
                 NewPost(
                     article_id=article.id,
@@ -607,18 +625,20 @@ class PostGenerator:
 
     @staticmethod
     def _validate_final_length(posts: list[NewPost]) -> None:
-        """出典・ハッシュタグ付加後の最終本文が上限を超えていないか検証する。
+        """リンク付加後の最終本文が上限を超えていないか検証する。
 
-        `_validate` は生成された本文だけを見る（出典・ハッシュタグを
-        付ける前）。予算（`BUDGETS`）はその余地を残すように設計しているが、
-        出典名が長い・ハッシュタグが多いといった組み合わせでは、本文が
-        予算内でも最終的に280を超えることがある。ここで検出しないと、
-        キューには「健全」に見える行が積まれ、投稿予定時刻になって
-        初めて X API に拒否される。
+        `_validate` は生成された本文だけを見る（リンクを付ける前）。
+        リンクは t.co 短縮で23カウント固定なので、`BUDGETS` の上限を
+        守れていれば理論上ここは通る（125字 + 区切り2 + URL23 = 275）。
 
-        切り詰めては直さない。出典表記を削れば帰属表示が消え、本文を
-        途中で削れば文の断片ができる（このプロジェクトが台本で
-        既に「断片は不可」と決めている）。どちらも安全ではないので、
+        **それでも残してある。単位が違う。** 予算の検査は `len()`
+        （Python の文字数）、こちらは weighted length（CJK が2カウント）。
+        本文に全角記号が混じると `len()` は125以内なのに weighted は
+        250を超えうる。ここで検出しないと、キューには「健全」に見える行が
+        積まれ、投稿予定時刻になって初めて X API に拒否される。
+
+        切り詰めては直さない。本文を途中で削れば文の断片ができる
+        （このプロジェクトが台本で既に「断片は不可」と決めている）。
         検出したら引き直す。
 
         Args:
@@ -631,6 +651,6 @@ class PostGenerator:
             weighted = post.weighted_length
             if weighted > X_MAX_WEIGHTED_LENGTH:
                 raise PostGenerationError(
-                    f"出典・ハッシュタグを含めた最終本文が weighted length の"
+                    f"リンクを含めた最終本文が weighted length の"
                     f"上限を超えています（{weighted}/{X_MAX_WEIGHTED_LENGTH}）"
                 )

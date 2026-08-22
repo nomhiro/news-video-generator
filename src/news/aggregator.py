@@ -5,13 +5,59 @@ import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
+from src.news.feeds import AI_FEEDS, Feed
 from src.news.sources.google_news import GoogleNewsSource
+from src.news.sources.rss import RssSource
 from src.news.sources.scraper import ArticleScraper
 from src.utils.logger import log_error, log_step, log_success
+
+# 自動生成（動画・X）が記事を選ぶカテゴリ。**Google News 由来を含めない。**
+#
+# 2つの情報源が同じストアに同居している。
+#
+# - `AI` は発信元のフィード（`src/news/feeds.py`）。`link` は媒体の実 URL
+# - それ以外のカテゴリは Google News の RSS。**画面でブラウズするための一覧**で、
+#   `link` は `news.google.com/rss/articles/...` というリダイレクタ
+#
+# 以前は「AI を優先し、足りなければ technology で補う」形だった。AI が
+# 検索クエリ由来で薄かった頃の保険だが、**フィードに変えたあとは害しかない**。
+# technology は実測で 10件中10件が Google News のリダイレクタ URL で、
+# 選ばれると (a) 投稿のリンクカードに Google News が出る、
+# (b) 芸能・PR 転載を一次情報と区別できない——フィードに変えた理由が
+# そのまま戻る。しかも AI が枯れたときだけ起きるので気付きにくい。
+#
+# フィードで埋めるカテゴリを増やすなら、ここに足す。
+AUTO_SOURCE_CATEGORIES: tuple[NewsCategory, ...] = (NewsCategory.AI,)
+
+
+def _sort_key(article: NewsArticle) -> datetime:
+    """公開日時の降順に並べるためのキー。**naive を UTC に読み替える。**
+
+    `published_at` は情報源によって tz 付きと naive が混ざる。RSS / Atom は
+    `pubDate` にオフセットを持つので `RssSource` は aware を返すが、
+    `GoogleNewsSource` 経由や JSON から復元した古い記事は naive になりうる。
+    混ざったまま `sorted` に渡すと
+    `can't compare offset-naive and offset-aware datetimes` で落ちる
+    （実際に踏んだ。フィードから記事を入れた直後の `pick_unconsumed` で、
+    記事一覧・動画の計画・投稿の計画がすべて落ちる）。
+
+    **`datetime.min` を既定値に使わない**のも同じ理由（naive なので、
+    aware な記事が1件あるだけで比較不能になる）。
+
+    Args:
+        article: 対象の記事
+
+    Returns:
+        datetime: tz 付きの比較用キー（未設定なら最小値）
+    """
+    at = article.published_at
+    if at is None:
+        return datetime.min.replace(tzinfo=UTC)
+    return at if at.tzinfo else at.replace(tzinfo=UTC)
 
 
 class NewsAggregator:
@@ -55,6 +101,7 @@ class NewsAggregator:
         }
 
         self.google_news = GoogleNewsSource()
+        self.rss = RssSource()
         self.scraper = ArticleScraper()
 
     @contextmanager
@@ -178,21 +225,27 @@ class NewsAggregator:
         return result
 
     async def fetch_ai_news_and_store(
-        self, search_queries: list[str], limit_per_query: int = 5
+        self,
+        feeds: tuple[Feed, ...] | list[Feed] = AI_FEEDS,
+        limit_per_feed: int = 3,
     ) -> list[NewsArticle]:
-        """AI関連ニュースを取得してJSONに保存する。
+        """AI関連の記事を発信元のフィードから取得してJSONに保存する。
+
+        **Google News の検索クエリは使わない。** 語が一致するだけの記事
+        （AI が話題に出た芸能ニュース、PR 転載）を一次情報と区別できず、
+        `link` も Google News のリダイレクタになる。理由の詳細は
+        `src/news/feeds.py` の冒頭。
 
         Args:
-            search_queries: 検索クエリのリスト
-            limit_per_query: クエリごとの取得記事数
+            feeds: 読むフィード。既定は `AI_FEEDS`
+            limit_per_feed: フィードごとの取得記事数（新しい順）
 
         Returns:
             List[NewsArticle]: 取得した記事のリスト
         """
-        log_step("AI関連ニュースを取得・保存中...", "🤖")
+        log_step("AI関連の記事を取得・保存中...", "🤖")
 
-        # AIニュースを取得
-        new_articles = await self.google_news.fetch_ai_news(search_queries, limit_per_query)
+        new_articles = await self.rss.fetch(feeds, limit_per_feed, NewsCategory.AI)
 
         category = NewsCategory.AI
         with self._category_lock(category):
@@ -241,9 +294,7 @@ class NewsAggregator:
             List[NewsArticle]: 記事のリスト（公開日時の降順）
         """
         articles = self._load_category(category)
-
-        # Sort by published_at descending
-        return sorted(articles, key=lambda a: a.published_at or datetime.min, reverse=True)
+        return sorted(articles, key=_sort_key, reverse=True)
 
     def get_all_articles(self) -> dict[NewsCategory, list[NewsArticle]]:
         """全カテゴリの記事を取得する。
@@ -386,9 +437,7 @@ class NewsAggregator:
     def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
         """そのチャネルでまだ使っていない記事を選ぶ。
 
-        AI カテゴリを優先する。このアカウントの主題が AI・技術ニュースで、
-        独自解説を載せやすいのがこの分野だから。足りなければ
-        technology で補う。
+        **見るのは `AUTO_SOURCE_CATEGORIES` だけ**（動画と X で共通）。
 
         Args:
             channel: CHANNEL_VIDEO / CHANNEL_X
@@ -400,7 +449,7 @@ class NewsAggregator:
         picked: list[NewsArticle] = []
         seen: set[str] = set()
 
-        for category in (NewsCategory.AI, NewsCategory.TECHNOLOGY):
+        for category in AUTO_SOURCE_CATEGORIES:
             for article in self.get_articles_by_category(category):
                 if len(picked) >= needed:
                     return picked

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from config import DEFAULT_AI_SEARCH_QUERIES, Config
+from config import Config
 from tests.conftest import REPO_ROOT
 
 REQUIRED_VALUES: dict[str, object] = {
@@ -168,28 +168,6 @@ def test_tiktok_needs_both_values() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_ai_search_queries_have_a_default() -> None:
-    assert _config().ai_search_queries == list(DEFAULT_AI_SEARCH_QUERIES)
-
-
-def test_ai_search_queries_parse_from_comma_separated_string() -> None:
-    """環境変数にはカンマ区切りで書けること。
-
-    pydantic は list 型を JSON として解釈しようとするため、
-    素直な書き方を通すには変換が必要になる。
-    """
-    config = _config(ai_search_queries=" 生成AI , ChatGPT ,, Claude ")
-    assert config.ai_search_queries == ["生成AI", "ChatGPT", "Claude"]
-
-
-def test_empty_ai_search_queries_falls_back_to_default() -> None:
-    assert _config(ai_search_queries="").ai_search_queries == list(DEFAULT_AI_SEARCH_QUERIES)
-
-
-def test_ai_search_queries_accept_a_list() -> None:
-    assert _config(ai_search_queries=["a", "b"]).ai_search_queries == ["a", "b"]
-
-
 # --------------------------------------------------------------------------
 # 呼び出し側の名前に合わせるプロパティ
 # --------------------------------------------------------------------------
@@ -299,7 +277,6 @@ def test_env_example_documents_no_unknown_keys() -> None:
 @pytest.mark.parametrize(
     ("env_name", "raw", "field", "expected"),
     [
-        ("AI_SEARCH_QUERIES", "生成AI,ChatGPT", "ai_search_queries", ["生成AI", "ChatGPT"]),
         ("SCHEDULE_FORMATS", "short,long", "schedule_formats", ["short", "long"]),
     ],
 )
