@@ -27,14 +27,34 @@
                 </div>
                 <p class="text-sm text-ink whitespace-pre-wrap">{{ post.body }}</p>
                 <p class="text-xs text-vermilion mt-1">{{ post.error_message or "理由不明" }}</p>
-                <form hx-post="/x/posts/{{ post.id }}/cancel" hx-target="#post-queue" hx-swap="outerHTML"
-                      class="mt-2">
-                    <button type="submit"
+                {% if post.image_key %}
+                {# 画像は縮小した実物を出す。キーの有無を文字で出しても
+                   「添付されるはず」の確認にしかならない。実際には
+                   画像を作って Blob に上げたうえで添付せずに投稿して
+                   いた期間があり、実物の投稿を見るまで気付けなかった。 #}
+                <img src="/artifacts/{{ post.image_key | urlencode }}"
+                     alt="この投稿に添付される画像カード" loading="lazy"
+                     class="mt-2 w-28 rounded border border-ink/10">
+                {% endif %}
+                <div class="mt-2 flex items-center gap-2">
+                    <button type="button"
                             class="text-xs px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
-                                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
-                        取り消す
+                                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal
+                                   x-preview-btn"
+                            hx-get="/x/posts/{{ post.id }}/preview"
+                            hx-target="#x-preview-body"
+                            hx-swap="innerHTML">
+                        プレビュー
                     </button>
-                </form>
+                    <form hx-post="/x/posts/{{ post.id }}/cancel" hx-target="#post-queue"
+                          hx-swap="outerHTML">
+                        <button type="submit"
+                                class="text-xs px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
+                                       focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
+                            取り消す
+                        </button>
+                    </form>
+                </div>
             </article>
             {% endfor %}
         </div>
@@ -77,21 +97,42 @@
                     <span class="tnum">{{ post.weighted_length }}/{{ max_weighted }}</span>
                 </div>
                 <p class="text-sm text-ink whitespace-pre-wrap">{{ post.body }}</p>
-                {# 送信中（POSTING）には取り消しボタンを出さない。押せると、
-                   投稿は X に出たのに行が FAILED になり、記事が消費済みに
-                   ならず翌日もう一度公開される。 #}
-                {% if post.status in cancellable %}
-                <form hx-post="/x/posts/{{ post.id }}/cancel" hx-target="#post-queue" hx-swap="outerHTML"
-                      class="mt-2">
-                    <button type="submit"
-                            class="text-xs px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
-                                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
-                        取り消す
-                    </button>
-                </form>
-                {% else %}
-                <p class="mt-2 text-xs text-ink/50">送信中のため取り消せません</p>
+                {% if post.image_key %}
+                {# 画像は縮小した実物を出す。キーの有無を文字で出しても
+                   「添付されるはず」の確認にしかならない。実際には
+                   画像を作って Blob に上げたうえで添付せずに投稿して
+                   いた期間があり、実物の投稿を見るまで気付けなかった。 #}
+                <img src="/artifacts/{{ post.image_key | urlencode }}"
+                     alt="この投稿に添付される画像カード" loading="lazy"
+                     class="mt-2 w-28 rounded border border-ink/10">
                 {% endif %}
+                <div class="mt-2 flex items-center gap-2">
+                    <button type="button"
+                            class="text-xs px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
+                                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal
+                                   x-preview-btn"
+                            hx-get="/x/posts/{{ post.id }}/preview"
+                            hx-target="#x-preview-body"
+                            hx-swap="innerHTML">
+                        プレビュー
+                    </button>
+                    {# 送信中（POSTING）には取り消しボタンを出さない。押せると、
+                       投稿は X に出たのに行が FAILED になり、記事が消費済みに
+                       ならず翌日もう一度公開される。プレビューは読むだけなので
+                       状態を問わず出す。 #}
+                    {% if post.status in cancellable %}
+                    <form hx-post="/x/posts/{{ post.id }}/cancel" hx-target="#post-queue"
+                          hx-swap="outerHTML">
+                        <button type="submit"
+                                class="text-xs px-2 py-1 rounded border border-ink/20 hover:bg-ink/5
+                                       focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
+                            取り消す
+                        </button>
+                    </form>
+                    {% else %}
+                    <span class="text-xs text-ink/50">送信中のため取り消せません</span>
+                    {% endif %}
+                </div>
             </article>
             {% endfor %}
         </div>

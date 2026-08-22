@@ -261,6 +261,66 @@
     </div>
 </div>
 
+<!--
+  動画プレビュー。
+
+  アップロードは取り消せないので、その前に実物を見る場所が要る。
+  ffprobe で分かるのは尺・解像度・音声トラックの有無までで、
+  「音が入っているか」「字幕が読めるか」は再生しないと分からない
+  （音声トラックはあるのに実質デジタル無音のまま5本公開した前例がある）。
+-->
+<div id="video-preview-modal" class="hidden fixed inset-0 z-50">
+    <div class="absolute inset-0 bg-ink/70" onclick="closeVideoPreview()"></div>
+    <div class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2
+                bg-raised rounded-xl shadow-2xl p-4 w-full max-w-sm max-h-[92vh] overflow-y-auto">
+        <div class="flex items-start justify-between gap-3 mb-3">
+            <h3 id="video-preview-title"
+                class="text-sm font-display font-semibold text-ink break-words"></h3>
+            <button onclick="closeVideoPreview()" aria-label="プレビューを閉じる"
+                    class="text-ink/40 hover:text-ink/70 shrink-0
+                           focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+            </button>
+        </div>
+
+        {#
+          縦動画（1080x1920）なので幅ではなく高さで縛る。max-w と max-h の
+          両方を与えて width/height は auto のままにすると、要素の箱が
+          アスペクト比を保ったまま収まる（片方を固定すると黒帯が出る）。
+        #}
+        <video id="video-preview-player" controls preload="metadata" playsinline
+               class="block mx-auto max-w-full max-h-[70vh] rounded-lg bg-ink"></video>
+
+        <p id="video-preview-description"
+           class="mt-3 text-xs text-ink/60 whitespace-pre-wrap break-words"></p>
+    </div>
+</div>
+
+<!-- 投稿プレビュー（X での見え方） -->
+<div id="x-preview-modal" class="hidden fixed inset-0 z-50">
+    <div class="absolute inset-0 bg-ink/70" onclick="closeXPreview()"></div>
+    <div class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2
+                bg-raised rounded-xl shadow-2xl p-4 w-full max-w-lg max-h-[92vh] overflow-y-auto">
+        <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-display font-semibold text-ink">X での見え方</h3>
+            <button onclick="closeXPreview()" aria-label="プレビューを閉じる"
+                    class="text-ink/40 hover:text-ink/70
+                           focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+            </button>
+        </div>
+
+        {# キューのボタンが hx-get でここに差し替える #}
+        <div id="x-preview-body">
+            <p class="text-sm text-ink/40 py-6 text-center">読み込み中...</p>
+        </div>
+    </div>
+</div>
+
 <script>
 function openUploadModal(videoKey, title, description) {
     document.getElementById('modal-video-key').value = videoKey;
@@ -286,11 +346,55 @@ function closeTiktokUploadModal() {
     document.getElementById('tiktok-upload-modal').classList.add('hidden');
 }
 
+function openVideoPreview(url, title, description) {
+    document.getElementById('video-preview-title').textContent = title || '';
+    document.getElementById('video-preview-description').textContent = description || '';
+    const player = document.getElementById('video-preview-player');
+    player.src = url;
+    document.getElementById('video-preview-modal').classList.remove('hidden');
+}
+
+function closeVideoPreview() {
+    const player = document.getElementById('video-preview-player');
+    player.pause();
+    // src を外して読み込みも止める。付けたままだと閉じた後も転送が続き、
+    // 次に開いた動画と2本ぶん流れる（生成物は Blob 上にあり、配信は
+    // アプリを経由するので無駄が二重に効く）。
+    player.removeAttribute('src');
+    player.load();
+    document.getElementById('video-preview-modal').classList.add('hidden');
+}
+
+function closeXPreview() {
+    document.getElementById('x-preview-modal').classList.add('hidden');
+}
+
 // Close modal on escape key
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
         closeUploadModal();
         closeTiktokUploadModal();
+        closeVideoPreview();
+        closeXPreview();
+    }
+});
+
+// 動画プレビュー。一覧は htmx で差し替わるので委譲で受ける
+document.addEventListener('click', function(e) {
+    const btn = e.target.closest('.video-preview-btn');
+    if (btn) {
+        openVideoPreview(btn.dataset.previewUrl, btn.dataset.title, btn.dataset.description);
+    }
+});
+
+// 投稿プレビュー。取得は htmx（hx-get）が行うので、ここは枠を開けるだけ。
+// 前に開いた投稿の内容が一瞬見えないよう、開くときに中身を戻す。
+document.addEventListener('click', function(e) {
+    const btn = e.target.closest('.x-preview-btn');
+    if (btn) {
+        document.getElementById('x-preview-body').innerHTML =
+            '<p class="text-sm text-ink/40 py-6 text-center">読み込み中...</p>';
+        document.getElementById('x-preview-modal').classList.remove('hidden');
     }
 });
 

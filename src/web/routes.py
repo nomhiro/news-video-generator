@@ -3,9 +3,10 @@
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -14,6 +15,7 @@ from src.models.job import BatchProgress, GenerationJob, JobStatus
 from src.models.news import NewsCategory
 from src.models.social import (
     CANCELLABLE_STATUSES,
+    URL_PATTERN,
     X_MAX_WEIGHTED_LENGTH,
     InvalidPostTransition,
     PostStatus,
@@ -23,7 +25,7 @@ from src.news.aggregator import NewsAggregator
 from src.social.cost import estimate_month_cost, is_over_budget
 from src.social.switch import PostingSwitch
 from src.social.x_auth import load_credentials
-from src.storage.artifacts import ArtifactStore, ArtifactStoreError
+from src.storage.artifacts import ArtifactStore, ArtifactStoreError, normalize_key
 from src.storage.jobs import JobRepository
 from src.storage.social import SocialPostRepository
 from src.storage.tokens import TokenStore
@@ -522,6 +524,171 @@ def _script_metadata(artifact_store: ArtifactStore, video_key: str) -> dict[str,
         "title": str(data.get("title", "")),
         "description": str(data.get("description", "")),
     }
+
+
+# --------------------------------------------------------------------------
+# 生成物の配信（画面でのプレビュー）
+# --------------------------------------------------------------------------
+
+# 配信を許す生成物。プレフィックスごとに拡張子まで縛る。
+#
+# 画面のプレビューに必要なのは動画と画像だけ。台本 JSON・音声は出さない。
+# ここを「保存先の中身なら何でも返す」形にすると、画面に出すつもりの
+# 無いものまでブラウザから取れる状態が黙って出来上がる。
+SERVABLE_ARTIFACTS: dict[str, frozenset[str]] = {
+    "videos/": frozenset({".mp4"}),
+    "social/cards/": frozenset({".png"}),
+    "images/": frozenset({".png", ".jpg", ".jpeg"}),
+}
+
+_MEDIA_TYPES: dict[str, str] = {
+    ".mp4": "video/mp4",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+
+# 1レスポンスで返すバイト数の上限。
+#
+# Blob 保存では返すバイト列をメモリに載せるため、長尺（実測で数十MB）に
+# `bytes=0-` が来たときに全部を載せない。Range は要求より少なく返して
+# よい仕様なので、ブラウザは続きを取りに来る。
+MAX_ARTIFACT_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+class _RangeNotSatisfiable(Exception):
+    """Range が実体の外を指している（416 を返す）。"""
+
+
+def _parse_range(header: str | None, size: int) -> tuple[int, int] | None:
+    """Range ヘッダを両端を含む [start, end] に解く。
+
+    読めない指定は None（全体を返す）に落とす。ここで 400 を返すと、
+    仕様外の書き方をするブラウザ1つで再生できなくなる。プレビューは
+    多少無駄に転送しても再生できる方がよい。
+
+    Args:
+        header: Range ヘッダの値（無ければ None）
+        size: 実体のバイト数
+
+    Returns:
+        tuple[int, int] | None: 範囲。None なら全体
+
+    Raises:
+        _RangeNotSatisfiable: 実体の外を指している場合
+    """
+    if not header:
+        return None
+    unit, _, spec = header.partition("=")
+    if unit.strip().lower() != "bytes" or "," in spec:
+        # 複数レンジは扱わない（動画再生では出てこない）
+        return None
+    first, separator, last = spec.strip().partition("-")
+    if not separator:
+        return None
+    try:
+        if not first:
+            # `bytes=-N`（末尾から N バイト）。生成した mp4 には
+            # faststart が付いておらず moov が末尾にあるため、
+            # ブラウザはこの形で実際に要求してくる。
+            length = int(last)
+            if length <= 0:
+                return None
+            start = max(0, size - length)
+            end = size - 1
+        else:
+            start = int(first)
+            end = int(last) if last else size - 1
+    except ValueError:
+        return None
+    if start >= size or end < start:
+        raise _RangeNotSatisfiable
+    return start, min(end, size - 1, start + MAX_ARTIFACT_CHUNK_BYTES - 1)
+
+
+@router.get("/artifacts/{key:path}", response_class=Response)
+async def serve_artifact(
+    request: Request,
+    key: str,
+    artifact_store: ArtifactStore = Depends(get_artifact_store),
+) -> Response:
+    """生成物をブラウザに返す。動画の再生と画像の表示に使う。
+
+    ここが唯一「保存先の中身をブラウザに渡す」場所なので、配信対象は
+    `SERVABLE_ARTIFACTS` の白名簿で絞る。キーは HTML 経由で戻ってくる
+    値なので `normalize_key` で `..` と絶対パスも弾く。
+
+    Range に対応しているのは飾りではない。生成した mp4 には
+    `-movflags +faststart` を付けていない（moov が末尾にある）ため、
+    Range が無いとブラウザは全部落とすまで再生を始められず、
+    シークも効かない。
+
+    Args:
+        request: FastAPIリクエスト（Range ヘッダを読む）
+        key: 生成物のキー（`videos/....mp4` など）
+        artifact_store: 生成物の保存先
+
+    Returns:
+        Response: 200（全体）/ 206（部分）/ 416（範囲外）
+
+    Raises:
+        HTTPException: 配信対象でない、または存在しないキー（404）
+    """
+    try:
+        normalized = normalize_key(key)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail="配信できないキーです") from e
+
+    suffix = PurePosixPath(normalized).suffix.lower()
+    allowed = next(
+        (
+            extensions
+            for prefix, extensions in SERVABLE_ARTIFACTS.items()
+            if normalized.startswith(prefix)
+        ),
+        None,
+    )
+    if allowed is None or suffix not in allowed:
+        raise HTTPException(status_code=404, detail="配信できない生成物です")
+
+    try:
+        # `fetch` は Blob 保存のとき一時ファイルを貸し、ブロックを抜けたら
+        # 消す契約。だから読み終わるまでを全部この中で行う。
+        # `StreamingResponse` に渡して後から流す形に変えると、本文が流れる
+        # ときにはファイルが消えている——ローカル保存では動くので
+        # **Blob 構成でだけ**壊れる非対称なバグになる。
+        with artifact_store.fetch(normalized) as path:
+            size = path.stat().st_size
+            try:
+                span = _parse_range(request.headers.get("range"), size)
+            except _RangeNotSatisfiable:
+                return Response(
+                    status_code=416,
+                    headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
+                )
+            if span is None:
+                data = path.read_bytes()
+                status_code = 200
+                headers = {}
+            else:
+                start, end = span
+                with path.open("rb") as handle:
+                    handle.seek(start)
+                    data = handle.read(end - start + 1)
+                status_code = 206
+                headers = {"Content-Range": f"bytes {start}-{end}/{size}"}
+    except ArtifactStoreError as e:
+        raise HTTPException(status_code=404, detail="生成物が見つかりません") from e
+
+    headers["Accept-Ranges"] = "bytes"
+    # キーはタイムスタンプを含み、同じキーの内容が後から変わることはない
+    headers["Cache-Control"] = "private, max-age=3600"
+    return Response(
+        content=data,
+        status_code=status_code,
+        media_type=_MEDIA_TYPES.get(suffix, "application/octet-stream"),
+        headers=headers,
+    )
 
 
 @router.post("/youtube/upload", response_class=HTMLResponse)
@@ -1085,3 +1252,105 @@ async def x_cancel_post(
             request, posts, config, message="送信中または送信済みのため取り消せませんでした"
         )
     return await x_queue(request, posts, config, message="取り消しました")
+
+
+def _body_segments(body: str) -> list[dict[str, str]]:
+    """本文を「文字」と「リンク」の並びに切り分ける。
+
+    ここで `<a>` を組み立てない（`Markup` を返さない）。本文は LLM の
+    出力で、記事タイトル由来の `<` や `&` が実際に混じる。HTML を
+    自前で組むとエスケープの責任がこの関数に移る。境界だけを返して
+    エスケープはテンプレートに任せる。
+
+    Args:
+        body: 投稿の本文
+
+    Returns:
+        list[dict[str, str]]: `kind` が "text" か "link" の並び
+    """
+    segments: list[dict[str, str]] = []
+    cursor = 0
+    for match in URL_PATTERN.finditer(body):
+        if match.start() > cursor:
+            segments.append({"kind": "text", "value": body[cursor : match.start()]})
+        segments.append({"kind": "link", "value": match.group()})
+        cursor = match.end()
+    if cursor < len(body):
+        segments.append({"kind": "text", "value": body[cursor:]})
+    return segments
+
+
+def _preview_link(body: str) -> dict[str, str] | None:
+    """本文末尾の URL から、X のリンクカード相当の情報を作る。
+
+    **OG 情報（見出し・画像）は取りに行かない。** 画面を開くたびに
+    記事元のサーバーを叩くことになり、遅く・壊れやすく・こちらの
+    閲覧が相手に見える。得られるのは見た目の忠実さだけで、
+    「どこの記事か」はドメインと行が持つ記事タイトルで足りる。
+
+    Args:
+        body: 投稿の本文
+
+    Returns:
+        dict[str, str] | None: url とドメイン。URL が無ければ None
+    """
+    urls = URL_PATTERN.findall(body)
+    if not urls:
+        return None
+    url = urls[-1]
+    return {"url": url, "domain": urlparse(url).netloc.removeprefix("www.")}
+
+
+def _to_preview(post: SocialPost, zone: ZoneInfo) -> dict[str, object]:
+    """`SocialPost` をプレビュー1件ぶんの表示データにする。"""
+    return {
+        "id": post.id,
+        "position": post.position,
+        "article_title": post.article_title,
+        "segments": _body_segments(post.body),
+        "link": _preview_link(post.body),
+        # 画像は `/artifacts/` 経由で実物を出す。キーの文字だけを見せても
+        # 「添付されるはず」の確認にしかならない。
+        "image_key": post.image_key,
+        "weighted_length": post.weighted_length,
+        "status_label": _POST_STATUS_LABELS[post.status],
+        "scheduled_at": post.scheduled_at.astimezone(zone) if post.scheduled_at else None,
+        "tweet_id": post.tweet_id,
+    }
+
+
+@router.get("/x/posts/{post_id}/preview", response_class=HTMLResponse)
+async def x_post_preview(
+    request: Request,
+    post_id: int,
+    posts: SocialPostRepository = Depends(get_posts),
+    config: Config = Depends(get_config),
+) -> HTMLResponse:
+    """出る前の投稿を X の見え方で確認する。
+
+    スレッド全体を position 順に出す。リンクと画像を背負うのは先頭の
+    1件だけなので、2件目だけを見ると「リンクが無い」ように見える。
+
+    **見つからないときも 200 で返す。** htmx はエラー応答で対象を
+    差し替えないため、404 にするとモーダルには前に開いた投稿の内容が
+    残る。「別の投稿が出ている」のがこの画面で最悪の見え方。
+
+    Args:
+        request: FastAPIリクエスト
+        post_id: プレビューする投稿の id
+        posts: 投稿の保存先
+        config: 設定（表示タイムゾーン）
+
+    Returns:
+        HTMLResponse: プレビューのパーシャルHTML
+    """
+    zone = ZoneInfo(config.schedule_timezone)
+    thread = posts.list_thread(post_id)
+    return templates.TemplateResponse(
+        request,
+        "partials/x_post_preview.html",
+        {
+            "thread": [_to_preview(post, zone) for post in thread],
+            "max_weighted": X_MAX_WEIGHTED_LENGTH,
+        },
+    )

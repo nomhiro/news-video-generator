@@ -1,0 +1,82 @@
+<!--
+  投稿プレビュー。
+
+  X の見え方をそのまま作る（白地・X の青・16px 相当の本文）。アプリの
+  配色に寄せないのは、これが「アプリの中のカード」ではなく「実際に
+  こう出る」ことを確かめる道具だから。
+
+  画像がある投稿にはリンクカードを描かない。X の実際の振る舞いがそれで、
+  だからこそ本文に媒体名と URL を両方置いている（CLAUDE.md 参照）。
+  ここを両方出す形に変えると、その判断の理由が画面から消える。
+-->
+{% if not thread %}
+<p class="text-sm text-ink/60 py-6 text-center">この投稿は見つかりませんでした</p>
+{% else %}
+<div class="space-y-3">
+    <div class="rounded-xl bg-x-canvas text-x-text border border-x-line p-4">
+        {% for post in thread %}
+        <article class="flex gap-3">
+            <div class="flex flex-col items-center shrink-0">
+                {# アバターは実物を持っていないので伏せる。偽のハンドルを
+                   描くと、確認したい本文よりそこに目が行く。 #}
+                <div class="w-10 h-10 rounded-full bg-x-line" aria-hidden="true"></div>
+                {% if not loop.last %}
+                {# スレッドの縦線。2件目以降が返信であることは、線が無いと
+                   別々の投稿と区別できない。 #}
+                <div class="w-0.5 flex-1 bg-x-line mt-1" aria-hidden="true"></div>
+                {% endif %}
+            </div>
+
+            <div class="flex-1 min-w-0 {% if not loop.last %}pb-4{% endif %}">
+                <div class="flex items-center gap-1.5 text-[15px] leading-5">
+                    <span class="font-semibold">自動投稿アカウント</span>
+                    <span class="text-x-muted">·</span>
+                    <span class="text-x-muted tnum text-[13px]">
+                        {{ post.scheduled_at.strftime('%m/%d %H:%M') if post.scheduled_at else "予定未定" }}
+                    </span>
+                </div>
+
+                <p class="mt-1 text-[15px] leading-6 whitespace-pre-wrap break-words">{% for segment in post.segments %}{% if segment.kind == "link" %}<a href="{{ segment.value }}" target="_blank" rel="noopener noreferrer" class="text-x-link hover:underline">{{ segment.value }}</a>{% else %}{{ segment.value }}{% endif %}{% endfor %}</p>
+
+                {% if post.image_key %}
+                <img src="/artifacts/{{ post.image_key | urlencode }}"
+                     alt="この投稿に添付される画像カード"
+                     loading="lazy"
+                     class="mt-3 w-full rounded-2xl border border-x-line">
+                {% elif post.link %}
+                <a href="{{ post.link.url }}" target="_blank" rel="noopener noreferrer"
+                   class="mt-3 block rounded-2xl border border-x-line overflow-hidden
+                          hover:bg-x-line/25 focus-visible:outline focus-visible:outline-2
+                          focus-visible:outline-x-link">
+                    <div class="px-3 py-2.5">
+                        <p class="text-[13px] text-x-muted">{{ post.link.domain }}</p>
+                        <p class="text-[15px] mt-0.5 line-clamp-2">{{ post.article_title }}</p>
+                    </div>
+                </a>
+                {% endif %}
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+
+    {# 運用の情報はカードの外に出す。X には出ないものをカードの中に
+       混ぜると、プレビューが何を再現しているのか分からなくなる。 #}
+    <div class="text-xs text-ink/60 space-y-1">
+        {% for post in thread %}
+        <div class="flex items-center gap-3">
+            <span class="tnum">{{ post.weighted_length }}/{{ max_weighted }}</span>
+            <span>{{ post.status_label }}</span>
+            {% if post.image_key %}
+            <span>画像あり</span>
+            {% else %}
+            <span>画像なし</span>
+            {% endif %}
+            {% if post.tweet_id %}
+            <a href="https://x.com/i/status/{{ post.tweet_id }}" target="_blank"
+               rel="noopener noreferrer" class="text-teal hover:underline">X で見る</a>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}

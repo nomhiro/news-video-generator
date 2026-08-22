@@ -22,6 +22,28 @@
                 </div>
             </div>
             <div class="flex gap-2">
+                <!--
+                  プレビュー。アップロードは取り消せない操作なので、
+                  その前に実物を見る場所が要る。字幕の折り返しや音声の
+                  有無は ffprobe では分からず、再生して初めて分かる
+                  （無音のまま5本公開した前例がある）。
+                -->
+                <button
+                    type="button"
+                    class="px-3 py-1.5 rounded text-sm font-medium border border-ink/20
+                           hover:bg-ink/5 transition-colors flex items-center gap-1 whitespace-nowrap
+                           focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal
+                           video-preview-btn"
+                    data-preview-url="/artifacts/{{ video.key | urlencode }}"
+                    data-title="{{ video.title | default(video.filename, true) }}"
+                    data-description="{{ video.description }}"
+                    title="動画を再生して確認"
+                >
+                    <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z"/>
+                    </svg>
+                    プレビュー
+                </button>
                 <!-- YouTube Upload Button -->
                 <button
                     type="button"
