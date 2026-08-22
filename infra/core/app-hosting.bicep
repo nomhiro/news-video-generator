@@ -107,6 +107,32 @@ param authTenantId string = ''
 自分だけに絞る。''')
 param authAllowedPrincipalId string = ''
 
+// --- X（旧 Twitter）への自動投稿 ---
+//
+// ここで渡すのは**アプリのクライアント資格情報だけ**。トークン本体
+// （refresh token を含む）は Blob の tokens コンテナにあり、ローカルで
+// 認証して送る（コンテナの中では PKCE を完了できない）。
+//
+// **これが無いとトークンだけ送っても投稿できない。** アクセストークンは
+// 短命（既定 7200 秒）で、更新は client_id / client_secret の Basic 認証を
+// 要求する（src/social/x_auth.py の HttpTokenExchange）。最初の更新で
+// XTokenExpiredError になり、投稿は NEEDS_REVIEW に落ちる。
+// config.py の既定は空文字（任意）なので、**渡し忘れても起動は成功し、
+// 画面は「未認証」としか言わない**——実際にこの形で気付かないまま
+// 投稿できない状態が続いた（issue #28）。
+//
+// X_REDIRECT_URI は渡さない。使うのは scripts/authorize_x.py（ローカルの
+// PKCE）だけで、refresh_token グラントは redirect_uri を送らない。
+// X_POSTING_ENABLED も渡さない。投稿スイッチの権威は Azure Files 上の
+// data/x_posting.json（src/social/switch.py）で、env はファイルが無いときの
+// 初期値でしかない。有効化は画面から行う。
+@description('X の OAuth 2.0 クライアントID。機密ではないので env に直接入れる')
+param xClientId string = ''
+
+@secure()
+@description('X の OAuth 2.0 クライアントシークレット。空なら secret と env を作らない')
+param xClientSecret string = ''
+
 // --- 状態の永続化（Azure Files） ---
 
 @description('状態を置くファイル共有のストレージアカウント名。空ならマウントしない')
@@ -240,6 +266,15 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
 // レジストリが GHCR（public）になったため、AcrPull のロール割当は要らない。
 // マネージド ID は Blob（生成物とトークン）へのアクセスにだけ使う。
 
+// X のシークレット宣言と secretRef を**同じ式**で出すために名前を付ける。
+// 片方だけ出すと壊れる:
+//   - secretRef だけ  → 存在しないシークレットを指してリビジョンが作られない
+//   - 宣言だけ        → 参照されない死んだシークレットが残る
+//   - 空値の宣言      → Container Apps は空のシークレット値を受け付けない
+// 判定は**シークレット側の param**で行う。xClientId で判定すると、ID だけ
+// 設定されたときに空値のシークレットを作ってしまう。
+var xSecretConfigured = !empty(xClientSecret)
+
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'ca-${take(envSlug, 20)}-${resourceToken}'
   location: location
@@ -286,7 +321,15 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                 name: 'auth-client-secret'
                 value: authClientSecret
               }
+            ],
+        xSecretConfigured
+          ? [
+              {
+                name: 'x-client-secret'
+                value: xClientSecret
+              }
             ]
+          : []
       )
     }
     template: {
@@ -306,120 +349,141 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                   mountPath: stateMountPath
                 }
               ]
-          env: [
-            // --- AI サービス ---
-            {
-              name: 'AZURE_OPENAI_ENDPOINT'
-              value: scriptEndpoint
-            }
-            {
-              name: 'AZURE_OPENAI_API_KEY'
-              secretRef: 'azure-openai-api-key'
-            }
-            {
-              name: 'AZURE_OPENAI_DEPLOYMENT'
-              value: scriptDeployment
-            }
-            {
-              name: 'AZURE_OPENAI_IMAGE_ENDPOINT'
-              value: imageEndpoint
-            }
-            {
-              name: 'AZURE_OPENAI_IMAGE_API_KEY'
-              secretRef: 'azure-openai-image-api-key'
-            }
-            {
-              name: 'AZURE_OPENAI_IMAGE_DEPLOYMENT'
-              value: imageDeployment
-            }
-            {
-              name: 'AZURE_SPEECH_API_KEY'
-              secretRef: 'azure-speech-api-key'
-            }
-            {
-              name: 'AZURE_SPEECH_REGION'
-              value: speechRegion
-            }
-            // --- 生成物とトークンの保存先 ---
-            // こちらはマネージド ID で認証するのでシークレットが無い
-            // （AZURE_CLIENT_ID は公開情報）。
-            {
-              name: 'ARTIFACT_STORE'
-              value: empty(artifactAccountUrl) ? 'local' : 'blob'
-            }
-            {
-              name: 'AZURE_STORAGE_ACCOUNT_URL'
-              value: artifactAccountUrl
-            }
-            {
-              name: 'AZURE_STORAGE_CONTAINER'
-              value: artifactContainerName
-            }
-            {
-              // トークンもコンテナのファイルシステムには置けない
-              // （再起動で消え、YouTube の OAuth はコンテナ内で完了できない）。
-              name: 'TOKEN_STORE'
-              value: empty(artifactAccountUrl) ? 'local' : 'blob'
-            }
-            {
-              name: 'AZURE_TOKEN_CONTAINER'
-              value: tokenContainerName
-            }
-            {
-              // DefaultAzureCredential にどのマネージド ID を使うかを教える。
-              // ユーザー割り当て ID では省略できず、省略するとシステム割り当てを
-              // 探して認証に失敗する。
-              name: 'AZURE_CLIENT_ID'
-              value: identity.properties.clientId
-            }
-            {
-              name: 'NEWS_DATA_DIR'
-              value: '${stateMountPath}/news'
-            }
-            {
-              // ジョブ表は**マウントの外**（コンテナのローカルディスク）に置く。
-              //
-              // Azure Files（SMB）の上の SQLite は使えなかった。journal_mode を
-              // DELETE にしても CREATE TABLE で固まり、リビジョンが
-              // Activating のまま起動しない（同じイメージでローカルディスクに
-              // 向けると25秒で起動する、という切り分けまで実測した）。
-              //
-              // 引き換えに、リビジョン更新や再起動でジョブの履歴と実行待ちは
-              // 消える。記事の選択状態（共有に置いた JSON）は残るので、
-              // 選び直しは要らない。ジョブまで永続化したいなら
-              // DATABASE_URL を PostgreSQL に向ける。
-              name: 'DATABASE_URL'
-              value: 'sqlite:////app/state/newsvideo.db'
-            }
-            // --- 定期実行 ---
-            // 生成までを自動で行い、YouTube への公開はしない
-            // （人が確認して押す。収益化では「再利用されたコンテンツ」
-            //  ポリシーがリスクなので、目視の価値が大きい）。
-            {
-              name: 'SCHEDULE_ENABLED'
-              value: string(scheduleEnabled)
-            }
-            {
-              name: 'SCHEDULE_TIME'
-              value: scheduleTime
-            }
-            {
-              name: 'SCHEDULE_TIMEZONE'
-              value: scheduleTimezone
-            }
-            {
-              name: 'SCHEDULE_FORMATS'
-              value: scheduleFormats
-            }
-            {
-              name: 'SCHEDULE_ARTICLES_PER_FORMAT'
-              value: string(scheduleArticlesPerFormat)
-            }
-            {
-              name: 'WEB_HOST'
-              value: '0.0.0.0'
-            }
-          ]
+          env: concat(
+            [
+              // --- AI サービス ---
+              {
+                name: 'AZURE_OPENAI_ENDPOINT'
+                value: scriptEndpoint
+              }
+              {
+                name: 'AZURE_OPENAI_API_KEY'
+                secretRef: 'azure-openai-api-key'
+              }
+              {
+                name: 'AZURE_OPENAI_DEPLOYMENT'
+                value: scriptDeployment
+              }
+              {
+                name: 'AZURE_OPENAI_IMAGE_ENDPOINT'
+                value: imageEndpoint
+              }
+              {
+                name: 'AZURE_OPENAI_IMAGE_API_KEY'
+                secretRef: 'azure-openai-image-api-key'
+              }
+              {
+                name: 'AZURE_OPENAI_IMAGE_DEPLOYMENT'
+                value: imageDeployment
+              }
+              {
+                name: 'AZURE_SPEECH_API_KEY'
+                secretRef: 'azure-speech-api-key'
+              }
+              {
+                name: 'AZURE_SPEECH_REGION'
+                value: speechRegion
+              }
+              // --- 生成物とトークンの保存先 ---
+              // こちらはマネージド ID で認証するのでシークレットが無い
+              // （AZURE_CLIENT_ID は公開情報）。
+              {
+                name: 'ARTIFACT_STORE'
+                value: empty(artifactAccountUrl) ? 'local' : 'blob'
+              }
+              {
+                name: 'AZURE_STORAGE_ACCOUNT_URL'
+                value: artifactAccountUrl
+              }
+              {
+                name: 'AZURE_STORAGE_CONTAINER'
+                value: artifactContainerName
+              }
+              {
+                // トークンもコンテナのファイルシステムには置けない
+                // （再起動で消え、YouTube の OAuth はコンテナ内で完了できない）。
+                name: 'TOKEN_STORE'
+                value: empty(artifactAccountUrl) ? 'local' : 'blob'
+              }
+              {
+                name: 'AZURE_TOKEN_CONTAINER'
+                value: tokenContainerName
+              }
+              {
+                // DefaultAzureCredential にどのマネージド ID を使うかを教える。
+                // ユーザー割り当て ID では省略できず、省略するとシステム割り当てを
+                // 探して認証に失敗する。
+                name: 'AZURE_CLIENT_ID'
+                value: identity.properties.clientId
+              }
+              {
+                name: 'NEWS_DATA_DIR'
+                value: '${stateMountPath}/news'
+              }
+              {
+                // ジョブ表は**マウントの外**（コンテナのローカルディスク）に置く。
+                //
+                // Azure Files（SMB）の上の SQLite は使えなかった。journal_mode を
+                // DELETE にしても CREATE TABLE で固まり、リビジョンが
+                // Activating のまま起動しない（同じイメージでローカルディスクに
+                // 向けると25秒で起動する、という切り分けまで実測した）。
+                //
+                // 引き換えに、リビジョン更新や再起動でジョブの履歴と実行待ちは
+                // 消える。記事の選択状態（共有に置いた JSON）は残るので、
+                // 選び直しは要らない。ジョブまで永続化したいなら
+                // DATABASE_URL を PostgreSQL に向ける。
+                name: 'DATABASE_URL'
+                value: 'sqlite:////app/state/newsvideo.db'
+              }
+              // --- 定期実行 ---
+              // 生成までを自動で行い、YouTube への公開はしない
+              // （人が確認して押す。収益化では「再利用されたコンテンツ」
+              //  ポリシーがリスクなので、目視の価値が大きい）。
+              {
+                name: 'SCHEDULE_ENABLED'
+                value: string(scheduleEnabled)
+              }
+              {
+                name: 'SCHEDULE_TIME'
+                value: scheduleTime
+              }
+              {
+                name: 'SCHEDULE_TIMEZONE'
+                value: scheduleTimezone
+              }
+              {
+                name: 'SCHEDULE_FORMATS'
+                value: scheduleFormats
+              }
+              {
+                name: 'SCHEDULE_ARTICLES_PER_FORMAT'
+                value: string(scheduleArticlesPerFormat)
+              }
+              // --- X（旧 Twitter）への自動投稿 ---
+              // client_id は機密でないので通常の value。空でも構わない
+              // （このテンプレートは AZURE_STORAGE_ACCOUNT_URL などで既に
+              //  空の値を渡している）。空のまま届いた場合は画面が
+              //  「X_CLIENT_ID が未設定」と名前で言う。
+              {
+                name: 'X_CLIENT_ID'
+                value: xClientId
+              }
+              {
+                name: 'WEB_HOST'
+                value: '0.0.0.0'
+              }
+            ],
+            // secret 側だけ条件付き。上の secrets 配列と**同じ式**で分岐する
+            // （ずらすと存在しないシークレットを指してリビジョンが作られない）。
+            xSecretConfigured
+              ? [
+                  {
+                    name: 'X_CLIENT_SECRET'
+                    secretRef: 'x-client-secret'
+                  }
+                ]
+              : []
+          )
         }
       ]
       // 状態の置き場所。マウントしないと、リビジョン更新のたびに

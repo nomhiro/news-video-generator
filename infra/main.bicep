@@ -125,6 +125,16 @@ param authClientSecret string = ''
 @description('テナントID。省略時は現在のテナント')
 param authTenantId string = ''
 
+// X の資格情報は Azure のリソースではなく X Developer Portal 発行なので、
+// postprovision フック（az CLI でキーを取る）では埋められない。
+// azd env set X_CLIENT_ID / X_CLIENT_SECRET で渡す。
+@description('X の OAuth 2.0 クライアントID')
+param xClientId string = ''
+
+@secure()
+@description('X の OAuth 2.0 クライアントシークレット')
+param xClientSecret string = ''
+
 // azd の慣習に合わせたタグ。azd がリソースを環境に紐付けるのに使う。
 var tags = {
   'azd-env-name': environmentName
@@ -252,6 +262,8 @@ module appHosting 'core/app-hosting.bicep' = if (deployApp) {
     authClientId: authClientId
     authClientSecret: authClientSecret
     authTenantId: empty(authTenantId) ? subscription().tenantId : authTenantId
+    xClientId: xClientId
+    xClientSecret: xClientSecret
     // 単一テナントのアプリ登録なので、指定しないとテナント内の全員が
     // サインインできる。自分（principalId）だけに絞る。
     authAllowedPrincipalId: principalId

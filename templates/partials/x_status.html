@@ -50,10 +50,34 @@
         {% endif %}
     </div>
 
-    <div class="text-xs">
-        {% if authenticated %}
+    <div class="text-xs space-y-2">
+        {# キーとトークンは直交する。キーが無いと、トークンがあっても更新
+           （refresh）ができず投稿は要確認に落ちるので、原因側を先に出し、
+           このとき「認証済み」の緑は出さない（出すと問題が画面から消える）。 #}
+        {% if missing_credentials %}
+        <div class="text-vermilion space-y-1">
+            <p>X のクライアント資格情報が設定されていません。
+                {% if authenticated %}
+                トークンは保存されていますが、更新できないため投稿は「要確認」に落ちます。
+                {% endif %}
+            </p>
+            <ol class="list-decimal list-inside text-ink/70 space-y-0.5">
+                {% for name in missing_credentials %}
+                <li><code class="tnum bg-ink/5 px-1 rounded">azd env set {{ name }} &lt;値&gt;</code></li>
+                {% endfor %}
+                <li>現行のイメージを
+                    <code class="tnum bg-ink/5 px-1 rounded">SERVICE_WEB_IMAGE_NAME</code>
+                    に入れてから
+                    <code class="tnum bg-ink/5 px-1 rounded">azd provision</code>
+                    （入れ忘れると古いイメージまたはプレースホルダに巻き戻る）
+                </li>
+            </ol>
+        </div>
+        {% endif %}
+
+        {% if authenticated and not missing_credentials %}
         <span class="text-teal">X 認証済み</span>
-        {% else %}
+        {% elif not authenticated %}
         <div class="text-vermilion space-y-1">
             <p>X が未認証です。この画面から再認証はできません。次の手順でお願いします。</p>
             <ol class="list-decimal list-inside text-ink/70 space-y-0.5">

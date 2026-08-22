@@ -55,6 +55,12 @@
     },
     "authTenantId": {
       "value": "${AUTH_TENANT_ID=}"
+    },
+    "xClientId": {
+      "value": "${X_CLIENT_ID=}"
+    },
+    "xClientSecret": {
+      "value": "${X_CLIENT_SECRET=}"
     }
   }
 }

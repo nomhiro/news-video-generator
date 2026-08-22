@@ -1147,12 +1147,31 @@ def _x_status_context(
         config.x_cost_per_post_with_link_usd,
         config.x_cost_per_read_usd,
     )
+    # 不足している環境変数の**名前だけ**を渡す（値は渡さない。
+    # get_secret_value() は真偽の判定にしか使わない）。名前を出すのは、
+    # それがそのまま `azd env set` の引数になるから。
+    #
+    # トークンの有無（authenticated）とは**直交する**。資格情報が無いと
+    # トークンがあっても更新（refresh）できず、投稿は要確認に落ちる。
+    # 実際にこの状態で「未認証」としか出ず、原因が画面から分からなかった
+    # （issue #28）。
+    missing_credentials = [
+        name
+        for name, value in (
+            ("X_CLIENT_ID", config.x_client_id),
+            ("X_CLIENT_SECRET", config.x_client_secret.get_secret_value()),
+        )
+        if not value
+    ]
     return {
         "enabled": switch.is_enabled(),
         # 「概算」と明示する。実際の課金は X 側の集計なので一致を保証できない
         "spent_usd": spent,
         "budget_usd": config.x_monthly_budget_usd,
         "authenticated": load_credentials(tokens) is not None,
+        # 真偽値を別に持たせない（テンプレートは空リストで判定できる）。
+        # 状態の源が2つあると、片方だけ直したときに食い違う
+        "missing_credentials": missing_credentials,
         # 上限に達していると、スイッチが有効でもワーカーは送信しない
         # （行は SCHEDULED のまま残る）。スイッチの語だけを見せると
         # 「稼働中なのに出ない」ことの説明が画面に無くなる。

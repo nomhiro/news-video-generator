@@ -76,6 +76,53 @@ PKCE はブラウザのリダイレクトを要求するのでコンテナ内で
       `@NORRTechLab` として認証されていることを確認。トークンの値は表示されなかった
 - [ ] 画面の X ステータスが「認証済み」になる（未確認。Web を起動して見る）
 
+## 2.5 クラウド側に資格情報とトークンを渡す
+
+ローカルで認証しても、Container App の画面は「未認証」と出ていた。原因は2つあり、
+**片方だけ直しても投稿できない**（issue #28、2026-08-22 に両方を実測で確認）。
+
+- Blob の `tokens` コンテナに `x_token.json` が無かった（入っていたのは
+  `youtube_token.json` / `youtube_client_secrets.json` の2件だけ）
+- **`X_CLIENT_ID` / `X_CLIENT_SECRET` を Container App に渡す配線が `infra/` に
+  1件も無かった**。トークンだけ入れても、更新（refresh）が Basic 認証で
+  client_id / client_secret を要求するので最初の更新で失効扱いになり、投稿は
+  `NEEDS_REVIEW` に落ちる
+
+**env を先、トークンを後**に入れる。env の反映は新しいリビジョンを要求する
+（`Config` は起動時に env を読む）が、トークンの反映は要求しない
+（`load_credentials` は呼び出しごとに保存先を読む）。逆順にすると
+「トークンはあるがキーが無い」窓ができ、`PostWorker` が更新を試みて要確認を積む。
+
+- [ ] `azd env set X_CLIENT_ID <値>` / `azd env set X_CLIENT_SECRET <値>`
+- [ ] **`SERVICE_WEB_IMAGE_NAME` を現行イメージで埋める。** 「未設定ならプレースホルダ」
+      だけでなく、**値が入っていても古い**ことがある（実測で稼働中のイメージより
+      129コミット前を指していた。CD はこの値を更新しない）。巻き戻すと `consumed` キーを
+      読めない旧コードで記事 JSON が全部読めなくなる
+
+      ```bash
+      azd env set SERVICE_WEB_IMAGE_NAME "$(az containerapp show         -n ca-newsvideo-img-mimujd6zyifm6 -g rg-newsvideo-img         --query 'properties.template.containers[0].image' -o tsv)"
+      ```
+- [ ] `azd provision --preview` で what-if を読む（env / secrets の変更と、
+      イメージが現行のままであることだけを確認）→ `azd provision`。
+      生成が走っていない時間帯に打つ（リビジョン更新で実行待ちのジョブと履歴が消える）
+- [ ] 画面から「X キー未設定」が消えて「未認証」だけが残る（= env が届いた証拠）
+- [ ] **ローカルの投稿を止める。** `.env` の `X_POSTING_ENABLED=false` にして
+      ローカルの Web / スケジューラを落とす。refresh token は単回使用でローテートするので、
+      ローカルと Azure が同じトークンを持つと片方の更新でもう片方が死ぬ。記事の消費記録
+      （`NewsArticle.consumed`）も別物なので、両方動くと同じ記事が二重投稿される
+- [ ] クラウド側のトークンを用意する。**再認証して Blob に直書きするのがいちばん安全**
+      （ローカルに残ったトークンが後から更新して Azure 側を殺す経路を作らない）。
+      `.env` の `AZURE_STORAGE_ACCOUNT_URL` はプレースホルダのままなので、環境変数で
+      上書きする（実際の環境変数は `.env` より優先される）
+
+      ```powershell
+      $env:TOKEN_STORE="blob"
+      $env:AZURE_STORAGE_ACCOUNT_URL="https://stnewsvideomimujd6zyifm6.blob.core.windows.net"
+      uv run python -m scripts.authorize_x
+      ```
+- [ ] ローカルの `x_token.json` を退避する（削除ではなく改名）
+- [ ] 画面が「X 認証済み」になる（再起動は要らない）
+
 ## 3. 下書き生成の疎通（2026-08-16 に確認済み）
 
 - [x] `PostGenerator._complete` の `responses.parse`（Structured Outputs）が
