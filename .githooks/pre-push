@@ -47,6 +47,14 @@ command -v node >/dev/null 2>&1 || {
 	exit 1
 }
 
+# ルート側の node_modules（Tailwind の CLI）。無いと
+# tests/test_css_build.py が静かに skip され、「生成済み CSS が古い」ことに
+# 気付けないまま push できてしまう。ffmpeg / remotion と同じ理由の門。
+[ -f node_modules/@tailwindcss/cli/dist/index.mjs ] || {
+	echo "pre-push: Tailwind の CLI がありません。npm install を実行してください" >&2
+	exit 1
+}
+
 # ロックファイルの更新漏れを検出する。pyproject.toml を触って uv.lock を
 # 更新していないと落ちる。
 #
