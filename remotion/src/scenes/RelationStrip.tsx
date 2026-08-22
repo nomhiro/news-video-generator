@@ -5,11 +5,41 @@ import type { Zone } from "../zones";
 
 /** 項目ラベルの上限サイズ。1行の帯なので `DiagramBox` の名札より小さい。 */
 const ITEM_MAX_SIZE = 44;
-/** 関係ラベルの上限サイズ。 */
-const RELATION_MAX_SIZE = 38;
-/** コネクタ（線・矢印）の幅。関係ラベルはこの上に重ねて浮かせる。 */
-const CONNECTOR_WIDTH = 140;
+/**
+ * 関係ラベルの上限サイズ。
+ *
+ * **38 → 32（2026-08-22）。プレートがコネクタの線を完全に覆っていた。**
+ * 旧実装はプレートを `top: -relationSize * 1.05` で持ち上げていたが、
+ * span の行ボックスは `fontSize * 1.4`（既定の line-height）＋パディングで、
+ * **持ち上げ量よりつねに背が高い**。実測（`relation="義務化"`、37.3px）では
+ * プレートが y=1415〜1471 を占め、線は y=1470 ——完全に隠れていた。画面では
+ * 「A　[箱]　B」と3語が並んでいるだけに見え、矢先だけが箱の右下から
+ * 覗いている状態だった。**関係を示すはずのストリップから関係が消えていた。**
+ *
+ * 直し方は「持ち上げ量を増やす」ではない。それだとゾーン（120px）の上端を
+ * 越える。プレートの**下端を線から一定距離だけ離す**基準に変え、上限サイズは
+ * 「その位置でプレートがゾーンに収まる」値から逆算する:
+ * プレート高さ = `RELATION_MAX_SIZE + PLATE_PADDING_Y * 2` = 44px、
+ * 下端が線の 8px 上（ゾーン下端から 78px）なので上端は 1418px——
+ * ゾーン上端 1410px の内側に収まる。
+ */
+const RELATION_MAX_SIZE = 32;
+/**
+ * コネクタ（線・矢印）の幅。
+ *
+ * **140 → 240。** 関係ラベルは `CONNECTOR_WIDTH` からパディングを引いた幅に
+ * 収まるよう縮小されるので、幅を広げないと最悪ケース（8字）のラベルが
+ * 小さくなる。240 なら 8字で (240-28)/8 = 26.5px で、既知の負債として
+ * 記録されている 27.5px とほぼ同じ——**線を見せるために文字を犠牲にしない**。
+ * 項目ラベルに残る幅は (1080-112-240-56)/2 = 336px で、8字なら42pxまで出せる
+ * （上限44には僅かに届かないが、`fitFontSize` が縮めるので溢れない）。
+ */
+const CONNECTOR_WIDTH = 240;
 const CONNECTOR_HEIGHT = 32;
+/** プレートの下端を線からどれだけ離すか。0 だと線に接して読みにくい。 */
+const PLATE_LINE_CLEARANCE = 8;
+/** 関係ラベルのプレートの上下パディング。高さを予測可能にするため明示する。 */
+const PLATE_PADDING_Y = 6;
 /** 項目とコネクタの間の隙間。 */
 const GAP = 28;
 /** ストリップの左右に残す余白。 */
@@ -147,21 +177,28 @@ export const RelationStrip: React.FC<{
           arrow={arrow}
           drawProgress={relationReveal.drawProgress}
         />
-        {/* 線の真上ではなく上に離して置く（線とラベルが重なる不具合は
-            `Compare.tsx` の旧実装で実測済み）。帯の高さが120pxしか無いので、
-            離す距離は控えめにする。 */}
+        {/* **位置は「下端を線から離す」で決める。** 上端を font-size の倍数で
+            持ち上げる書き方（旧実装）は、span の行ボックスが font-size より
+            背が高いことを見落としており、プレートが線を完全に覆っていた
+            （`RELATION_MAX_SIZE` のコメントに実測値を残した）。下端基準なら
+            文字サイズが変わってもクリアランスは変わらない。
+            `lineHeight: 1` を明示するのは、高さを
+            `relationSize + PLATE_PADDING_Y * 2` に確定させてゾーンに収まる
+            ことを計算で言えるようにするため（既定の "normal" はフォント依存で、
+            ローカル Yu Gothic と本番 Noto Sans CJK で変わる）。 */}
         <span
           style={{
             position: "absolute",
-            top: -relationSize * 1.05,
+            bottom: CONNECTOR_HEIGHT / 2 + PLATE_LINE_CLEARANCE,
             left: "50%",
             transform: "translateX(-50%)",
             fontFamily: FONT_STACK,
             fontSize: relationSize,
+            lineHeight: 1,
             fontWeight: 900,
             color: COLORS.text,
             backgroundColor: COLORS.plate,
-            padding: `2px ${RELATION_PLATE_PADDING_X}px`,
+            padding: `${PLATE_PADDING_Y}px ${RELATION_PLATE_PADDING_X}px`,
             borderRadius: 8,
             whiteSpace: "nowrap",
           }}

@@ -98,6 +98,32 @@ class FormatSpec:
         low, high = self.total_words
         return low * 6, high * 6
 
+    def segment_char_cap(self, language: str) -> int:
+        """1セグメントの文字数の上限を返す。
+
+        **全体の予算だけでは字幕が壊れるのを防げない。** `char_budget` は
+        ナレーション全体しか見ないので、6セグメント合計 180〜240文字の枠の中で
+        「20文字のセグメントと50文字のセグメント」という配分が通る。字幕は
+        セグメント単位で1画面に出るため、長い側が字幕ゾーンに収まらない。
+        実測（2026-08-22 のショート1本）では50文字前後のセグメントが3つあり、
+        字幕が4行になって1行目が切れていた（尺の約52%）。
+
+        上限は目標の上限（short なら40文字）に2割の余裕を足した値。
+        きっちり40で弾くと、まともな言い回しでも1〜2文字の超過で引き直しが
+        走り、API 呼び出しを無駄に使う。48文字は
+        `Subtitle.tsx` の見積り（46px で1行あたり約16.8字相当）で3〜4行に
+        収まる範囲で、レンダラ側の自動縮小に頼らずに済む。
+
+        Args:
+            language: 言語コード ("ja" or "en")
+
+        Returns:
+            int: 1セグメントの上限文字数
+        """
+        _, high = self.chars_per_segment if language == "ja" else self.words_per_segment
+        scale = 1 if language == "ja" else 6
+        return round(high * scale * 1.2)
+
 
 # 分量は目標尺から逆算する。読み上げ速度の実測値は
 # src/models/script.py の estimate_duration_sec を参照（日本語 6.0 文字/秒、

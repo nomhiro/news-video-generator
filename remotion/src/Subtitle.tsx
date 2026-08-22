@@ -1,6 +1,98 @@
-import { AbsoluteFill, interpolate, useCurrentFrame } from "remotion";
+import { AbsoluteFill, interpolate, useCurrentFrame, useVideoConfig } from "remotion";
+import { estimateEmWidth } from "./fitText";
 import { COLORS, FONT_STACK } from "./theme";
 import type { Zone } from "./zones";
+
+/**
+ * 字幕の基準フォントサイズ。
+ *
+ * **54 → 46（2026-08-22）。54px では4行の字幕がゾーンに入らなかった。**
+ * 実測（1080x1920 / 46.2秒のショート1本）で、6シーンのうち3シーンの字幕が
+ * 1行目を横一直線に断ち切られており、**尺の約52%（24秒）で文字が読めない**
+ * 状態だった。原因は下の `SCRIM_*` のコメントに書いたパディングの食い潰しと、
+ * 「4行ぶんの高さがゾーンに無い」ことの二重。
+ *
+ * 46 の根拠は逆算である。ゾーン350px からパディング（12 + 72）を引いた
+ * 266px に、行送り `LINE_HEIGHT`（1.38）で**4行**が収まる最大値が
+ * 266 / (4 × 1.38) = 48.2px。48 では余裕が1pxしか無く、行送りの丸めや
+ * フォントの差（ローカル Yu Gothic / 本番 Noto Sans CJK）を吸収できないので
+ * 46 を採る（4行 = 254px、余裕12px）。
+ *
+ * **1〜4行では常にこのサイズで描く。** シーンごとに字幕の大きさが変わると
+ * それ自体が粗く見えるので、縮小は「4行に収まらない病的な入力」に限る
+ * （`fitSubtitleSize`）。
+ */
+const BASE_SIZE = 46;
+
+/**
+ * 行送り（フォントサイズに対する比）。
+ *
+ * 1.45 → 1.38。4行をゾーンに収めるために詰めた。日本語の字幕としては
+ * まだ緩い方で、ffmpeg レンダラの drawtext は 76/64 = 1.19 で運用していた。
+ */
+const LINE_HEIGHT = 1.38;
+
+/**
+ * ゾーン上端に残す余白。
+ *
+ * 0 にすると最上行のアセンダがゾーン境界に接し、`overflow: hidden` の
+ * 丸め誤差1pxで文字の頭が削れる。**「切れていない」を画素で判定する検査
+ * （`tests/test_remotion_render_slow.py`）が境界行の明画素を見ている**ので、
+ * 意図せず接することそのものを避ける。
+ */
+const PADDING_TOP = 12;
+
+/**
+ * フレーム下端に残す余白。
+ *
+ * 96 → 72。4行ぶんの高さを作るために削った。縦動画の最下部はプラットフォーム
+ * の UI（タイトル・アカウント名）が重なるので 0 にはしない。
+ */
+const PADDING_BOTTOM = 72;
+
+/** 左右の余白。フレーム幅から引いて1行に使える幅を出す。 */
+const PADDING_X = 72;
+
+/**
+ * 1行に詰められる幅の、理論値に対する比。
+ *
+ * BudouX が挿入した ZWSP の位置でしか折り返せないため、行末には必ず
+ * 「次のフレーズが入り切らない」端数が残り、理論上の幅いっぱいまでは詰まらない。
+ * 実測フレーム（`fontSize=54`、使える幅 936px = 17.33em）での行の占有:
+ *
+ * - `サイレントAIユーザーにも新しい` → 15.1em（87%）
+ * - `Claudeの文章に、目に見えない` → 14.3em（82%）
+ * - `添えるだけで済む話が、` → 11.0em（63%、文の切れ目なので短い）
+ *
+ * 行数の見積りに使うのは「最も詰まった行」ではなく「平均的にどれだけ詰まるか」
+ * なので、上2つの実測（82〜87%）の下側を採って 0.82 とする。
+ * **過小に見積もると行数を多く数えて不必要に縮み、過大に見積もると
+ * 収まらない**。前者は読みにくくなるだけ、後者は文字が切れるので、
+ * 迷ったら過小側（小さい値）に寄せる。
+ */
+const LINE_PACKING = 0.82;
+
+/** 縮小の下限。これ以上小さいと字幕として読めない。 */
+const MIN_SIZE = 30;
+
+/**
+ * ゾーンに収まる最大のフォントサイズを返す。
+ *
+ * `BASE_SIZE` から1pxずつ下げ、見積り行数 × 行送りが使える高さに収まる
+ * 最初の値を採る。**連続式を解いて `ceil` の段差を無視する近似は使わない**
+ * ——`Headline` はその近似の段差を安全係数 0.85 で吸収しており、その係数は
+ * 実測に対して2度外れている（`Headline.tsx` のコメント参照）。ここは
+ * 候補が17個しか無いので、段差込みで素直に走査する方が正確で読みやすい。
+ */
+export function fitSubtitleSize(text: string, availableWidth: number, availableHeight: number) {
+  const em = estimateEmWidth(text);
+  for (let size = BASE_SIZE; size > MIN_SIZE; size -= 1) {
+    const emPerLine = (availableWidth / size) * LINE_PACKING;
+    const lines = Math.max(1, Math.ceil(em / emPerLine));
+    if (lines * size * LINE_HEIGHT <= availableHeight) return size;
+  }
+  return MIN_SIZE;
+}
 
 /**
  * 画面下の字幕。ナレーションのセグメントをそのまま出す。
@@ -14,12 +106,28 @@ import type { Zone } from "./zones";
  * 伸びるかに応じて字幕の開始位置も変わる必要がある（実測で図の下端と
  * 字幕が重なる不具合が見つかった）。ゾーンを1箇所で管理することで、
  * 図と字幕が同じ座標系を参照し、重なりが構造的に起きなくなる。
+ *
+ * **スクリムはテキストの箱に持たせない（2026-08-22）。** 以前は
+ * `padding: "160px 72px 96px"` を当てた div にグラデーションを敷いていた。
+ * グラデーションを滑らかに立ち上げるための上パディング160pxが**ゾーンの
+ * 高さ（350px）を食い**、テキストに使える高さは 350 − 160 − 96 = **94px**
+ * ——1.2行ぶんしか残っていなかった。3行（235px）ですでにゾーン上端を
+ * 越えており、`overflow: hidden` が上を切っていた（3行は境界の上が
+ * パディングだったので偶然無事、4行（313px）で1行目が切れた）。
+ * **スクリムはゾーン全体を覆う独立した層**にすれば、パディングは
+ * 「文字を端から離す」ぶんだけで済む。副作用として、切られた
+ * グラデーションが作っていた y=1570 の硬い横線も消える。
  */
 export const Subtitle: React.FC<{ text: string; zone: Zone }> = ({ text, zone }) => {
   const frame = useCurrentFrame();
+  const { width } = useVideoConfig();
   const opacity = interpolate(frame, [0, 6], [0, 1], {
     extrapolateRight: "clamp",
   });
+  const availableWidth = width - PADDING_X * 2;
+  const availableHeight = zone.height - PADDING_TOP - PADDING_BOTTOM;
+  const fontSize = fitSubtitleSize(text, availableWidth, availableHeight);
+
   return (
     // top・bottom の両方を明示し、`height` は既定の "100%" を打ち消して
     // "auto" にする。`AbsoluteFill` は既定で height:100% も持っており、
@@ -36,25 +144,33 @@ export const Subtitle: React.FC<{ text: string; zone: Zone }> = ({ text, zone })
         // 越えた先は図の領域で、そこに食い込めば直したはずの重なりが
         // 再発する。ゾーンの外には描かせないことで構造的に防ぐ
         // （読みにくさより重なりの方が実害が大きい、という判断は
-        // `Headline` の `maxHeight` と同じ）。
+        // `Headline` の `maxHeight` と同じ）。`fitSubtitleSize` が
+        // 収まるサイズを選んだ上での、最後の歯止め。
         overflow: "hidden",
         opacity,
       }}
     >
+      {/* スクリム。ゾーン全体を覆う独立した層にする（上のコメント参照）。
+          文字の箱に持たせるとパディングがテキスト領域を食う。 */}
+      <AbsoluteFill
+        style={{
+          background:
+            "linear-gradient(to top, rgba(0,0,0,0.80) 0%, rgba(0,0,0,0.58) 55%, rgba(0,0,0,0) 100%)",
+        }}
+      />
       <div
         style={{
-          padding: "160px 72px 96px",
-          background:
-            "linear-gradient(to top, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0.55) 55%, rgba(0,0,0,0) 100%)",
+          position: "relative",
+          padding: `${PADDING_TOP}px ${PADDING_X}px ${PADDING_BOTTOM}px`,
         }}
       >
         <span
           style={{
             fontFamily: FONT_STACK,
-            fontSize: 54,
+            fontSize,
             fontWeight: 700,
             color: COLORS.text,
-            lineHeight: 1.45,
+            lineHeight: LINE_HEIGHT,
             // `word-break: auto-phrase` を試したが実測で無効だった
             // （実際のフレームで「絞ったこ」/「とでした。」のように
             // 「ことでした」が割れた）。ブラウザのフレーズ推定に頼らず、
@@ -68,6 +184,10 @@ export const Subtitle: React.FC<{ text: string; zone: Zone }> = ({ text, zone })
             // 安全弁。通常は ZWSP の位置でしか折れないが、収まらない場合は
             // 任意の位置で折って画面外への溢れを防ぐ。
             overflowWrap: "anywhere",
+            // 影を足す理由: スクリムを1層に分けたぶん、地の明るい挿絵が
+            // 近い位置に来ても文字が沈まないようにする（挿絵は白地）。
+            textShadow: "0 2px 12px rgba(0,0,0,0.55)",
+            display: "block",
           }}
         >
           {text}

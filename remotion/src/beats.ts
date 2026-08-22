@@ -28,13 +28,40 @@ export const REVEAL_FRAMES = DRAW_FRAMES + FILL_FRAMES;
 const REVEAL_WINDOW_RATIO = 0.6;
 
 /**
+ * ビート1つぶんの間隔の上限（フレーム）。30fps で1秒。
+ *
+ * **これが無いと、要素の少ないシーンで画面が数秒間空になる。** ウィンドウを
+ * 要素数で等分する式は、要素が2個（`statement` の「章タグ → 見出し」）のとき
+ * 見出しをウィンドウの**末端**に置く。実測（1080x1920 / 46.2秒のショート）
+ * では、
+ *
+ * - 6秒のフックシーン: 見出しが出るのは **2.8秒後**（尺の47%）
+ * - 8秒の結論シーン: 見出しが出るのは **4.5秒後**（尺の56%）
+ *
+ * で、その間**画面の下半分（章タグから字幕までの650px）が空**だった。
+ * 「順番に出す」演出が「何も出ない」に化けており、`statement` は
+ * `compare`/`flow` よりビートが少ないぶん症状が重い。
+ *
+ * 上限を 30 フレームにした根拠は、**要素の多いシーンの間隔を変えないこと**。
+ * 同じ動画の `compare`/`flow`（5ビート）の実測間隔は約28.6フレームで、
+ * 30 を下回るのでこの上限には当たらない。ここを 12 のような小さい値にすると
+ * 5ビートのシーンまで詰まり、「ナレーションが要素に触れる順に絵が出る」
+ * という演出の狙い（このファイル冒頭）が失われる。
+ */
+const MAX_BEAT_INTERVAL = 30;
+
+/**
  * シーン内 index 番目（0始まり）の要素が出現を開始するフレーム
  * （シーンの先頭からの相対フレーム）を返す。
  *
- * `totalBeats` 個の要素を、シーン尺の先頭 `REVEAL_WINDOW_RATIO` に
+ * `totalBeats` 個の要素を、シーン尺の先頭 `REVEAL_WINDOW_RATIO` の中に
  * 等間隔で並べる。最後の要素の開始フレームは、自身の出現アニメーション
  * （`REVEAL_FRAMES`）を差し引いた地点に置くので、最後の要素もウィンドウ内で
  * 描き切れる。
+ *
+ * ただし1ビートの間隔は `MAX_BEAT_INTERVAL` で頭を打つ。ウィンドウは
+ * 「ここまでに出し終える」という締切であって、「ここまで引き延ばす」という
+ * 指示ではない。
  */
 export function beatStart(
   index: number,
@@ -46,7 +73,8 @@ export function beatStart(
     0,
   );
   if (totalBeats <= 1) return 0;
-  return Math.round((index / (totalBeats - 1)) * window);
+  const interval = Math.min(window / (totalBeats - 1), MAX_BEAT_INTERVAL);
+  return Math.round(index * interval);
 }
 
 export type Reveal = {
