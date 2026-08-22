@@ -1269,6 +1269,28 @@ ruleset `protect main`（GitHub の Repository rules）で次を強制してい�
   ストレージアカウントは共有キーを無効にしてあるので SAS を作れない。
   ここでの認証は入口を閉じるためだけなので不要。
 
+**X の資格情報は `azd env set X_CLIENT_ID` / `X_CLIENT_SECRET` で渡す。**
+X Developer Portal 発行なので postprovision フック（az CLI でキーを取る）では
+埋められない。**これを渡さないと、トークンを Blob に入れても投稿できない**
+——アクセストークンは2時間で切れ、更新は client_id / client_secret の Basic 認証を
+要求する（`src/social/x_auth.py`）。`config.py` の既定は空文字（任意）なので
+**渡し忘れても起動は成功し、画面は「未認証」としか言わない**。実際にこの形で
+気付かないまま投稿できない状態が続いた（issue #28）。いまは画面が不足している
+env の名前を出し、`tests/test_infra_env.py` が bicep の配線（param → module →
+`main.parameters.json` → env / secretRef）を端から端まで検査している。
+
+`X_POSTING_ENABLED` と `X_REDIRECT_URI` は**渡さない**。前者はスイッチの権威が
+Azure Files 上の `data/x_posting.json` にあり（有効化は画面から）、後者は
+`scripts/authorize_x.py` のローカル PKCE でしか使わない（refresh_token グラントは
+`redirect_uri` を送らない）。
+
+**`azd provision` の前に `SERVICE_WEB_IMAGE_NAME` を現行イメージで埋める。**
+「未設定ならプレースホルダに戻る」だけでなく、**値が入っていても古い**ことがある
+——実測（2026-08-22）で azd env は稼働中の `gh-fa2bfc2` に対して129コミット前の
+`gh-9379e9f` を指していた。CD はこの値を更新しないので、放置すると provision が
+アプリを巻き戻す（`consumed` キーを読めない旧コードでは記事 JSON が全部読めなくなる。
+「切り戻しについて」の項を参照）。
+
 **状態の置き場所は3つに分かれている。**
 
 | 何を | どこに | 理由 |

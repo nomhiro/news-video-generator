@@ -8,12 +8,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from src.models.job import GenerationJob, JobStatus
 from src.models.social import (
@@ -24,6 +26,7 @@ from src.models.social import (
     SocialPost,
     check_post_transition,
 )
+from src.storage.tokens import X_TOKEN
 from src.web import routes
 from src.web.dependencies import (
     get_config,
@@ -194,6 +197,44 @@ class FakeConfig:
     x_cost_per_post_usd = 0.015
     x_cost_per_post_with_link_usd = 0.20
     x_cost_per_read_usd = 0.005
+    # 既定は「設定済み」。未設定を検証するテストだけが差し替える
+    x_client_id = "client-id"
+    x_client_secret = SecretStr("client-secret")
+
+
+class UnconfiguredConfig(FakeConfig):
+    """クライアント資格情報が Container App に渡っていない状態。
+
+    実際に起きた（issue #28）。トークンだけ入れても更新（refresh）が
+    Basic 認証で client_id / client_secret を要求するので投稿できない。
+    """
+
+    x_client_id = ""
+    x_client_secret = SecretStr("")
+
+
+class AuthenticatedTokenStore:
+    """トークンが保存されている状態を模す。"""
+
+    def read(self, name: str) -> str | None:
+        if name != X_TOKEN:
+            return None
+        return json.dumps(
+            {
+                "access_token": "at",
+                "refresh_token": "rt",
+                "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            }
+        )
+
+    def write(self, name: str, payload: str) -> None:  # pragma: no cover - 未使用
+        raise NotImplementedError
+
+    def delete(self, name: str) -> None:  # pragma: no cover - 未使用
+        raise NotImplementedError
+
+    def exists(self, name: str) -> bool:
+        return name == X_TOKEN
 
 
 class FakeTokenStore:
@@ -385,6 +426,94 @@ def test_未認証なら再認証の手順を案内する(client: TestClient) ->
     assert "push_tokens" in response.text
 
 
+# --------------------------------------------------------------------------
+# クライアント資格情報の未設定は「未認証」と別に見せる
+#
+# Container App に X_CLIENT_ID / X_CLIENT_SECRET を渡していない状態が実際に
+# あった（issue #28）。画面は「未認証」としか言わず、案内は push_tokens
+# だけだったので、**その手順を踏んでも直らない**ことが分からなかった。
+# --------------------------------------------------------------------------
+
+
+def test_キーが未設定なら不足している環境変数名を出す(fake_switch: FakeSwitch) -> None:
+    """名前を出すのは、それがそのまま `azd env set` の引数になるから。"""
+    with _client_for(FakeSocialPosts([], []), fake_switch, config=UnconfiguredConfig()) as client:
+        panel = client.get("/x/status").text
+
+    assert "X_CLIENT_ID" in panel
+    assert "X_CLIENT_SECRET" in panel
+    assert "azd provision" in panel
+    # 入れ忘れるとイメージが巻き戻る。手順から落とさない
+    assert "SERVICE_WEB_IMAGE_NAME" in panel
+
+
+def test_片方だけ未設定ならその名前だけを出す(fake_switch: FakeSwitch) -> None:
+    """揃っているものを直せと言うと、どこを直すのか分からなくなる。"""
+
+    class OnlySecretMissing(FakeConfig):
+        x_client_secret = SecretStr("")
+
+    with _client_for(FakeSocialPosts([], []), fake_switch, config=OnlySecretMissing()) as client:
+        panel = client.get("/x/status").text
+
+    assert "X_CLIENT_SECRET" in panel
+    assert "X_CLIENT_ID" not in panel
+
+
+def test_未設定でもシークレットの値は画面に出ない(fake_switch: FakeSwitch) -> None:
+    """真偽の判定にしか使わない。値を渡すと SecretStr の意味が無くなる。"""
+
+    class LeakyConfig(FakeConfig):
+        x_client_id = ""
+        x_client_secret = SecretStr("super-secret-value")
+
+    with _client_for(FakeSocialPosts([], []), fake_switch, config=LeakyConfig()) as client:
+        panel = client.get("/x/status").text
+        header = client.get("/x/status/header").text
+
+    assert "super-secret-value" not in panel
+    assert "super-secret-value" not in header
+
+
+def test_トークンがあってもキーが無ければ認証済みと出さない(fake_switch: FakeSwitch) -> None:
+    """issue #28 をトークンだけ直した状態。
+
+    更新（refresh）は Basic 認証で client_id / client_secret を要求するので、
+    トークンがあっても投稿は「要確認」に落ちる。ここで緑の「認証済み」を
+    出すと、問題が画面から消える。
+    """
+    with _client_for(
+        FakeSocialPosts([], []),
+        fake_switch,
+        config=UnconfiguredConfig(),
+        tokens=AuthenticatedTokenStore(),
+    ) as client:
+        panel = client.get("/x/status").text
+        header = client.get("/x/status/header").text
+
+    assert "認証済み" not in panel
+    assert "要確認" in panel
+    assert "未設定" in header
+
+
+def test_キーが揃っていれば未設定の表示は出ない(client: TestClient) -> None:
+    """常に警告が出ている状態にすると、警告として働かなくなる。"""
+    panel = client.get("/x/status").text
+    header = client.get("/x/status/header").text
+
+    assert "未設定" not in panel
+    assert "未設定" not in header
+
+
+def test_ヘッダーにキー未設定の手順は書かない(fake_switch: FakeSwitch) -> None:
+    """ヘッダーは「いま動いているか」「いくら使ったか」に絞る（設計の方針）。"""
+    with _client_for(FakeSocialPosts([], []), fake_switch, config=UnconfiguredConfig()) as client:
+        header = client.get("/x/status/header").text
+
+    assert "未設定" in header
+    assert "azd" not in header
+
+
 def test_取り消すと結果が取り消しましたになる(
     client: TestClient, fake_posts: FakeSocialPosts
 ) -> None:
@@ -396,14 +525,21 @@ def test_取り消すと結果が取り消しましたになる(
     assert fake_posts.failed == [(1, "取り消しました")]
 
 
-def _client_for(posts: FakeSocialPosts, switch: FakeSwitch) -> TestClient:
+def _client_for(
+    posts: FakeSocialPosts,
+    switch: FakeSwitch,
+    config: object | None = None,
+    tokens: object | None = None,
+) -> TestClient:
+    resolved_config = config or FakeConfig()
+    resolved_tokens = tokens or FakeTokenStore()
     app = FastAPI()
     app.include_router(routes.router)
     app.dependency_overrides[get_posts] = lambda: posts
     app.dependency_overrides[get_x_switch] = lambda: switch
-    app.dependency_overrides[get_config] = lambda: FakeConfig()
+    app.dependency_overrides[get_config] = lambda: resolved_config
     app.dependency_overrides[get_jobs] = lambda: FakeJobs()
-    app.dependency_overrides[get_token_store] = lambda: FakeTokenStore()
+    app.dependency_overrides[get_token_store] = lambda: resolved_tokens
     return TestClient(app)
 
 

@@ -27,7 +27,12 @@
     <span class="tnum {{ 'text-vermilion' if over_budget else 'text-paper/60' }}">
         概算 ${{ "%.2f" | format(spent_usd) }} / ${{ "%.2f" | format(budget_usd) }}
     </span>
-    {% if not authenticated %}
+    {# 原因側（キー未設定）を優先し、排他にする。両方並べるとヘッダーの
+       横幅を食って概算コストが押し出される。未設定を直さない限り認証は
+       どうせ効かないので、情報は失われない。 #}
+    {% if missing_credentials %}
+    <span class="text-vermilion">X キー未設定</span>
+    {% elif not authenticated %}
     <span class="text-vermilion">未認証</span>
     {% endif %}
 </div>
