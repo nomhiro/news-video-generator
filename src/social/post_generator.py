@@ -23,6 +23,7 @@ import json
 from openai import (
     APIConnectionError,
     APITimeoutError,
+    BadRequestError,
     InternalServerError,
     OpenAI,
     RateLimitError,
@@ -43,6 +44,7 @@ from src.models.social import (
     PostKind,
     weighted_length,
 )
+from src.utils.content_filter import category_suffix, is_content_filter_error
 from src.utils.grounding import ungrounded_numbers
 
 # 型ごとの本文の字数予算（日本語の文字数、下限と上限）。
@@ -97,6 +99,16 @@ class PostGenerationError(Exception):
 
 class GroundingError(PostGenerationError):
     """記事本文に根拠の無い数値が含まれていた。"""
+
+
+class PostContentFilterError(PostGenerationError):
+    """Azure のコンテンツフィルタが記事の題材を拒否した。
+
+    **引き直しても結果は変わらない。** 拒否されるのは入力（記事のタイトルと
+    本文）なので、プロンプトを直しても同じ記事なら同じ 400 が返る。
+    呼び出し元（`plan_daily_posts`）はこの型を見て記事を自動生成の対象外に
+    し、次の候補へ進む。台本側の `ScriptContentFilterError` と同じ役割。
+    """
 
 
 class _SinglePayload(BaseModel):
@@ -481,16 +493,37 @@ class PostGenerator:
             str: 検証済みオブジェクトを JSON 文字列化したもの
 
         Raises:
+            PostContentFilterError: コンテンツフィルタに拒否された場合
+                （入力・出力のどちらでも）
             PostGenerationError: モデルが出力を拒否した場合
         """
-        response = self.client.responses.parse(
-            model=self.model,
-            instructions=system_prompt,
-            input=user_prompt,
-            text_format=schema,
-        )
+        try:
+            response = self.client.responses.parse(
+                model=self.model,
+                instructions=system_prompt,
+                input=user_prompt,
+                text_format=schema,
+            )
+        except BadRequestError as e:
+            # **入力側の扉。** 記事のタイトルと本文が拒否されると 400 で返る。
+            # tenacity の retry は許可リスト方式で BadRequestError を含まない
+            # ので、ここに来る時点で再試行は済んでいない（してもいけない）。
+            if is_content_filter_error(e):
+                raise PostContentFilterError(
+                    f"記事の題材が Azure OpenAI のコンテンツフィルタに"
+                    f"拒否されました{category_suffix(e)}"
+                ) from e
+            raise
+
         parsed = response.output_parsed
         if parsed is None:
+            # **出力側の扉。** 台本側と同じ理由で、理由がコンテンツフィルタなら
+            # 恒久的な失敗として扱う（閉じないと同じ記事が毎日再ドラフトされる）。
+            reason = getattr(response.incomplete_details, "reason", None)
+            if reason == "content_filter":
+                raise PostContentFilterError(
+                    "生成された投稿が Azure OpenAI のコンテンツフィルタに拒否されました"
+                )
             raise PostGenerationError(
                 f"モデルが投稿を出力しませんでした "
                 f"(status={response.status!r}, incomplete={response.incomplete_details!r})"

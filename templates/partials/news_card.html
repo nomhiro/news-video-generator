@@ -63,6 +63,28 @@
                 {% if article.is_consumed_by('x') %}
                 <span class="border border-teal/40 text-teal rounded px-1">X済</span>
                 {% endif %}
+                {#
+                  コンテンツフィルタに拒否された記事。自動生成は二度と選ばない
+                  ので、**なぜ選ばれないのかを画面から読めるようにする**
+                  （印が無いと「新しい記事なのに使われない」に見える）。
+
+                  チャネルごとに出す。拒否はチャネル別に記録するので、
+                  「動画では使えないが X では使える」が実際に起こりうる。
+                  1つにまとめると、まだ X で使われている記事に「対象外」と
+                  出て嘘になる。
+                #}
+                {% if article.is_content_filtered_for('video') %}
+                <span class="border border-vermilion/40 text-vermilion rounded px-1"
+                      title="記事の題材がコンテンツフィルタに拒否されました。動画の自動生成では選ばれません">
+                    動画対象外
+                </span>
+                {% endif %}
+                {% if article.is_content_filtered_for('x') %}
+                <span class="border border-vermilion/40 text-vermilion rounded px-1"
+                      title="記事の題材がコンテンツフィルタに拒否されました。X の自動投稿では選ばれません">
+                    X対象外
+                </span>
+                {% endif %}
             </div>
             {% if article.summary %}
             <p class="text-ink/60 text-xs mt-1 truncate">{{ article.summary }}</p>

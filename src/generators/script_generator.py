@@ -29,7 +29,7 @@ from src.models.script import (
     Script,
     ScriptDraft,
 )
-from src.utils.content_filter import filtered_categories, is_content_filter_error
+from src.utils.content_filter import category_suffix, is_content_filter_error
 from src.utils.grounding import ungrounded_numbers
 from src.utils.logger import log_error, log_step, log_success, log_warning
 
@@ -65,8 +65,7 @@ def _input_filter_message(exc: Exception) -> str:
     Returns:
         str: 画面に出す文言
     """
-    categories = filtered_categories(exc)
-    detail = f"（{'、'.join(categories)}）" if categories else ""
+    detail = category_suffix(exc)
     return (
         f"記事の題材が Azure OpenAI のコンテンツフィルタに拒否されました{detail}。"
         "拒否されたのは入力（記事のタイトルと本文）なので、"

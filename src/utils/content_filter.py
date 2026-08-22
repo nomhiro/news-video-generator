@@ -1,8 +1,9 @@
 """Azure のコンテンツフィルタ由来のエラーを見分ける。
 
-画像生成（`ImageGenerator`）と台本生成（`ScriptGenerator`）の両方が必要とする。
-以前は `image_generator.py` の中に private な `_is_content_filter_error` として
-置いていたが、台本側でも同じ判定が要るようになったので出した。
+画像生成（`ImageGenerator`）・台本生成（`ScriptGenerator`）・X の下書き生成
+（`PostGenerator`）の3つが必要とする。以前は `image_generator.py` の中に
+private な `_is_content_filter_error` として置いていたが、台本側でも同じ判定が
+要るようになったので出した。
 
 **判定を書き写してはいけない。** 写しがあると片方だけが直る
 （`ARTICLE_OVERFETCH` が X 側にしか入っていなかったのと同じ形の欠陥）。
@@ -126,3 +127,20 @@ def filtered_categories(exc: Exception) -> tuple[str, ...]:
     except Exception:
         # 形の想定が外れても、呼び出し側の失敗理由の組み立てを止めない。
         return ()
+
+
+def category_suffix(exc: Exception) -> str:
+    """拒否されたカテゴリを「（sexual、hate）」の形にする。
+
+    失敗理由の文言に添えるための整形。取れなければ空文字列を返すので、
+    呼び出し側はカテゴリ抜きの文になる。**台本側と投稿側で同じ整形が要る**
+    ので、1行でもここに置く（写しを作ると片方だけ直る）。
+
+    Args:
+        exc: 判定する例外
+
+    Returns:
+        str: 「（...）」の形、または空文字列
+    """
+    categories = filtered_categories(exc)
+    return f"（{'、'.join(categories)}）" if categories else ""

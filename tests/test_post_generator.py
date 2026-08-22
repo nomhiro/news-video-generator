@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from openai import BadRequestError
 
 from src.models.news import NewsArticle, NewsCategory
 from src.models.social import (
@@ -15,8 +16,17 @@ from src.models.social import (
 from src.social.post_generator import (
     BUDGETS,
     GroundingError,
+    PostContentFilterError,
     PostGenerationError,
     PostGenerator,
+    _SinglePayload,
+)
+from tests.test_content_filter import ISSUE_30_BODY
+from tests.test_script_content_filter import (
+    FakeClient,
+    FakeResponse,
+    FakeResponses,
+    _bad_request,
 )
 
 
@@ -305,3 +315,73 @@ def test_長すぎたときは削る指示になる(
 
     assert "200字だった" in prompts[1]
     assert "削って" in prompts[1]
+
+
+# --------------------------------------------------------------------------
+# コンテンツフィルタに拒否されたとき（issue #30 の X 側）
+# --------------------------------------------------------------------------
+#
+# ヘルパーは台本側のテストから借りる。同じ形の stub を書き写すと、
+# 応答の形が変わったときに片方だけ直る。
+
+
+def test_入力が拒否されたら専用の型になる(
+    generator: PostGenerator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`BadRequestError(content_filter)` を `PostContentFilterError` にすること。
+
+    素の `PostGenerationError` のままだと `plan_daily_posts` の汎用の
+    `except Exception` に入り、記事に印が付かない（＝翌日も同じ記事で
+    同じ拒否を踏み、毎日1回ぶんの API 呼び出しを捨てる）。
+    """
+    responses = FakeResponses(error=_bad_request(ISSUE_30_BODY))
+    monkeypatch.setattr(generator, "client", FakeClient(responses))
+
+    with pytest.raises(PostContentFilterError) as caught:
+        generator._complete("システム", "ユーザー", _SinglePayload)
+
+    assert "コンテンツフィルタ" in str(caught.value)
+    assert "sexual" in str(caught.value)
+    # 拒否は引き直しても変わらない。tenacity の許可リストにも入っていない
+    assert responses.calls == 1
+
+
+def test_フィルタ以外の400はそのまま伝播する(
+    generator: PostGenerator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """直せる失敗を恒久的な拒否と混ぜないこと。
+
+    誤ると、デプロイ名の誤りのような直せる失敗で記事が対象外になる。
+    """
+    body = {"error": {"code": "DeploymentNotFound", "message": "does not exist"}}
+    monkeypatch.setattr(generator, "client", FakeClient(FakeResponses(error=_bad_request(body))))
+
+    with pytest.raises(BadRequestError):
+        generator._complete("システム", "ユーザー", _SinglePayload)
+
+
+def test_出力が拒否されたら専用の型になる(
+    generator: PostGenerator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """出力側の扉も閉じていること。
+
+    閉じないと、同じ恒久的な失敗が別の経路から入って毎日の再ドラフトが残る。
+    """
+    response = FakeResponse(reason="content_filter")
+    monkeypatch.setattr(generator, "client", FakeClient(FakeResponses(response=response)))
+
+    with pytest.raises(PostContentFilterError):
+        generator._complete("システム", "ユーザー", _SinglePayload)
+
+
+def test_打ち切りはコンテンツフィルタとして扱わない(
+    generator: PostGenerator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`max_output_tokens` の打ち切りは一時的な失敗として扱うこと。"""
+    response = FakeResponse(reason="max_output_tokens")
+    monkeypatch.setattr(generator, "client", FakeClient(FakeResponses(response=response)))
+
+    with pytest.raises(PostGenerationError) as caught:
+        generator._complete("システム", "ユーザー", _SinglePayload)
+
+    assert not isinstance(caught.value, PostContentFilterError)

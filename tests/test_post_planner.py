@@ -11,6 +11,7 @@ from src.jobs.post_planner import plan_daily_posts
 from src.models.news import CHANNEL_X, NewsArticle, NewsCategory
 from src.models.social import NewPost, PostKind
 from src.social.card_visual import CardVisual
+from src.social.post_generator import PostContentFilterError
 
 
 class FakeNews:
@@ -21,6 +22,8 @@ class FakeNews:
         # （`NewsAggregator`）は持っているので、うっかり呼ばれても
         # 型検査では気付けない。
         self.consumed: list[tuple[str, str]] = []
+        # コンテンツフィルタに拒否された記事の記録（記事ID, チャネル）。
+        self.content_filtered: list[tuple[str, str]] = []
         self.scraped: list[list[str]] = []
 
     def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
@@ -34,6 +37,10 @@ class FakeNews:
 
     def mark_consumed(self, article_id: str, channel: str) -> bool:
         self.consumed.append((article_id, channel))
+        return True
+
+    def mark_content_filtered(self, article_id: str, channel: str) -> bool:
+        self.content_filtered.append((article_id, channel))
         return True
 
 
@@ -51,11 +58,19 @@ class FakePosts:
 
 
 class FakeGenerator:
-    def __init__(self, fail_for: set[str] | None = None) -> None:
+    def __init__(
+        self, fail_for: set[str] | None = None, filter_for: set[str] | None = None
+    ) -> None:
         self._fail_for = fail_for or set()
+        # コンテンツフィルタに拒否される記事。一時的な失敗（`fail_for`）と
+        # 分けているのは、扱いが違うことを検査するため（あちらは次の候補へ
+        # 進むだけ、こちらは記事を対象外にもする）。
+        self._filter_for = filter_for or set()
         self.captions: list[str | None] = []
 
     def generate(self, article, kind, caption: str | None = None) -> list[NewPost]:
+        if article.id in self._filter_for:
+            raise PostContentFilterError("記事の題材が拒否されました（sexual）")
         if article.id in self._fail_for:
             raise RuntimeError("生成に失敗しました")
         self.captions.append(caption)
@@ -436,3 +451,51 @@ def test_成功順に型が割り当てられる() -> None:
 def _plan_slots() -> list[str]:
     """`_plan` が使う投稿時刻のうち、MORNING の時点で未来のもの。"""
     return TIMES
+
+
+# --------------------------------------------------------------------------
+# コンテンツフィルタに拒否された記事（issue #30 の X 側）
+# --------------------------------------------------------------------------
+
+
+def test_拒否された記事は自動生成の対象外にする() -> None:
+    """記事に印を付けて、翌日以降選ばせないこと。
+
+    印が無いと `pick_unconsumed` が翌日も同じ記事を返し、**毎日1回ぶんの
+    API 呼び出しを捨て続ける**。当日の投稿は次の候補で埋まるので落ちず、
+    そのぶん気付きにくい（動画側は1件で0本になるので目立った）。
+    """
+    news = FakeNews([_article("a"), _article("b")])
+    posts = FakePosts()
+
+    plan = _plan(news, posts, FakeGenerator(filter_for={"a"}))
+
+    assert news.content_filtered == [("a", CHANNEL_X)]
+    # 枠は消費せず次の候補で埋める
+    assert len(plan.group_ids) == 1
+    assert posts.enqueued[0][0][0].article_id == "b"
+
+
+def test_一時的な失敗では対象外にしない() -> None:
+    """引き直しで直りうる失敗を恒久的な拒否と混ぜないこと。
+
+    混ぜると、API が一瞬不調だっただけの記事が二度と使われなくなる。
+    """
+    news = FakeNews([_article("a"), _article("b")])
+
+    _plan(news, FakePosts(), FakeGenerator(fail_for={"a"}))
+
+    assert news.content_filtered == []
+
+
+def test_拒否された記事は消費済みにしない() -> None:
+    """`consumed` は「もう出した」の権威なので触らないこと。
+
+    消費済みにすると、出せていない記事が「出した」ことになる。対象外の
+    記録は別のフィールド（`content_filtered`）に置く。
+    """
+    news = FakeNews([_article("a"), _article("b")])
+
+    _plan(news, FakePosts(), FakeGenerator(filter_for={"a"}))
+
+    assert ("a", CHANNEL_X) not in news.consumed

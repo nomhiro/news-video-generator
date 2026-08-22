@@ -25,7 +25,21 @@ from src.models.news import CHANNEL_X, NewsArticle
 from src.models.social import NewPost, PostKind
 from src.social.card_visual import CARD_IMAGE_SIZE, CardVisual, build_card_prompt
 from src.social.cost import estimate_month_cost, is_over_budget
+from src.social.post_generator import PostContentFilterError
 from src.utils.logger import log_error, log_step, log_success
+
+
+class SupportsArticleSupplyForPosts(SupportsArticleSupply, Protocol):
+    """記事の供給に「自動生成の対象外にする」を足したもの。
+
+    コンテンツフィルタの拒否は記事の題材に対して起きるので、印を付けないと
+    `pick_unconsumed` が翌日も同じ記事を選び、**毎日1回ぶんの API 呼び出しを
+    捨て続ける**（動画側と違い当日の投稿は落ちないので気付きにくい）。
+    """
+
+    def mark_content_filtered(self, article_id: str, channel: str) -> bool:
+        """コンテンツフィルタに拒否されたと記録する。"""
+        ...
 
 
 class SupportsPostEnqueue(Protocol):
@@ -123,7 +137,7 @@ class DailyPostPlan:
 
 
 async def plan_daily_posts(
-    news: SupportsArticleSupply,
+    news: SupportsArticleSupplyForPosts,
     posts: SupportsPostEnqueue,
     generator: SupportsPostGeneration,
     *,
@@ -252,6 +266,18 @@ async def plan_daily_posts(
                 drafts = generator.generate(article, kind, caption=caption)
             else:
                 drafts = generator.generate(article, kind)
+        # **`except Exception` より前に置く。** コンテンツフィルタの拒否だけは
+        # 一時的な失敗ではないので、記事を対象外にして二度と選ばせない。
+        # ここが無いと、拒否される記事が毎日再ドラフトされ続ける
+        # （CLAUDE.md「海外メディアはコンテンツフィルタに当たる」に記録して
+        # あった挙動そのもの）。**枠は消費せず次の候補へ進む。**
+        except PostContentFilterError as e:
+            log_error(
+                f"記事「{article.title[:24]}」がコンテンツフィルタに拒否されました。"
+                f"自動生成の対象外にします: {e}"
+            )
+            news.mark_content_filtered(article.id, CHANNEL_X)
+            continue
         # 1件の生成失敗で1日を落とさない。残りの記事は積む
         except Exception as e:
             log_error(f"下書きの生成に失敗しました（{article.title[:24]}）: {e}")
