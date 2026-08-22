@@ -39,8 +39,20 @@ def toolchain_available() -> None:
 
 @pytest.fixture
 def two_second_audio(tmp_path: Path) -> Path:
-    """2秒の無音の MP3 を作る。ffmpeg で生成するので外部素材が要らない。"""
-    audio = tmp_path / "silence.mp3"
+    """2秒の**音の出る** MP3 を作る。ffmpeg で生成するので外部素材が要らない。
+
+    **無音（anullsrc）にしてはいけない。** 以前はそうしていて、そのために
+    「音声トラックはあるが中身が無音」という壊れ方を検出できなかった
+    （`mux_audio` が `-map` を持たず、Remotion の無音ステレオトラックが
+    モノラルのナレーションより優先されていた。実測で生成物5本すべてが
+    mean_volume -91.0 dB）。無音の入力では、正しい出力と壊れた出力が
+    ビット単位で区別できない。
+
+    ナレーションと同じ**モノラル 24kHz** で作る。ステレオにすると
+    Remotion 側の無音トラックとチャンネル数で並ぶため、`-map` を消しても
+    テストが通ってしまう（既定のストリーム選択はチャンネル数で決める）。
+    """
+    audio = tmp_path / "tone.mp3"
     subprocess.run(
         [
             "ffmpeg",
@@ -48,9 +60,9 @@ def two_second_audio(tmp_path: Path) -> Path:
             "-f",
             "lavfi",
             "-i",
-            "anullsrc=r=24000:cl=mono",
-            "-t",
-            "2",
+            "sine=frequency=440:sample_rate=24000:duration=2",
+            "-ac",
+            "1",
             str(audio),
         ],
         capture_output=True,
@@ -88,6 +100,36 @@ def _probe(path: Path, stream: str) -> str:
     return result.stdout.strip().rstrip(",")
 
 
+def _mean_volume_db(path: Path) -> float:
+    """音声の平均音量（dBFS）を返す。デジタル無音なら -91.0 が返る。
+
+    ffprobe では測れない（ストリームの有無しか分からない）ため
+    `volumedetect` フィルタを通す。実際に**音が入っているか**を見るには
+    デコードするしかない。
+    """
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(path),
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for line in result.stderr.splitlines():
+        if "mean_volume:" in line:
+            return float(line.split("mean_volume:")[1].strip().split()[0])
+    raise AssertionError(f"volumedetect の出力に mean_volume が無い: {result.stderr}")
+
+
 def test_render_produces_a_playable_video(
     toolchain_available: None, two_second_audio: Path, tmp_path: Path
 ) -> None:
@@ -116,6 +158,10 @@ def test_render_produces_a_playable_video(
     assert output.exists()
     # 音声トラックがあること。無ければ多重化が抜けている
     assert _probe(output, "a:0") == "audio"
+    # **トラックの有無だけでは足りない。** Remotion が焼く無音ステレオトラックが
+    # 採用されると、トラックも尺も解像度も正しいまま音だけが消える。
+    # 440Hz のサイン波なら十分大きいので、無音（-91.0 dB）と明確に分かれる。
+    assert _mean_volume_db(output) > -40.0
     assert _probe(output, "v:0") == "video"
     # 中間ファイルを残さないこと
     assert list(tmp_path.glob("*_silent.mp4")) == []
