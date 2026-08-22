@@ -41,6 +41,39 @@ def test_mux_audio_builds_a_copy_command(monkeypatch, tmp_path) -> None:
     assert "-shortest" in cmd
 
 
+def test_mux_audio_maps_the_streams_explicitly(monkeypatch, tmp_path) -> None:
+    """映像は第1入力・音声は第2入力から取ることを明示すること。
+
+    `-map` が無いと ffmpeg の既定のストリーム選択が働き、**チャンネル数が
+    最も多い音声**が選ばれる。Remotion は無音のステレオトラックを焼き込むので、
+    モノラルのナレーションが黙って捨てられる（実測で mean_volume -91.0 dB、
+    つまり音声トラックも尺も正しいのに音だけ無い動画が5本できていた）。
+    """
+    recorded: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(cmd)
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr("src.generators.video_composer.subprocess.run", fake_run)
+    mux_audio(
+        tmp_path / "silent.mp4",
+        tmp_path / "voice.mp3",
+        tmp_path / "out.mp4",
+        timeout_sec=900,
+    )
+
+    cmd = recorded[0]
+    maps = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-map"]
+    assert maps == ["0:v:0", "1:a:0"]
+
+
 def test_mux_audio_reports_the_exit_code(monkeypatch, tmp_path) -> None:
     """終了コードを必ず残すこと。負の値はシグナルで殺されたことを意味する。"""
     import subprocess
