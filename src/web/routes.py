@@ -12,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from config import Config
 from src.models.job import BatchProgress, GenerationJob, JobStatus
-from src.models.news import NewsCategory
+from src.models.news import CHANNEL_VIDEO, CHANNEL_X, NewsArticle, NewsCategory
 from src.models.social import (
     CANCELLABLE_STATUSES,
     URL_PATTERN,
@@ -21,12 +21,18 @@ from src.models.social import (
     PostStatus,
     SocialPost,
 )
-from src.news.aggregator import NewsAggregator
+from src.news.aggregator import AUTO_SOURCE_CATEGORIES, NewsAggregator
 from src.social.cost import estimate_month_cost, is_over_budget
 from src.social.switch import PostingSwitch
 from src.social.x_auth import load_credentials
 from src.storage.artifacts import ArtifactStore, ArtifactStoreError, normalize_key
 from src.storage.jobs import JobRepository
+from src.storage.publications import (
+    CHANNEL_TIKTOK,
+    CHANNEL_YOUTUBE,
+    Publication,
+    PublicationStore,
+)
 from src.storage.social import SocialPostRepository
 from src.storage.tokens import TokenStore
 from src.uploaders.tiktok_uploader import TikTokUploader, parse_privacy_level
@@ -38,6 +44,7 @@ from src.web.dependencies import (
     get_config,
     get_jobs,
     get_posts,
+    get_publications,
     get_tiktok_uploader,
     get_token_store,
     get_x_switch,
@@ -50,12 +57,19 @@ templates = Jinja2Templates(directory=Path(__file__).parent.parent.parent / "tem
 
 
 @router.get("/", response_class=HTMLResponse)
-async def index(request: Request, aggregator: NewsAggregator = Depends(get_aggregator)):
+async def index(
+    request: Request,
+    aggregator: NewsAggregator = Depends(get_aggregator),
+    config: Config = Depends(get_config),
+    x_switch: PostingSwitch = Depends(get_x_switch),
+):
     """メインページを表示する。
 
     Args:
         request: FastAPIリクエスト
         aggregator: ニュース取得インスタンス
+        config: アプリ設定（在庫が何日ぶんかの計算に使う）
+        x_switch: 自動投稿のスイッチ（止まっていれば X は在庫を消費しない）
 
     Returns:
         HTMLResponse: メインページHTML
@@ -70,13 +84,19 @@ async def index(request: Request, aggregator: NewsAggregator = Depends(get_aggre
             "categories": categories,
             "selected_count": selected_count,
             "active_category": NewsCategory.AI,  # AIカテゴリをデフォルトに
+            "auto_categories": list(AUTO_SOURCE_CATEGORIES),
+            "inventory": _inventory(aggregator, config, x_switch),
         },
     )
 
 
 @router.get("/news/{category}", response_class=HTMLResponse)
 async def get_news_by_category(
-    request: Request, category: str, aggregator: NewsAggregator = Depends(get_aggregator)
+    request: Request,
+    category: str,
+    aggregator: NewsAggregator = Depends(get_aggregator),
+    publications: PublicationStore = Depends(get_publications),
+    posts: SocialPostRepository = Depends(get_posts),
 ):
     """カテゴリ別ニュース一覧を取得する（HTMXパーシャル）。
 
@@ -105,6 +125,7 @@ async def get_news_by_category(
             "category": cat,
             "categories": list(NewsCategory),
             "active_category": cat,
+            **_reach_context(publications, posts),
         },
     )
 
@@ -114,6 +135,8 @@ async def fetch_news(
     request: Request,
     aggregator: NewsAggregator = Depends(get_aggregator),
     config: Config = Depends(get_config),
+    publications: PublicationStore = Depends(get_publications),
+    posts: SocialPostRepository = Depends(get_posts),
 ):
     """最新ニュースを取得する（HTMXパーシャル）。
 
@@ -147,13 +170,18 @@ async def fetch_news(
             "categories": list(NewsCategory),
             "active_category": active,
             "fetched": True,
+            **_reach_context(publications, posts),
         },
     )
 
 
 @router.post("/news/{article_id}/toggle", response_class=HTMLResponse)
 async def toggle_article_selection(
-    request: Request, article_id: str, aggregator: NewsAggregator = Depends(get_aggregator)
+    request: Request,
+    article_id: str,
+    aggregator: NewsAggregator = Depends(get_aggregator),
+    publications: PublicationStore = Depends(get_publications),
+    posts: SocialPostRepository = Depends(get_posts),
 ):
     """記事の選択状態を切り替える（HTMXパーシャル）。
 
@@ -192,6 +220,7 @@ async def toggle_article_selection(
             "article": article,
             "selected_articles": selected_articles,
             "selected_count": len(selected_articles),
+            **_reach_context(publications, posts),
         },
     )
 
@@ -238,7 +267,11 @@ async def dismiss_article(
 
 @router.post("/news/{article_id}/restore", response_class=HTMLResponse)
 async def restore_article(
-    request: Request, article_id: str, aggregator: NewsAggregator = Depends(get_aggregator)
+    request: Request,
+    article_id: str,
+    aggregator: NewsAggregator = Depends(get_aggregator),
+    publications: PublicationStore = Depends(get_publications),
+    posts: SocialPostRepository = Depends(get_posts),
 ):
     """外した記事を一覧に戻す（HTMXパーシャル）。
 
@@ -263,6 +296,7 @@ async def restore_article(
         {
             "article": article,
             "remaining": len(aggregator.get_articles_by_category(article.category)),
+            **_reach_context(publications, posts),
         },
     )
 
@@ -272,6 +306,8 @@ async def clear_all_selections(
     request: Request,
     category: str = Form("ai"),
     aggregator: NewsAggregator = Depends(get_aggregator),
+    publications: PublicationStore = Depends(get_publications),
+    posts: SocialPostRepository = Depends(get_posts),
 ):
     """選択をすべて外す（HTMXパーシャル）。
 
@@ -307,6 +343,7 @@ async def clear_all_selections(
             "active_category": cat,
             "selected_articles": [],
             "selected_count": 0,
+            **_reach_context(publications, posts),
         },
     )
 
@@ -337,7 +374,11 @@ async def get_selected(request: Request, aggregator: NewsAggregator = Depends(ge
 
 @router.delete("/news/{article_id}/remove", response_class=HTMLResponse)
 async def remove_from_selection(
-    request: Request, article_id: str, aggregator: NewsAggregator = Depends(get_aggregator)
+    request: Request,
+    article_id: str,
+    aggregator: NewsAggregator = Depends(get_aggregator),
+    publications: PublicationStore = Depends(get_publications),
+    posts: SocialPostRepository = Depends(get_posts),
 ):
     """記事を選択から削除する（HTMXパーシャル）。
 
@@ -366,6 +407,7 @@ async def remove_from_selection(
             "article": aggregator.get_article_by_id(article_id),
             "selected_articles": selected_articles,
             "selected_count": len(selected_articles),
+            **_reach_context(publications, posts),
         },
     )
 
@@ -588,6 +630,7 @@ async def list_videos(
     request: Request,
     artifact_store: ArtifactStore = Depends(get_artifact_store),
     config: Config = Depends(get_config),
+    publications: PublicationStore = Depends(get_publications),
 ):
     """生成済み動画一覧を表示する。
 
@@ -599,6 +642,7 @@ async def list_videos(
         request: FastAPIリクエスト
         artifact_store: 生成物の保存先
         config: アプリ設定（生成時刻を出すタイムゾーンに使う）
+        publications: 公開の記録
 
     Returns:
         HTMLResponse: 動画一覧パーシャルHTML
@@ -627,6 +671,15 @@ async def list_videos(
             "size_mb": round(artifact.size_bytes / (1024 * 1024), 2),
             "created": artifact.modified_at.timestamp(),
             "created_at": artifact.modified_at.astimezone(zone).strftime("%m/%d %H:%M"),
+            # 公開の記録。**「生成した」と「公開した」を画面で分ける**ための
+            # 唯一の手掛かりで、無いと出す作業が残っているのか終わったのかが
+            # 再読み込みで消える。ファイルを1回読むだけなので、台本 JSON と
+            # 違って20件でも安い（あちらは1件ごとに Blob から落ちてくる）。
+            # チャネルで引ける形にする。バッジの一覧としても回せるが、
+            # アップロードのボタンは「そのチャネルに出したか」だけを知りたい。
+            "published": {
+                p.channel: _publication_view(p, zone) for p in publications.for_video(artifact.key)
+            },
             **_script_metadata(artifact_store, artifact.key),
         }
         for artifact in recent
@@ -647,6 +700,7 @@ async def delete_video(
     key: str,
     artifact_store: ArtifactStore = Depends(get_artifact_store),
     config: Config = Depends(get_config),
+    publications: PublicationStore = Depends(get_publications),
 ):
     """動画とその付随物を削除して、一覧を返す。
 
@@ -668,6 +722,7 @@ async def delete_video(
         key: 動画のキー（`videos/....mp4`）
         artifact_store: 生成物の保存先
         config: アプリ設定（一覧の再描画にそのまま渡す）
+        publications: 公開の記録（一覧の再描画にそのまま渡す）
 
     Returns:
         HTMLResponse: 更新後の動画一覧パーシャル
@@ -696,7 +751,7 @@ async def delete_video(
         except ArtifactStoreError as e:
             log_error(f"付随物を削除できません（{companion}）: {e}")
 
-    return await list_videos(request, artifact_store, config)
+    return await list_videos(request, artifact_store, config, publications)
 
 
 def _language_from_key(key: str) -> str:
@@ -713,6 +768,164 @@ def _language_from_key(key: str) -> str:
     stem = PurePosixPath(key).stem
     parts = stem.rsplit("_", 1)
     return parts[-1] if len(parts) > 1 else "unknown"
+
+
+def _inventory(
+    aggregator: NewsAggregator, config: Config, x_switch: PostingSwitch
+) -> dict[str, object]:
+    """記事プールの在庫（未消費の件数と、何日ぶんあるか）。
+
+    **件数は設定から導出する。** 画面に数字を焼き付けると、
+    `SCHEDULE_FORMATS` や `X_POSTS_PER_DAY` を変えた瞬間に嘘になる。
+
+    未消費はチャネルごとに数える——`consumed` はチャネル別なので、同じ記事を
+    動画で1本・X で1投稿、それぞれ1回ずつ使える。「在庫」を1つの数字に
+    まとめると、片方だけ枯れている状態を表せない。
+
+    **X が止まっているときは X を日数に入れない。** スイッチの権威は
+    Azure Files 上のファイル（`data/x_posting.json`）で、止まっている間は
+    `plan_daily_posts` が下書きを作らないので記事も減らない。入れると
+    「あと2日」と出ているのに実際は動画だけ何日も回る、という逆の嘘になる。
+
+    Args:
+        aggregator: ニュースストア
+        config: アプリ設定（1日に使う件数の出どころ）
+        x_switch: 自動投稿のスイッチ
+
+    Returns:
+        dict: テンプレートに渡す在庫の内訳
+    """
+    video_per_day = config.schedule_articles_per_format * len(config.schedule_formats)
+    x_enabled = x_switch.is_enabled()
+    x_per_day = config.x_posts_per_day if x_enabled else 0
+
+    video_left = aggregator.count_unconsumed(CHANNEL_VIDEO)
+    x_left = aggregator.count_unconsumed(CHANNEL_X)
+
+    # 先に枯れる方が在庫の日数を決める。どちらも消費しない設定なら日数は
+    # 出さない（0 除算を避けるためだけでなく、「無限にある」は答えではない）。
+    spans = [
+        left // per_day
+        for left, per_day in ((video_left, video_per_day), (x_left, x_per_day))
+        if per_day
+    ]
+
+    return {
+        "video_left": video_left,
+        "x_left": x_left,
+        "video_per_day": video_per_day,
+        "x_per_day": x_per_day,
+        "x_enabled": x_enabled,
+        "days": min(spans) if spans else None,
+    }
+
+
+def _reach_context(
+    publications: PublicationStore, posts: SocialPostRepository
+) -> dict[str, object]:
+    """記事カードが「どこまで届いたか」を出すための集合と、自動生成の対象。
+
+    **記事データだけでは足りない。** 公開の記録は動画ファイル単位の別ストア
+    （`data/publications.json`）にあり、X の下書きは投稿表（SQLite）にある。
+    記事に持たせない理由は前者が粒度（1記事から複数の動画）、後者が寿命
+    （デプロイで消える）——どちらも記事の権威にはできない。
+
+    **カードを描く応答すべてに渡す。** 1つでも渡し忘れると、その経路を
+    通ったときだけバッジが消える（押した場所が変わらない UI と同じ形の
+    欠陥で、テンプレートは `default([])` で落ちないので**気付けない**）。
+    `tests/test_web_reach_badges.py` が経路ごとに見張っている。
+
+    Args:
+        publications: 公開の記録
+        posts: 投稿表
+
+    Returns:
+        dict: `auto_categories` / `published_article_ids` / `queued_article_ids`
+    """
+    return {
+        # 自動生成が見るカテゴリ。**画面に「AI」と書かない**——
+        # `AUTO_SOURCE_CATEGORIES` を増やしたときに画面が追いつかず、
+        # 「タブは9つあるが自動生成は AI だけ」という現状の分かりにくさを
+        # 別の形で作り直すことになる。
+        "auto_categories": list(AUTO_SOURCE_CATEGORIES),
+        "published_article_ids": set(publications.by_article()),
+        # 下書き・予定・送信中を「予定」として1つに畳む。人が見たいのは
+        # 「これから出るのか」で、投稿表の内部状態の区別ではない。
+        "queued_article_ids": {post.article_id for post in posts.list_upcoming()},
+    }
+
+
+def _resolve_article_id(artifact_store: ArtifactStore, video_key: str) -> str | None:
+    """動画のキーから元記事の ID を解決する。
+
+    `videos/{stem}.mp4` → `scripts/{stem}.json` → `Script.source_url`
+    → `NewsArticle.generate_id(url)`。動画テーブル（#6）を待たずに、
+    **既にあるデータだけで辿れる**経路。
+
+    **解決できない動画がある。** CLI の自由テキストから作った動画は
+    `source_url` が空文字列、手で置いた動画は台本 JSON が無い。どちらも
+    None を返す——二重公開のガードは記事と無関係に働くので、欠けるのは
+    記事カードのバッジだけ。ここで例外を投げると、**公開そのものは
+    成功しているのに画面がエラーになる**（取り返しのつかない操作の後で
+    画面が嘘をつく方が実害が大きい）。
+
+    Args:
+        artifact_store: 生成物の保存先
+        video_key: 生成物のキー（`videos/....mp4`）
+
+    Returns:
+        str | None: 記事 ID（辿れなければ None）
+    """
+    script_key = f"scripts/{PurePosixPath(video_key).stem}.json"
+    try:
+        with artifact_store.fetch(script_key) as path:
+            data = json.loads(path.read_text(encoding="utf-8"))
+    except (ArtifactStoreError, OSError, json.JSONDecodeError, ValueError) as e:
+        log_error(f"台本を読めなかったので記事に紐付けません（{script_key}）: {e}")
+        return None
+
+    source_url = str(data.get("source_url", ""))
+    if not source_url:
+        return None
+    return NewsArticle.generate_id(source_url)
+
+
+def _record_publication(
+    publications: PublicationStore,
+    artifact_store: ArtifactStore,
+    video_key: str,
+    channel: str,
+    *,
+    external_id: str,
+    url: str,
+) -> None:
+    """公開を記録する。**失敗しても公開の成功を取り消さない。**
+
+    ここに来た時点で動画はもう公開されている。記録に失敗したことで画面に
+    エラーを出すと、公開できたのに失敗したように見え、しかも記録は
+    どちらにせよ残らない（`Pipeline._publish_artifacts` が保存の失敗で
+    生成を失敗させないのと同じ判断）。**代わりにログには必ず出す**
+    ——ここが黙って落ちると、二重公開のガードが静かに効かなくなる。
+    """
+    try:
+        publications.record(
+            video_key,
+            channel,
+            external_id=external_id,
+            url=url,
+            article_id=_resolve_article_id(artifact_store, video_key),
+        )
+    except (OSError, ValueError) as e:
+        log_error(f"公開の記録に失敗しました（二重公開のガードが効きません）: {e}")
+
+
+def _publication_view(publication: Publication, zone: ZoneInfo) -> dict[str, str]:
+    """画面に出すための1件。時刻は UTC で持っているので現地時刻に直す。"""
+    return {
+        "label": publication.label,
+        "url": publication.url,
+        "at": publication.at.astimezone(zone).strftime("%m/%d %H:%M") if publication.at else "",
+    }
 
 
 def _script_metadata(artifact_store: ArtifactStore, video_key: str) -> dict[str, str]:
@@ -915,6 +1128,7 @@ async def youtube_upload(
     uploader: YouTubeUploader = Depends(get_youtube_uploader),
     config: Config = Depends(get_config),
     artifact_store: ArtifactStore = Depends(get_artifact_store),
+    publications: PublicationStore = Depends(get_publications),
 ):
     """動画をYouTubeにアップロードする。
 
@@ -926,6 +1140,7 @@ async def youtube_upload(
         description: 動画説明
         uploader: YouTubeアップローダー
         artifact_store: 生成物の保存先
+        publications: 公開の記録
 
     Returns:
         HTMLResponse: アップロード結果パーシャルHTML
@@ -967,6 +1182,17 @@ async def youtube_upload(
 
     if result.success:
         log_success(f"YouTubeアップロード完了: {result.video_url}")
+        # **公開したことを残す。** 残さないと再読み込みで消え、出したのか
+        # 出していないのかが画面から分からなくなる（二重公開を止める
+        # 手掛かりも無くなる）。
+        _record_publication(
+            publications,
+            artifact_store,
+            video_key,
+            CHANNEL_YOUTUBE,
+            external_id=result.video_id or "",
+            url=result.video_url or "",
+        )
         return templates.TemplateResponse(
             request,
             "partials/upload_result.html",
@@ -1081,6 +1307,7 @@ async def tiktok_upload(
     uploader: TikTokUploader = Depends(get_tiktok_uploader),
     config: Config = Depends(get_config),
     artifact_store: ArtifactStore = Depends(get_artifact_store),
+    publications: PublicationStore = Depends(get_publications),
 ):
     """動画をTikTokにアップロードする。
 
@@ -1091,6 +1318,7 @@ async def tiktok_upload(
         title: 動画タイトル（キャプション）
         uploader: TikTokアップローダー
         artifact_store: 生成物の保存先
+        publications: 公開の記録
 
     Returns:
         HTMLResponse: アップロード結果パーシャルHTML
@@ -1142,6 +1370,17 @@ async def tiktok_upload(
 
     if result.success:
         log_success("TikTokアップロード完了")
+        # TikTok が返すのは publish_id で、`video_url` は実際の動画 URL
+        # ではなく固定のプロフィール誘導（あちらの API は動画 URL を
+        # 返さない）。記録の役割は「出した」ことなので、それでよい。
+        _record_publication(
+            publications,
+            artifact_store,
+            video_key,
+            CHANNEL_TIKTOK,
+            external_id=result.publish_id or "",
+            url=result.video_url or "",
+        )
         return templates.TemplateResponse(
             request,
             "partials/tiktok_upload_result.html",

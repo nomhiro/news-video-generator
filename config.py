@@ -189,6 +189,14 @@ class Config(BaseSettings):
 
     # --- ニュース取得 ---
     news_data_dir: Path = Field(default=Path("./data/news"))
+    # 公開の記録（どの動画をどのチャネルに出したか）の実体。
+    #
+    # **Azure Files を想定する。** これは二重公開を止める権威なので、
+    # デプロイで消える SQLite には置けない（`main` へのマージが即デプロイ
+    # なので、消えた直後に同じ動画をもう一度 YouTube に上げうる）。
+    # 記事の選択状態（news_data_dir）・投稿スイッチ
+    # （x_posting_switch_path）と同じ理由・同じボリューム。
+    publications_path: Path = Field(default=Path("./data/publications.json"))
     news_fetch_limit: int = Field(default=10, ge=1)
     # AI カテゴリはフィードから埋める（一覧と理由は src/news/feeds.py）。
     # 検索クエリ（旧 AI_SEARCH_QUERIES）は廃止した——語が一致するだけの

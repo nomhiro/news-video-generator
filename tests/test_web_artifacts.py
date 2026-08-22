@@ -22,10 +22,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.storage.artifacts import ArtifactInfo, ArtifactStoreError
+from src.storage.publications import PublicationStore
 from src.web import routes
 from src.web.dependencies import (
     get_artifact_store,
     get_config,
+    get_publications,
     get_tiktok_uploader,
     get_youtube_uploader,
 )
@@ -133,7 +135,9 @@ def store() -> FakeRemoteStore:
 
 
 @pytest.fixture
-def client(store: FakeRemoteStore) -> Iterator[tuple[TestClient, RecordingUploader]]:
+def client(
+    store: FakeRemoteStore, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[tuple[TestClient, RecordingUploader]]:
     uploader = RecordingUploader()
 
     class FakeConfig:
@@ -151,6 +155,10 @@ def client(store: FakeRemoteStore) -> Iterator[tuple[TestClient, RecordingUpload
     app.dependency_overrides[get_youtube_uploader] = lambda: uploader
     app.dependency_overrides[get_tiktok_uploader] = lambda: uploader
     app.dependency_overrides[get_config] = lambda: FakeConfig()
+    # 公開の記録はフェイクにしない。ただのファイルなので実物で足りるし、
+    # アップロードが記録を書くことまで含めて確かめられる。
+    publications = PublicationStore(tmp_path_factory.mktemp("publications") / "publications.json")
+    app.dependency_overrides[get_publications] = lambda: publications
 
     with TestClient(app) as test_client:
         yield test_client, uploader

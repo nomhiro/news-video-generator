@@ -29,6 +29,7 @@ from src.social.x_client import HttpXClient, XClient
 from src.storage.artifacts import ArtifactStore, build_artifact_store
 from src.storage.db import create_db_engine, create_session_factory
 from src.storage.jobs import JobRepository
+from src.storage.publications import PublicationStore
 from src.storage.schema import upgrade_to_head
 from src.storage.social import SocialPostRepository
 from src.storage.tokens import TokenStore, build_token_store
@@ -89,6 +90,7 @@ class AppContext:
     x_switch: PostingSwitch
     post_worker: PostWorker
     metrics_scheduler: DailyScheduler | None
+    publications: PublicationStore
 
     @classmethod
     def build(cls, config: Config) -> "AppContext":
@@ -161,6 +163,11 @@ class AppContext:
             config.x_posting_switch_path, default_enabled=config.x_posting_enabled
         )
 
+        # 公開の記録も同じ理由で Azure Files 上のファイル。**二重公開を
+        # 止める権威なので、ジョブ表の SQLite に置くとデプロイで消え、
+        # 消えた直後に同じ動画をもう一度 YouTube に上げうる。**
+        publications = PublicationStore(config.publications_path)
+
         post_worker = PostWorker(
             posts,
             client_factory=lambda: _build_x_client(config, token_store),
@@ -227,6 +234,7 @@ class AppContext:
             x_switch=x_switch,
             post_worker=post_worker,
             metrics_scheduler=_build_metrics_scheduler(config, posts, token_store, artifact_store),
+            publications=publications,
         )
 
 
@@ -618,6 +626,11 @@ def get_posts(context: AppContext = Depends(get_context)) -> SocialPostRepositor
 def get_x_switch(context: AppContext = Depends(get_context)) -> PostingSwitch:
     """自動投稿の有効/無効のスイッチを取得する。"""
     return context.x_switch
+
+
+def get_publications(context: AppContext = Depends(get_context)) -> PublicationStore:
+    """公開（YouTube / TikTok に出したか）の記録を取得する。"""
+    return context.publications
 
 
 def get_token_store(context: AppContext = Depends(get_context)) -> TokenStore:
