@@ -364,6 +364,38 @@ class ScriptDraft(BaseModel):
             return f"ナレーションが短すぎます: {actual}文字 (目標下限{low}文字)"
         return None
 
+    def check_segment_budget(self, language: str, cap: int) -> str | None:
+        """1セグメントが長すぎないか調べる。
+
+        **`check_length_budget`（全体）とは別に必要**。全体の予算に収まっていても
+        配分は偏りうる。字幕は**セグメント単位で1画面に出る**ので、長い側の
+        セグメントが字幕ゾーンに収まらない。実測（2026-08-22 のショート1本、
+        全体240文字の枠に収まっていた）では50文字前後のセグメントが3つあり、
+        字幕が4行になって1行目が横一直線に切れていた——**尺の約52%で文字が
+        読めない**状態だった。
+
+        英語は語数ではなく文字数で見る（`check_length_budget` と同じ換算）。
+
+        Args:
+            language: 言語コード
+            cap: 1セグメントの上限文字数（`FormatSpec.segment_char_cap`）
+
+        Returns:
+            超過していれば理由の文字列。収まっていれば None
+        """
+        over = [
+            (i, len(text.strip()))
+            for i, text in enumerate(self.segment_narrations)
+            if len(text.strip()) > cap
+        ]
+        if not over:
+            return None
+        detail = ", ".join(f"{i + 1}番目が{n}文字" for i, n in over)
+        return (
+            f"1セグメントが長すぎます（上限{cap}文字）: {detail}。"
+            "字幕は1セグメントを1画面に出すため、長いセグメントは画面に収まりません"
+        )
+
     def to_script(
         self,
         language: str,

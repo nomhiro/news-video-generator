@@ -14,6 +14,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from src.models.formats import get_spec
 from src.models.scene import MAX_DETAIL_CHARS, MAX_LABEL_CHARS
 from src.models.script import (
     MAX_HEADLINE_CHARS,
@@ -244,6 +245,63 @@ def test_english_budget_counts_characters_not_words() -> None:
     draft = _draft(segment_narrations=["word " * 20, "word " * 20, "word " * 20])
     problem = draft.check_length_budget("en", (50, 100))
     assert problem is not None
+
+
+# --------------------------------------------------------------------------
+# セグメント単位の分量チェック
+#
+# 全体の予算だけでは字幕が壊れるのを防げない。字幕は1セグメントを1画面に
+# 出すため、配分が偏ると長い側が画面に収まらない。実測（2026-08-22）では
+# 全体240文字の枠に収まったまま50文字前後のセグメントが3つ出て、字幕の
+# 1行目が横一直線に切れていた（尺の約52%）。
+# --------------------------------------------------------------------------
+
+
+def test_segment_within_cap_passes() -> None:
+    draft = _draft(segment_narrations=["あ" * 40, "い" * 40, "う" * 40])
+    assert draft.check_segment_budget("ja", 48) is None
+
+
+def test_segment_at_the_cap_is_allowed() -> None:
+    """上限ちょうどは許すこと（境界の扱いを固定する）。"""
+    draft = _draft(segment_narrations=["あ" * 48, "い" * 48, "う" * 48])
+    assert draft.check_segment_budget("ja", 48) is None
+
+
+def test_uneven_distribution_is_caught_even_when_the_total_fits() -> None:
+    """**全体の予算に収まっていても偏りは弾くこと。** この検査の存在理由。
+
+    実測で踏んだ配分を再現する: 全体は上限内なのに、長い側のセグメントが
+    字幕ゾーンに収まらない。
+    """
+    draft = _draft(segment_narrations=["あ" * 20, "い" * 50, "う" * 20])
+    # 全体（90文字）は予算内
+    assert draft.check_length_budget("ja", (80, 120)) is None
+    # セグメント単位では弾かれる
+    problem = draft.check_segment_budget("ja", 48)
+    assert problem is not None
+    assert "2番目が50文字" in problem
+
+
+def test_every_over_long_segment_is_named() -> None:
+    """超過したセグメントをすべて挙げること。1つ直しても次で落ちると分かりにくい。"""
+    draft = _draft(segment_narrations=["あ" * 60, "い" * 20, "う" * 55])
+    problem = draft.check_segment_budget("ja", 48)
+    assert problem is not None
+    assert "1番目が60文字" in problem
+    assert "3番目が55文字" in problem
+
+
+def test_segment_cap_comes_from_the_format_spec() -> None:
+    """上限は形式から導出すること。short は40文字目標の2割増しで48文字。
+
+    ここが目標値そのまま（40）に戻ると、まともな言い回しの1〜2文字の超過で
+    引き直しが走り、API 呼び出しを無駄に使う。
+    """
+    assert get_spec("short").segment_char_cap("ja") == 48
+    # 長尺は250文字目標なので上限も桁が違う（字幕としては別の問題になるが、
+    # 「長尺は当面作らない」ため実測での作り込みは保留）。
+    assert get_spec("long").segment_char_cap("ja") == 300
 
 
 def test_script_round_trips_through_json_file(tmp_path) -> None:

@@ -35,6 +35,7 @@ import azure.cognitiveservices.speech as speechsdk
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from src.utils.logger import log_error, log_step, log_success
+from src.utils.reading import apply_readings
 
 
 class VoiceGenerationError(Exception):
@@ -123,6 +124,13 @@ class VoiceGenerator:
         テキストは XML エスケープする。記事タイトルに `&` や `<` が
         混じることが実際にあり、そのまま埋め込むと SSML が壊れる。
 
+        **固有名詞の読みを当てるのはここだけ**（`src/utils/reading.py`）。
+        日本語ボイスはラテン文字の語を標準的な読みで発音する保証がなく、
+        実測で `Claude` の読みが崩れていた。置換は**エスケープの前**に行う
+        ——エスケープ済みの文字列（`&amp;` 等）に対して語をマッチさせると、
+        実体参照の中を書き換える経路が生まれる。字幕側（`Script` の
+        `segment_narrations`）には適用しないので、画面には原綴りが出る。
+
         Args:
             segments: ナレーションのセグメント
             language: 言語コード ("ja" or "en")
@@ -132,7 +140,7 @@ class VoiceGenerator:
             str: SSML 文字列
         """
         marked = "".join(
-            f'<bookmark mark="seg_{i}"/>{xml_escape(segment.strip())}'
+            f'<bookmark mark="seg_{i}"/>{xml_escape(apply_readings(segment.strip(), language))}'
             for i, segment in enumerate(segments)
         )
         return (

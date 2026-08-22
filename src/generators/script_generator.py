@@ -834,6 +834,23 @@ Before output, verify:
                 # 長いまま進める方が実用的。警告だけ残す。
                 log_warning(f"分量が範囲外のまま採用します: {problem}")
 
+            # セグメント単位の分量の検査。全体の予算に収まっていても配分は
+            # 偏りうる（実測で50文字前後のセグメントが3つ通り、字幕の1行目が
+            # 切れた）。**最終試行では通す**——`Subtitle` が収まるサイズまで
+            # 自動で縮めるので、長いセグメントは「文字が小さくなる」だけで
+            # 済み、生成を落とすほどの害ではない。数値の捏造（下）と違って
+            # 画面に嘘が出るわけではない。
+            segment_problem = draft.check_segment_budget(language, spec.segment_char_cap(language))
+            if segment_problem is not None:
+                last_problem = segment_problem
+                if remaining:
+                    log_warning(
+                        f"セグメントが長すぎる（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
+                        f"再生成します: {segment_problem}"
+                    )
+                    continue
+                log_warning(f"セグメントが長いまま採用します: {segment_problem}")
+
             # 数値の根拠の検査。ラベルを描くレンダラでは**分量と違い、
             # 最終試行でも通さない。** 記事に無い数値が画面に描かれるのは、
             # ニュースを扱う以上最も害が大きい種類の誤りで、警告して採用する
@@ -1210,7 +1227,15 @@ Before output, verify:
                 "**各セグメントは単独で文として言い切ること。**"
                 "セグメントの境界は画像が切り替わる位置なので、"
                 "文を途中で切って次のセグメントに続けてはならない"
-                f"（短くしすぎて{spec.chars_per_segment[0]}文字を下回るとこれが起きる）。"
+                f"（短くしすぎて{spec.chars_per_segment[0]}文字を下回るとこれが起きる）。\n"
+                # 上限は「全体で超えないこと」だけでは守られない。実測では
+                # 全体240文字の枠に収まったまま、50文字前後のセグメントが3つ
+                # 出て字幕が画面に収まらなかった。**1セグメントの上限を
+                # 数字で明示する**（検査側の上限と同じ値を書く）。
+                f"1つのセグメントが{spec.segment_char_cap(language)}文字を超えては"
+                "**ならない**。字幕は1セグメントを1画面に出すので、"
+                "長いセグメントは画面に収まらず文字が読めなくなる。"
+                "全体を短くするのではなく、セグメント間で均等に配ること。"
             )
 
         spans_en = {k: v.replace("〜", "-") for k, v in spans.items()}
@@ -1241,7 +1266,14 @@ Before output, verify:
             "**Every segment must stand alone as a complete sentence.** Segment "
             "boundaries are where the image changes, so never split a sentence across "
             f"two segments (this happens when a segment drops below "
-            f"{spec.words_per_segment[0]} words)."
+            f"{spec.words_per_segment[0]} words).\n"
+            # 上限は「全体で超えないこと」だけでは守られない（日本語側の
+            # コメント参照。実測で全体の枠に収まったまま個別のセグメントが
+            # 溢れ、字幕が切れた）。1セグメントの上限を数字で明示する。
+            f"No single segment may exceed {round(spec.words_per_segment[1] * 1.2)} words. "
+            "The subtitle shows one segment per screen, so an over-long segment does "
+            "not fit and becomes unreadable. Distribute evenly across segments rather "
+            "than shortening the whole."
         )
 
     @staticmethod

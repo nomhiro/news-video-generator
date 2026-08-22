@@ -6,6 +6,14 @@
 作ってしまう。2秒でも通る経路は同じ（Node が呼ばれる / Chrome が動く /
 mp4 ができる / 音声が多重化される / 中間ファイルが消える）。
 フル尺の実測は移行時の手動確認で行う。
+
+**レンダリングは1回だけ行い、全テストで共有する**（`rendered` フィクスチャ）。
+以前は検査ごとに焼いていた。pre-push の所要時間は 30秒 → 60秒 → 90秒と
+推移しており（CLAUDE.md「チェックは pre-push に寄せている」）、その最大の
+内訳がこのレンダリングである。**検査を足すたびに焼き直す形にすると、
+検査を足すこと自体が --no-verify への圧力になる。** 焼くのは1回にして、
+props を「最悪ケース」に寄せることで1回のレンダリングから取れる情報を
+増やす方針にした。
 """
 
 import shutil
@@ -13,16 +21,74 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from src.generators.remotion_renderer import RemotionRenderer
-from src.models.scene import SceneLayout, SceneVisual
+from src.models.formats import get_spec
+from src.models.scene import MAX_LABEL_CHARS, MAX_RELATION_CHARS, SceneLayout, SceneVisual
+from src.models.script import MAX_HEADLINE_CHARS
 
 pytestmark = pytest.mark.slow
 
 REMOTION_DIR = Path(__file__).resolve().parents[1] / "remotion"
 
+# --- 最悪ケースの props -------------------------------------------------------
+#
+# **サイズや行数を保証するテストが1本も無い**ことが CLAUDE.md で
+# 「最も重要な記録」として残されており、その穴が同じ日に2件の不具合
+# （statement での45字見出しの欠け、compare/flow での8字ラベルの語中改行）を
+# 生んだ。ここでは各フィールドをスキーマ上の**上限**で埋める——上限で通れば
+# 実際の出力でも通る。長さはスキーマの定数と突き合わせて、将来の編集で
+# 静かに緩まないようにする。
 
-@pytest.fixture
+# 45字（`MAX_HEADLINE_CHARS`）。長い複合語が続く言い回しを選ぶ。
+# CLAUDE.md の実測では、同じ45字でも `推論コストが…解き明かします` は
+# 4行に収まり、複合語が続く方は5行必要になった。厳しい側を使う。
+WORST_HEADLINE = (
+    "大規模言語モデルの推論基盤における計算資源配分の最適化技術が一般提供へ、詳細を解説します。"
+)
+
+# 48字（short の `segment_char_cap`）。2026-08-22 の生成物で実際に字幕の
+# 1行目が切れたセグメントを、上限まで詰めた形。`AI` のような ASCII を
+# 含めるのは、`estimateEmWidth` の全角/半角の見積りを実物で通すため。
+WORST_SUBTITLE = (
+    "職場でAIを使ったことを一文添えるだけで済む話が、サイレントAIユーザーに新たな開示を迫ります。"
+)
+
+# 8字（`MAX_LABEL_CHARS` / `MAX_RELATION_CHARS`）。
+WORST_ITEMS = ["従来型の推論基盤", "混合専門家方式へ"]
+WORST_RELATION = "資源配分の最適化"
+
+# 字幕ゾーンの上端（`remotion/src/zones.ts` の `subtitle.top` = 1570/1920）。
+# **TS 側と Python 側で同じ値を持つ単一の情報源が無い**——ゾーンの定義は
+# レンダラ（TS）にあり、ビルド時に Python へ伝える手段がない
+# （`ILLUSTRATION_SIZE` と同じ構造の重複）。ずれたらこのテストが
+# 「切れていない」を誤って通すので、`zones.ts` を触ったらここも直す。
+SUBTITLE_ZONE_TOP = 1570
+
+# 「切れていたら必ずインクが出る」帯。字幕の文字は最速でも
+# ゾーン上端 + `PADDING_TOP`(12px) から始まるので、ここは本来つねに
+# 文字が無い。切れている場合は `overflow: hidden` が上端で断ち切るため、
+# 上端の直下から文字が連続して現れる。
+CLIP_PROBE_TOP = SUBTITLE_ZONE_TOP + 2
+CLIP_PROBE_BOTTOM = SUBTITLE_ZONE_TOP + 10
+
+# 見出しゾーンの上端（`zones.ts`）。レイアウトで違う。
+# statement は図が無いぶん広い（1050〜1570）、compare/flow は挿絵の下の
+# 帯（970〜1370）。上の `SUBTITLE_ZONE_TOP` と同じ理由で値を写している。
+HEADLINE_ZONE_TOP = {"statement": 1050, "strip": 970}
+
+# 見出しの溢れを見る帯の深さ。**行送りより広く取る必要がある**（下の
+# `test_headline_is_not_clipped_at_the_zone_boundary` の docstring 参照）。
+# 収まっているときの余裕（45字・400pxゾーンで上下44pxずつ）より小さく、
+# 溢れたときに字面が現れる位置（ゾーン上端 + 十数px）より大きい値。
+HEADLINE_PROBE_DEPTH = 34
+
+# 白文字（`COLORS.text` = #eef1f5）の閾値。地は #14161a なので大きく離れている。
+INK_THRESHOLD = 170
+
+
+@pytest.fixture(scope="module")
 def toolchain_available() -> None:
     """Node / ffmpeg / node_modules が揃っていること。
 
@@ -37,8 +103,8 @@ def toolchain_available() -> None:
         pytest.skip("remotion/node_modules が無い（cd remotion && npm install）")
 
 
-@pytest.fixture
-def two_second_audio(tmp_path: Path) -> Path:
+@pytest.fixture(scope="module")
+def two_second_audio(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """2秒の**音の出る** MP3 を作る。ffmpeg で生成するので外部素材が要らない。
 
     **無音（anullsrc）にしてはいけない。** 以前はそうしていて、そのために
@@ -52,7 +118,7 @@ def two_second_audio(tmp_path: Path) -> Path:
     Remotion 側の無音トラックとチャンネル数で並ぶため、`-map` を消しても
     テストが通ってしまう（既定のストリーム選択はチャンネル数で決める）。
     """
-    audio = tmp_path / "tone.mp3"
+    audio = tmp_path_factory.mktemp("audio") / "tone.mp3"
     subprocess.run(
         [
             "ffmpeg",
@@ -69,6 +135,43 @@ def two_second_audio(tmp_path: Path) -> Path:
         check=True,
     )
     return audio
+
+
+@pytest.fixture(scope="module")
+def rendered(
+    toolchain_available: None,
+    two_second_audio: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> tuple[Path, Path]:
+    """最悪ケースの props で1回だけレンダリングし、(出力, 作業ディレクトリ) を返す。
+
+    3レイアウト（statement / compare / flow）をすべて含める。ゾーンと文字サイズは
+    レイアウトごとに違うので、1つだけ焼くと残り2つの回帰を見逃す。
+
+    **テキストは素のまま渡す。** ZWSP（BudouX のフレーズ境界）は
+    `RemotionRenderer.render()` が props を組む直前に挿入する。手で ZWSP を
+    埋めた文字列を渡すと、本番と違う改行位置で折り返されて**検査が何も
+    保証しなくなる**（`keep-all` は ZWSP の位置でしか折らないため、
+    ZWSP の入り方が変わると行数が変わる）。
+    """
+    workdir = tmp_path_factory.mktemp("render")
+    output = workdir / "out.mp4"
+    RemotionRenderer().render(
+        audio_path=two_second_audio,
+        output_path=output,
+        image_paths=[],
+        scenes=[
+            SceneVisual(layout=SceneLayout.STATEMENT, items=[], relation=""),
+            SceneVisual(layout=SceneLayout.COMPARE, items=WORST_ITEMS, relation=WORST_RELATION),
+            SceneVisual(layout=SceneLayout.FLOW, items=WORST_ITEMS, relation=WORST_RELATION),
+        ],
+        text_overlays=[WORST_HEADLINE] * 3,
+        segment_narrations=[WORST_SUBTITLE] * 3,
+        segment_timings=[0.0, 0.7, 1.4, 2.0],
+        language="ja",
+        video_format="short",
+    )
+    return output, workdir
 
 
 def _probe(path: Path, stream: str) -> str:
@@ -130,31 +233,64 @@ def _mean_volume_db(path: Path) -> float:
     raise AssertionError(f"volumedetect の出力に mean_volume が無い: {result.stderr}")
 
 
-def test_render_produces_a_playable_video(
-    toolchain_available: None, two_second_audio: Path, tmp_path: Path
-) -> None:
+def _extract_frame(video: Path, at_sec: float, dest: Path) -> Path:
+    """指定秒のフレームを PNG で取り出す。
+
+    JPEG ではなく PNG にする。閾値で「文字があるか」を判定するので、
+    JPEG のリンギング（暗地と白文字の境界に中間色が出る）を持ち込まない。
+    """
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-ss",
+            f"{at_sec}",
+            "-i",
+            str(video),
+            "-frames:v",
+            "1",
+            str(dest),
+        ],
+        capture_output=True,
+        check=True,
+    )
+    return dest
+
+
+def _ink_in_band(frame: Path, top: int, bottom: int) -> int:
+    """帯の中の「白い画素」の数を返す。文字があるかを機械的に測る。
+
+    画素を1つずつ読むのではなく、帯を切り出してヒストグラムを取る。
+    `Image.load()` の返り値は型が `PixelAccess | None` で mypy が通らないうえ、
+    1080 × 数百回のループは遅い。ヒストグラムなら閾値より明るいバケットの
+    合計がそのまま画素数になる。
+    """
+    image = Image.open(frame).convert("L")
+    band = image.crop((0, top, image.width, bottom + 1))
+    return sum(band.histogram()[INK_THRESHOLD + 1 :])
+
+
+def test_worst_case_props_sit_at_the_schema_limits() -> None:
+    """最悪ケースの props がスキーマの上限そのものであること。
+
+    このテストが無いと、下の検査は「たまたま短い入力なら通る」状態に
+    静かに退化しうる（文字列を短く直しても誰も気付かない）。
+    """
+    assert len(WORST_HEADLINE) == MAX_HEADLINE_CHARS
+    assert len(WORST_SUBTITLE) == get_spec("short").segment_char_cap("ja")
+    assert all(len(item) == MAX_LABEL_CHARS for item in WORST_ITEMS)
+    assert len(WORST_RELATION) == MAX_RELATION_CHARS
+
+
+def test_render_produces_a_playable_video(rendered: tuple[Path, Path]) -> None:
     """Node の起動から音声の多重化・中間ファイルの後始末まで、経路全体が通ること。
 
     ここが通らないと（Remotion のレンダリング失敗、多重化の抜け、
     後始末忘れ）本番の35秒レンダリングも同じ壊れ方をする。
     """
-    output = tmp_path / "out.mp4"
-    RemotionRenderer().render(
-        audio_path=two_second_audio,
-        output_path=output,
-        image_paths=[],
-        scenes=[
-            SceneVisual(layout=SceneLayout.STATEMENT, items=[], relation=""),
-            SceneVisual(layout=SceneLayout.COMPARE, items=["従来", "新方式"], relation="切替"),
-            SceneVisual(layout=SceneLayout.FLOW, items=["入力", "選択"], relation="変換"),
-        ],
-        text_overlays=["見出し1", "見出し2", "見出し3"],
-        segment_narrations=["字幕1です。", "字幕2です。", "字幕3です。"],
-        segment_timings=[0.0, 0.7, 1.4, 2.0],
-        language="ja",
-        video_format="short",
-    )
-
+    output, workdir = rendered
     assert output.exists()
     # 音声トラックがあること。無ければ多重化が抜けている
     assert _probe(output, "a:0") == "audio"
@@ -164,30 +300,17 @@ def test_render_produces_a_playable_video(
     assert _mean_volume_db(output) > -40.0
     assert _probe(output, "v:0") == "video"
     # 中間ファイルを残さないこと
-    assert list(tmp_path.glob("*_silent.mp4")) == []
-    assert list(tmp_path.glob("*_props.json")) == []
+    assert list(workdir.glob("*_silent.mp4")) == []
+    assert list(workdir.glob("*_props.json")) == []
 
 
-def test_render_uses_the_format_resolution(
-    toolchain_available: None, two_second_audio: Path, tmp_path: Path
-) -> None:
+def test_render_uses_the_format_resolution(rendered: tuple[Path, Path]) -> None:
     """解像度は formats.py が決める。short は 1080x1920。
 
     Remotion の props（width/height）が spec からずれていないかを見る。
     ずれると画像生成レンダラと出力仕様が食い違う。
     """
-    output = tmp_path / "out.mp4"
-    RemotionRenderer().render(
-        audio_path=two_second_audio,
-        output_path=output,
-        image_paths=[],
-        scenes=[SceneVisual(layout=SceneLayout.COMPARE, items=["A", "B"], relation="diff")],
-        text_overlays=["見出し"],
-        segment_narrations=["字幕です。"],
-        segment_timings=[0.0, 2.0],
-        language="ja",
-        video_format="short",
-    )
+    output, _ = rendered
     result = subprocess.run(
         [
             "ffprobe",
@@ -207,3 +330,94 @@ def test_render_uses_the_format_resolution(
     )
     # 末尾のカンマは _probe と同じ理由（side_data）で削る。
     assert result.stdout.strip().rstrip(",") == "1080,1920"
+
+
+@pytest.mark.parametrize(
+    ("at_sec", "layout"),
+    [(0.45, "statement"), (1.15, "compare"), (1.85, "flow")],
+)
+def test_subtitle_is_not_clipped_at_the_zone_boundary(
+    rendered: tuple[Path, Path], tmp_path: Path, at_sec: float, layout: str
+) -> None:
+    """字幕がゾーン上端で断ち切られていないこと。**全レイアウトで**。
+
+    これが今まで自動で検査されておらず、実運用の動画で**尺の約52%（46.2秒の
+    うち24秒）にわたって字幕の1行目が横一直線に切れていた**
+    （2026-08-22）。ffprobe では気付けない類の壊れ方で——尺・解像度・
+    音声トラックはすべて正しく、**画素を見るしか判定手段が無い**。
+
+    ゾーン上端の直下に白い画素があれば、`overflow: hidden` がそこで文字を
+    断ち切っている。正常なら字幕の文字は上端 + パディング(12px) より下から
+    始まるので、この帯は空でなければならない。
+
+    各レイアウトの中央付近のフレームで測る。**シーンの先頭では測れない**
+    ——字幕は6フレームでフェードインするので、明るさが閾値に届かない。
+    """
+    output, _ = rendered
+    frame = _extract_frame(output, at_sec, tmp_path / f"{layout}.png")
+    ink = _ink_in_band(frame, CLIP_PROBE_TOP, CLIP_PROBE_BOTTOM)
+    assert ink == 0, (
+        f"{layout} の字幕がゾーン上端（y={SUBTITLE_ZONE_TOP}）で切れている: "
+        f"y={CLIP_PROBE_TOP}..{CLIP_PROBE_BOTTOM} に白い画素が{ink}個ある"
+    )
+
+
+@pytest.mark.parametrize(
+    ("at_sec", "layout"),
+    [(0.45, "statement"), (1.15, "compare"), (1.85, "flow")],
+)
+def test_subtitle_is_actually_drawn(
+    rendered: tuple[Path, Path], tmp_path: Path, at_sec: float, layout: str
+) -> None:
+    """字幕が実際に描かれていること。
+
+    **上の「切れていない」検査だけでは不十分。** 字幕が1文字も描かれなければ
+    帯は空になり、切れの検査は通ってしまう。ゾーンの下半分に相当量の
+    インクがあることを併せて見る（`fitSubtitleSize` が下限まで縮めても
+    48字は十分な面積を占める）。
+    """
+    output, _ = rendered
+    frame = _extract_frame(output, at_sec, tmp_path / f"{layout}-drawn.png")
+    ink = _ink_in_band(frame, SUBTITLE_ZONE_TOP + 20, 1919)
+    assert ink > 2000, f"{layout} の字幕が描かれていない（白い画素が{ink}個）"
+
+
+@pytest.mark.parametrize(
+    ("at_sec", "layout", "zone_key"),
+    [
+        (0.45, "statement", "statement"),
+        (1.15, "compare", "strip"),
+        (1.85, "flow", "strip"),
+    ],
+)
+def test_headline_is_not_clipped_at_the_zone_boundary(
+    rendered: tuple[Path, Path], tmp_path: Path, at_sec: float, layout: str, zone_key: str
+) -> None:
+    """45字の見出しがゾーンから溢れていないこと。**全レイアウトで**。
+
+    `statement` で45字の見出しが欠けたのは実際に起きた不具合で、そのとき
+    `Headline` の予算計算をゾーンの高さからの逆算に変えて直した。**その修正を
+    見張るテストは無かった**（`zones.ts` の `strip.headline` を 320→400 に
+    広げたのも同じ不具合の続きで、やはり検査は無い）。ここで固定する。
+
+    **上端だけを見る。** 見出しは `alignItems: center` で縦中央に置かれるので、
+    溢れた場合は上下**両方**にインクが出る。一方、見出しは spring で
+    `translateY` しながら入ってくる——入場中は最終位置より**下**にあるので、
+    下端を見るとアニメーション中のフレームで誤検出しうる。上端は入場中つねに
+    安全側なので、判定に使えるのは上端。
+
+    **帯の幅は行送りより広く取る（`HEADLINE_PROBE_DEPTH`）。** 最初 8px で
+    書いたが、それでは溢れを検出できなかった——ゾーンの高さを100pxまで
+    削って強制的に溢れさせても検査が通った。行ボックスの上端と字面の上端の
+    間には `(lineHeight - 1) / 2 + アセンダの余白` があり、フォント60pxなら
+    十数pxになる。**切り取られた最初の行の字面はゾーン上端より十数px下から
+    始まる**ので、8pxの帯はその隙間に収まってしまう。
+    """
+    output, _ = rendered
+    zone_top = HEADLINE_ZONE_TOP[zone_key]
+    frame = _extract_frame(output, at_sec, tmp_path / f"{layout}-headline.png")
+    ink = _ink_in_band(frame, zone_top, zone_top + HEADLINE_PROBE_DEPTH)
+    assert ink == 0, (
+        f"{layout} の見出しがゾーン上端（y={zone_top}）で切れている: "
+        f"y={zone_top}..{zone_top + HEADLINE_PROBE_DEPTH} に白い画素が{ink}個ある"
+    )
