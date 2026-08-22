@@ -20,24 +20,12 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from src.generators.image_generator import ContentFilterError
+from src.jobs.article_supply import SupportsArticleSupply, supply_articles
 from src.models.news import CHANNEL_X, NewsArticle
 from src.models.social import NewPost, PostKind
 from src.social.card_visual import CARD_IMAGE_SIZE, CardVisual, build_card_prompt
 from src.social.cost import estimate_month_cost, is_over_budget
 from src.utils.logger import log_error, log_step, log_success
-
-
-class SupportsArticlePicking(Protocol):
-    """ニュースストアの必要な部分だけ。
-
-    `planner.py` の `SupportsNewsFetching` と違い、この計画は取得を
-    行わない（定期実行で動画側が既に取得済みのストアを読むだけ）ので、
-    `pick_unconsumed` の1メソッドだけに絞る。
-    """
-
-    def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
-        """そのチャネルでまだ使っていない記事を返す。"""
-        ...
 
 
 class SupportsPostEnqueue(Protocol):
@@ -59,7 +47,6 @@ class SupportsPostGeneration(Protocol):
         self,
         article: NewsArticle,
         kind: PostKind,
-        hashtags: list[str],
         caption: str | None = None,
     ) -> list[NewPost]:
         """記事から投稿の下書きを生成する。"""
@@ -135,15 +122,14 @@ class DailyPostPlan:
         return bool(self.group_ids)
 
 
-def plan_daily_posts(
-    news: SupportsArticlePicking,
+async def plan_daily_posts(
+    news: SupportsArticleSupply,
     posts: SupportsPostEnqueue,
     generator: SupportsPostGeneration,
     *,
     enabled: bool,
     times: list[str],
     posts_per_day: int,
-    hashtags: list[str],
     budget_usd: float,
     unit_usd: float,
     unit_with_link_usd: float,
@@ -166,7 +152,6 @@ def plan_daily_posts(
             False なら何も積まずに帰る（下の docstring 本文を参照）
         times: 投稿時刻（HH:MM、timezone のローカル時刻）
         posts_per_day: 1日のテーマ数
-        hashtags: 固定のハッシュタグ
         budget_usd: 概算コストの上限
         unit_usd: リンク無しの単価
         unit_read_usd: 投稿1件の読み取り単価（計測が投稿ごとに2回読む）
@@ -217,9 +202,23 @@ def plan_daily_posts(
         log_step(f"概算コストが上限に達しています（${spent:.2f} / ${budget_usd:.2f}）", "⏭️")
         return DailyPostPlan(group_ids=[], skipped_reason=f"予算上限（概算 ${spent:.2f}）")
 
-    articles = news.pick_unconsumed(CHANNEL_X, posts_per_day)
-    if not articles:
+    # **選ぶのと本文を取るのは動画と共通の1段**（`supply_articles`）。
+    # 動画側のスクレイピングは X の計画より後に走るので当てにできない
+    # （順序の理由は `src/web/dependencies.py` の日次タスク）。
+    supply = await supply_articles(news, CHANNEL_X, posts_per_day)
+    if not supply.candidates:
         return DailyPostPlan(group_ids=[], skipped_reason="X で未使用の記事がありません")
+
+    # **本文が取れなかった記事は使わない。** 動画側は本文が無くてもジョブに
+    # 投入して画面に失敗理由を残すが、X は諦める。タイトルだけでは投稿が
+    # 作れず（実測73字、下限95）、引き直し3回ぶんの API 呼び出しを捨てるだけ。
+    # 消費済みにしていないので、次回また候補に入る。
+    articles = supply.with_content
+    if not articles:
+        return DailyPostPlan(
+            group_ids=[],
+            skipped_reason=f"候補{len(supply.candidates)}件すべてで記事本文を取得できませんでした",
+        )
 
     schedule = _resolve_schedule(times, now, timezone)
     group_ids: list[str] = []
@@ -250,9 +249,9 @@ def plan_daily_posts(
 
         try:
             if caption:
-                drafts = generator.generate(article, kind, hashtags, caption=caption)
+                drafts = generator.generate(article, kind, caption=caption)
             else:
-                drafts = generator.generate(article, kind, hashtags)
+                drafts = generator.generate(article, kind)
         # 1件の生成失敗で1日を落とさない。残りの記事は積む
         except Exception as e:
             log_error(f"下書きの生成に失敗しました（{article.title[:24]}）: {e}")

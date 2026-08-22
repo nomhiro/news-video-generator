@@ -121,10 +121,8 @@ async def fetch_news(
     # 通常カテゴリのニュースを取得
     await aggregator.fetch_and_store()
 
-    # AI関連ニュースも取得
-    await aggregator.fetch_ai_news_and_store(
-        config.ai_search_queries, config.ai_news_limit_per_query
-    )
+    # AI関連の記事も取得（発信元のフィードから。理由は src/news/feeds.py）
+    await aggregator.fetch_ai_news_and_store(limit_per_feed=config.ai_news_limit_per_feed)
 
     categories = list(NewsCategory)
     selected_count = aggregator.get_selected_count()

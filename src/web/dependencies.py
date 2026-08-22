@@ -167,6 +167,13 @@ class AppContext:
             # 投稿できた記事はここで消費済みにする。積んだ時点では書かない
             # （出せなかった記事を二度と使えなくなるため）。
             on_posted=lambda article_id: _mark_posted_consumed(aggregator, article_id),
+            # **画像カードを実際に添付する唯一の配線。** これを渡さないと
+            # `post_due_once` の media_ids が常に None になり、カードの画像を
+            # `gpt-image-2`（クォータはリージョン単位で上限4、動画生成と
+            # 共食いする）で作って Blob に上げたうえで、**添付せずに投稿する**。
+            # 生成も保存も成功しログにも異常が出ないので、実物の投稿を見るまで
+            # 気付けない形で壊れる（実際にそうなっていた）。
+            fetch_image=artifact_store.fetch,
             max_post_delay_minutes=config.x_max_post_delay_minutes,
             # 上限判定は計画側だけでは足りない。積んだあとに上限を越えたら、
             # その日の残りが出てしまう（行は SCHEDULED のまま残す）。
@@ -328,21 +335,19 @@ def _build_scheduler(
         # `test_動画ジョブを積んでもカードは作られる` が両方を見張っている。
         await fetch_daily_news(
             aggregator,
-            search_queries=config.ai_search_queries,
-            ai_limit_per_query=config.ai_news_limit_per_query,
+            ai_limit_per_feed=config.ai_news_limit_per_feed,
         )
 
         # 動画の計画が失敗しても X の計画は独立して試す（逆も同様）。
         # 1つのトラブルで両方が止まると、原因の切り分けがしづらくなる。
         try:
-            post_plan = plan_daily_posts(
+            post_plan = await plan_daily_posts(
                 aggregator,
                 posts,
                 post_generator,
                 enabled=x_switch.is_enabled(),
                 times=config.x_post_times,
                 posts_per_day=config.x_posts_per_day,
-                hashtags=config.x_hashtags,
                 budget_usd=config.x_monthly_budget_usd,
                 unit_usd=config.x_cost_per_post_usd,
                 unit_with_link_usd=config.x_cost_per_post_with_link_usd,
@@ -371,8 +376,7 @@ def _build_scheduler(
             aggregator,
             jobs,
             formats=config.schedule_formats,
-            search_queries=config.ai_search_queries,
-            ai_limit_per_query=config.ai_news_limit_per_query,
+            ai_limit_per_feed=config.ai_news_limit_per_feed,
             articles_per_format=config.schedule_articles_per_format,
             # 取得は上で1回だけ済ませてある（理由2）。
             fetch=False,

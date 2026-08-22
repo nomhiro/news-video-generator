@@ -1,5 +1,6 @@
 """1日ぶんの投稿計画。"""
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,10 +21,16 @@ class FakeNews:
         # （`NewsAggregator`）は持っているので、うっかり呼ばれても
         # 型検査では気付けない。
         self.consumed: list[tuple[str, str]] = []
+        self.scraped: list[list[str]] = []
 
     def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
         assert channel == CHANNEL_X
         return self._articles[:needed]
+
+    async def scrape_articles(self, articles: list[NewsArticle]) -> list[NewsArticle]:
+        """本文はすでに入っているものとして返す（実物は HTTP を叩く）。"""
+        self.scraped.append([a.id for a in articles])
+        return articles
 
     def mark_consumed(self, article_id: str, channel: str) -> bool:
         self.consumed.append((article_id, channel))
@@ -48,7 +55,7 @@ class FakeGenerator:
         self._fail_for = fail_for or set()
         self.captions: list[str | None] = []
 
-    def generate(self, article, kind, hashtags, caption: str | None = None) -> list[NewPost]:
+    def generate(self, article, kind, caption: str | None = None) -> list[NewPost]:
         if article.id in self._fail_for:
             raise RuntimeError("生成に失敗しました")
         self.captions.append(caption)
@@ -141,6 +148,9 @@ def _article(suffix: str) -> NewsArticle:
         url=url,
         source="Example",
         category=NewsCategory.AI,
+        # 本文が空の記事は `plan_daily_posts` が飛ばす（タイトルだけでは
+        # 投稿が作れない）。テストの前提として本文を入れておく。
+        content="記事の本文。" * 30,
     )
 
 
@@ -155,14 +165,13 @@ def _plan(news, posts, generator, **overrides):
         "enabled": True,
         "times": TIMES,
         "posts_per_day": 4,
-        "hashtags": ["#AI"],
         "budget_usd": 20.0,
         "unit_usd": 0.015,
         "unit_with_link_usd": 0.20,
         "now": MORNING,
     }
     kwargs.update(overrides)
-    return plan_daily_posts(news, posts, generator, **kwargs)
+    return asyncio.run(plan_daily_posts(news, posts, generator, **kwargs))
 
 
 def test_記事ごとに時刻順で積む() -> None:

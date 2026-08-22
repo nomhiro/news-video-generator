@@ -19,40 +19,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from src.jobs.article_supply import SupportsArticleSupply, supply_articles
 from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
+from src.news.feeds import AI_FEEDS, Feed
 from src.utils.logger import log_error, log_step, log_success
-
-
-class SupportsNewsFetching(Protocol):
-    """ニュースストアの必要な部分だけ。"""
-
-    async def fetch_and_store(
-        self, limit_per_category: int = ...
-    ) -> dict[NewsCategory, list[NewsArticle]]:
-        """カテゴリ別にニュースを取得して保存する。"""
-        ...
-
-    async def fetch_ai_news_and_store(
-        self, search_queries: list[str], limit_per_query: int = ...
-    ) -> list[NewsArticle]:
-        """AI関連ニュースを取得して保存する。"""
-        ...
-
-    async def scrape_articles(self, articles: list[NewsArticle]) -> list[NewsArticle]:
-        """指定した記事の本文を取得する。"""
-        ...
-
-    def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
-        """そのチャネルでまだ使っていない記事を返す。"""
-        ...
 
 
 class SupportsNewsRefresh(Protocol):
     """取得だけを行うのに必要な部分。
 
-    `SupportsNewsFetching` から取得の2メソッドだけを抜いたもの。
-    `fetch_daily_news` は記事を選ばないので `pick_unconsumed` も
-    `scrape_articles` も要らない。
+    `fetch_daily_news` は記事を選ばないので、選択と本文取得
+    （`SupportsArticleSupply`）は要らない。
     """
 
     async def fetch_and_store(
@@ -62,17 +39,27 @@ class SupportsNewsRefresh(Protocol):
         ...
 
     async def fetch_ai_news_and_store(
-        self, search_queries: list[str], limit_per_query: int = ...
+        self, feeds: tuple[Feed, ...] | list[Feed] = ..., limit_per_feed: int = ...
     ) -> list[NewsArticle]:
-        """AI関連ニュースを取得して保存する。"""
+        """AI関連の記事を発信元のフィードから取得して保存する。"""
         ...
+
+
+class SupportsNewsFetching(SupportsNewsRefresh, SupportsArticleSupply, Protocol):
+    """`plan_daily_batch` が使う部分。取得 + 供給。
+
+    **選択と本文取得は `SupportsArticleSupply` から継承する。**
+    以前は同じ2メソッドをここと `post_planner` に書き写していた。
+    写しがあると、片方の実装だけが変わる（実際に
+    `ARTICLE_OVERFETCH` が X 側にしか入らなかった）。
+    """
 
 
 async def fetch_daily_news(
     news: SupportsNewsRefresh,
     *,
-    search_queries: list[str],
-    ai_limit_per_query: int = 5,
+    feeds: tuple[Feed, ...] | list[Feed] = AI_FEEDS,
+    ai_limit_per_feed: int = 3,
 ) -> None:
     """その日のニュースを取得してストアに入れる。
 
@@ -90,13 +77,13 @@ async def fetch_daily_news(
 
     Args:
         news: ニュースストア
-        search_queries: AI ニュースの検索クエリ
-        ai_limit_per_query: クエリごとの取得件数
+        feeds: AI 記事のフィード（既定は `AI_FEEDS`）
+        ai_limit_per_feed: フィードごとの取得件数
     """
     log_step("定期実行: ニュースを取得します", "🗓️")
     try:
         await news.fetch_and_store()
-        await news.fetch_ai_news_and_store(search_queries, ai_limit_per_query)
+        await news.fetch_ai_news_and_store(feeds, ai_limit_per_feed)
     except Exception as e:
         log_error(f"ニュースの取得に失敗しました（既存の記事で続行します）: {e}")
 
@@ -138,8 +125,8 @@ async def plan_daily_batch(
     jobs: SupportsEnqueue,
     *,
     formats: list[str],
-    search_queries: list[str],
-    ai_limit_per_query: int = 5,
+    feeds: tuple[Feed, ...] | list[Feed] = AI_FEEDS,
+    ai_limit_per_feed: int = 3,
     articles_per_format: int = 1,
     language: str = "ja",
     fetch: bool = True,
@@ -150,8 +137,8 @@ async def plan_daily_batch(
         news: ニュースストア
         jobs: ジョブ表
         formats: 作る形式（例: `["short", "long"]`）
-        search_queries: AI ニュースの検索クエリ
-        ai_limit_per_query: クエリごとの取得件数
+        feeds: AI 記事のフィード
+        ai_limit_per_feed: フィードごとの取得件数
         articles_per_format: 形式ごとに何件の記事を対象にするか
         language: 言語コード
         fetch: 自分でニュースを取得するか。**Web の日次タスクは False**
@@ -170,22 +157,24 @@ async def plan_daily_batch(
         return DailyPlan(batch_ids={}, skipped_reason="実行中のジョブがあります")
 
     if fetch:
-        await fetch_daily_news(
-            news, search_queries=search_queries, ai_limit_per_query=ai_limit_per_query
-        )
+        await fetch_daily_news(news, feeds=feeds, ai_limit_per_feed=ai_limit_per_feed)
     log_step(f"定期実行: 動画のジョブを組みます（形式: {', '.join(formats)}）", "🗓️")
 
     needed = articles_per_format * len(formats)
-    candidates = news.pick_unconsumed(CHANNEL_VIDEO, needed)
-    if not candidates:
+    # **選ぶのと本文を取るのは X と共通の1段**（`supply_articles`）。
+    # 必要数の3倍を候補にするのもここ——以前は必要数ぴったりを選んでいたので、
+    # スクレイピングが1件落ちるとその形式の動画が作れずに1日が終わっていた。
+    supply = await supply_articles(news, CHANNEL_VIDEO, needed)
+    if not supply.candidates:
         log_error("未生成の記事が見つかりませんでした")
         return DailyPlan(batch_ids={}, skipped_reason="未生成の記事がありません")
 
-    # 本文を取る。取れなかった記事も投入する（ジョブが理由付きで失敗し、
-    # 画面に「なぜ作れなかったか」が残る。黙って捨てると分からなくなる）。
-    scraped = await news.scrape_articles(candidates)
-    by_id = {a.id: a for a in scraped}
-    ordered = [by_id.get(a.id, a) for a in candidates]
+    # **本文が取れた記事を優先する。** ただし1件も取れなかったときは候補に
+    # 落ちる（本文の無い記事でもジョブに投入し、画面に「なぜ作れなかったか」を
+    # 残す。黙って捨てるとその日なにも起きなかった理由が分からなくなる）。
+    # X 側は同じ状況で諦める——投稿は1日4件あり、1件の欠落を画面に残す
+    # 価値が無いため。**機構は共通、この判断だけが計画ごとに違う。**
+    ordered = supply.with_content or supply.candidates
 
     batch_ids: dict[str, str] = {}
     for index, video_format in enumerate(formats):

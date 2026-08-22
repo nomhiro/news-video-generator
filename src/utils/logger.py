@@ -43,7 +43,7 @@ import sys
 # 絵文字を新しく使うときはここにも足す。
 # `tests/test_logger.py::test_every_emoji_in_use_is_covered_by_the_probe` が
 # src/ と main.py を走査して、漏れていれば失敗する。
-_EMOJI_PROBE = "📌✅❌⚠️🚀🎉💡🎬🎨🎙️📝♻️🎞️📤📥📰🔉🔐🔧🗄️🤖⚙️🎯⏱️⏭️🗓️🔍☁️🧵🐦📈"
+_EMOJI_PROBE = "📌✅❌⚠️🚀🎉💡🎬🎨🎙️📝♻️🎞️📤📥📰🔉🔐🔧🗄️🤖⚙️🎯⏱️⏭️🗓️🔍☁️🧵🐦📈📡"
 
 
 def _can_encode(text: str) -> bool:

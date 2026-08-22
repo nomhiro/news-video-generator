@@ -172,7 +172,7 @@ class FakeNews:
         return {}
 
     async def fetch_ai_news_and_store(
-        self, search_queries: list[str], limit_per_query: int = 5
+        self, feeds: object = (), limit_per_feed: int = 3
     ) -> list[NewsArticle]:
         if self.fetch_fails:
             raise RuntimeError("取得に失敗")
@@ -213,7 +213,7 @@ async def test_enqueues_one_batch_per_format() -> None:
     news = FakeNews([_article("a1", "記事1"), _article("a2", "記事2")])
     jobs = FakeJobs()
 
-    plan = await plan_daily_batch(news, jobs, formats=["short", "long"], search_queries=["生成AI"])
+    plan = await plan_daily_batch(news, jobs, formats=["short", "long"])
 
     assert plan.enqueued is True
     assert set(plan.batch_ids) == {"short", "long"}
@@ -230,7 +230,7 @@ async def test_skips_when_jobs_are_active() -> None:
     news = FakeNews([_article("a1", "記事1")])
     jobs = FakeJobs(busy=True)
 
-    plan = await plan_daily_batch(news, jobs, formats=["short"], search_queries=[])
+    plan = await plan_daily_batch(news, jobs, formats=["short"])
 
     assert plan.enqueued is False
     assert plan.skipped_reason is not None
@@ -247,7 +247,7 @@ async def test_skips_already_generated_articles() -> None:
     )
     jobs = FakeJobs()
 
-    await plan_daily_batch(news, jobs, formats=["short"], search_queries=[])
+    await plan_daily_batch(news, jobs, formats=["short"])
 
     assert jobs.batches[0][1] == [("fresh", "未生成")]
 
@@ -260,7 +260,7 @@ async def test_does_not_touch_the_users_selection() -> None:
     news = FakeNews([_article("a1", "記事1")])
     jobs = FakeJobs()
 
-    await plan_daily_batch(news, jobs, formats=["short"], search_queries=[])
+    await plan_daily_batch(news, jobs, formats=["short"])
 
     assert news.selection_touched is False
 
@@ -273,7 +273,7 @@ async def test_continues_when_fetching_fails() -> None:
     news = FakeNews([_article("a1", "記事1")], fetch_fails=True)
     jobs = FakeJobs()
 
-    plan = await plan_daily_batch(news, jobs, formats=["short"], search_queries=[])
+    plan = await plan_daily_batch(news, jobs, formats=["short"])
 
     assert plan.enqueued is True
     assert jobs.batches[0][1] == [("a1", "記事1")]
@@ -289,7 +289,7 @@ async def test_plan_daily_batch_fetches_by_default() -> None:
     news = FakeNews([_article("a1", "記事1")])
     jobs = FakeJobs()
 
-    await plan_daily_batch(news, jobs, formats=["short"], search_queries=["生成AI"])
+    await plan_daily_batch(news, jobs, formats=["short"])
 
     assert news.fetch_calls == 1
 
@@ -303,9 +303,7 @@ async def test_plan_daily_batch_skips_fetching_when_told_to() -> None:
     news = FakeNews([_article("a1", "記事1")])
     jobs = FakeJobs()
 
-    plan = await plan_daily_batch(
-        news, jobs, formats=["short"], search_queries=["生成AI"], fetch=False
-    )
+    plan = await plan_daily_batch(news, jobs, formats=["short"], fetch=False)
 
     assert news.fetch_calls == 0
     # 取得しないだけで、計画そのものは通常どおり成立する
@@ -322,7 +320,7 @@ async def test_fetch_daily_news_never_raises() -> None:
     """
     news = FakeNews([_article("a1", "記事1")], fetch_fails=True)
 
-    await fetch_daily_news(news, search_queries=["生成AI"])
+    await fetch_daily_news(news)
 
     assert news.fetch_calls == 1  # 試みてはいる
 
@@ -331,7 +329,7 @@ async def test_reports_when_there_is_nothing_to_build() -> None:
     news = FakeNews([_article("done", "生成済み", generated=True)])
     jobs = FakeJobs()
 
-    plan = await plan_daily_batch(news, jobs, formats=["short"], search_queries=[])
+    plan = await plan_daily_batch(news, jobs, formats=["short"])
 
     assert plan.enqueued is False
     assert plan.skipped_reason == "未生成の記事がありません"
@@ -345,7 +343,7 @@ async def test_builds_what_it_can_when_articles_run_short() -> None:
     news = FakeNews([_article("only", "1件だけ")])
     jobs = FakeJobs()
 
-    plan = await plan_daily_batch(news, jobs, formats=["short", "long"], search_queries=[])
+    plan = await plan_daily_batch(news, jobs, formats=["short", "long"])
 
     assert list(plan.batch_ids) == ["short"]
     assert jobs.batches[0][1] == [("only", "1件だけ")]
@@ -360,6 +358,6 @@ async def test_scrapes_the_chosen_articles() -> None:
     news = FakeNews([_article("a1", "記事1"), _article("a2", "記事2")])
     jobs = FakeJobs()
 
-    await plan_daily_batch(news, jobs, formats=["short", "long"], search_queries=[])
+    await plan_daily_batch(news, jobs, formats=["short", "long"])
 
     assert news.scraped == ["a1", "a2"]

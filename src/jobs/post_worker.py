@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -28,6 +29,15 @@ from src.utils.logger import log_error, log_step, log_success
 # 投稿時刻の精度は分単位で十分なので、30秒で足りる。
 POLL_INTERVAL_SEC = 30.0
 
+# 画像キー -> ローカルパスを**貸す**コンテキストマネージャ。
+#
+# 素の `Callable[[str], Path]` にしてはいけない。`ArtifactStore.fetch` は
+# Blob 保存のとき一時ファイルにダウンロードして貸し、ブロックを抜けたら
+# 消す契約になっている（生成物は数MBあり、放置するとディスクを埋める）。
+# パスだけ受け取って `with` の外で使うと、ローカル保存では動くのに
+# **Blob 構成でだけ**ファイルが消えた後を触ることになる。
+FetchImage = Callable[[str], AbstractContextManager[Path]]
+
 
 class SupportsSwitch(Protocol):
     """自動投稿の有効/無効の判定だけ。"""
@@ -40,7 +50,7 @@ def post_due_once(
     client: XClient,
     switch: SupportsSwitch,
     now: datetime | None = None,
-    fetch_image: Callable[[str], Path] | None = None,
+    fetch_image: FetchImage | None = None,
     on_posted: Callable[[str], None] | None = None,
 ) -> bool:
     """予定時刻を過ぎた投稿を1件だけ出す。
@@ -87,7 +97,11 @@ def post_due_once(
     try:
         media_ids: list[str] | None = None
         if post.kind is PostKind.CARD and post.image_key and fetch_image is not None:
-            media_ids = [client.upload_media(fetch_image(post.image_key))]
+            # **アップロードは `with` の内側で行う。** 外に出すと、Blob 構成では
+            # 一時ファイルが消えた後のパスを渡すことになる（`FetchImage` の注記）。
+            # `create_post` は media_id（文字列）しか使わないので外でよい。
+            with fetch_image(post.image_key) as image_path:
+                media_ids = [client.upload_media(image_path)]
 
         tweet_id = client.create_post(post.body, reply_to=reply_to, media_ids=media_ids)
     except XSendUncertainError as e:
@@ -125,7 +139,7 @@ class PostWorker:
         client_factory: Callable[[], XClient],
         switch: SupportsSwitch,
         poll_interval: float = POLL_INTERVAL_SEC,
-        fetch_image: Callable[[str], Path] | None = None,
+        fetch_image: FetchImage | None = None,
         on_posted: Callable[[str], None] | None = None,
         max_post_delay_minutes: int | None = None,
         budget: PostBudget | None = None,

@@ -25,7 +25,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 #
 # pydantic-settings は list 型のフィールドを「複雑な型」として扱い、
 # 環境変数の値を **field_validator より前に json.loads する**。
-# そのため `AI_SEARCH_QUERIES=生成AI,ChatGPT` のような素直な書き方は
+# そのため `SCHEDULE_FORMATS=short,long` のような素直な書き方は
 # `SettingsError: error parsing value for field ...` で落ちる。
 #
 # 厄介なのは、`.env` 経由（DotEnvSettingsSource）では通り、
@@ -34,23 +34,6 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # （一度踏んだ）。NoDecode を付けると JSON 解釈を飛ばし、
 # 下の mode="before" バリデータが分割を担当する。
 CommaSeparated = Annotated[list[str], NoDecode]
-
-# AI関連ニュースの既定の検索クエリ。
-# 環境変数 AI_SEARCH_QUERIES で上書きできる。
-DEFAULT_AI_SEARCH_QUERIES: tuple[str, ...] = (
-    "生成AI",
-    "ChatGPT",
-    "Claude AI",
-    "Claude Code",
-    "Gemini AI",
-    "GitHub Copilot",
-    "大規模言語モデル LLM",
-    "OpenAI",
-    "Anthropic",
-    "Stable Diffusion",
-    "Midjourney",
-    "画像生成AI",
-)
 
 
 class Config(BaseSettings):
@@ -207,8 +190,10 @@ class Config(BaseSettings):
     # --- ニュース取得 ---
     news_data_dir: Path = Field(default=Path("./data/news"))
     news_fetch_limit: int = Field(default=10, ge=1)
-    ai_search_queries: CommaSeparated = Field(default=list(DEFAULT_AI_SEARCH_QUERIES))
-    ai_news_limit_per_query: int = Field(default=5, ge=1)
+    # AI カテゴリはフィードから埋める（一覧と理由は src/news/feeds.py）。
+    # 検索クエリ（旧 AI_SEARCH_QUERIES）は廃止した——語が一致するだけの
+    # 記事を一次情報と区別できず、実物の投稿が芸能ニュースになった。
+    ai_news_limit_per_feed: int = Field(default=3, ge=1)
 
     # --- 定期実行 ---
     #
@@ -282,16 +267,20 @@ class Config(BaseSettings):
 
     # 概算コストの上限（USD/月）と単価。
     # 単価を設定に出しているのは、X の料金改定に追随するため。
-    x_monthly_budget_usd: float = Field(default=20.0, gt=0)
+    #
+    # **$30 は「全投稿がリンク付き」を前提にした値。** 記事の元リンクを
+    # 付けるようにしたので `has_link` は常に True で、単価は安い方（$0.015）
+    # ではなく13倍の方（$0.20）が全件に効く。4件/日 × 30日 = 120件で
+    # 投稿 $24.00 + 読み取り $1.20 = **$25.20**。$20 のままだと月の
+    # 4週目で `is_over_budget` が立ち、**月末の数日は下書きが1件も
+    # 積まれない**（計画側で止めるので、静かに投稿が消える）。
+    # 投稿頻度（`x_posts_per_day`）を上げるならここも一緒に見直す。
+    x_monthly_budget_usd: float = Field(default=30.0, gt=0)
     x_cost_per_post_usd: float = Field(default=0.015, ge=0)
     x_cost_per_post_with_link_usd: float = Field(default=0.20, ge=0)
     # 投稿1件の読み取り単価。計測が投稿ごとに2回読むぶんを概算に入れるために要る。
     # 実請求と突き合わせて、読み取りが概算から丸ごと落ちていることに気付いた。
     x_cost_per_read_usd: float = Field(default=0.005, ge=0)
-
-    # 固定のハッシュタグ。モデルに作らせない
-    # （無関係なタグはスパム判定を受ける）。
-    x_hashtags: CommaSeparated = Field(default=["#AI", "#生成AI"])
 
     # 自動投稿スイッチの実体。ジョブ表（SQLite）と違い Azure Files を想定する
     # （リビジョン更新で消えると、画面で有効にした翌日に黙って投稿が止まる）。
@@ -308,26 +297,6 @@ class Config(BaseSettings):
     # を1日分すべて窓の内側に収めるには、実行時刻がこの帯の中である必要がある
     # （境界に近いと、その日の最初か最後の投稿が窓から外れる）。
     x_metrics_time: str = Field(default="11:00")
-
-    @field_validator("ai_search_queries", mode="before")
-    @classmethod
-    def _parse_ai_search_queries(cls, value: object) -> object:
-        """カンマ区切りの文字列をリストに変換する。
-
-        pydantic は list 型の環境変数を JSON として解釈しようとするため、
-        `AI_SEARCH_QUERIES=生成AI,ChatGPT` のような素直な書き方を
-        受け付けるにはここで変換する必要がある。
-
-        Args:
-            value: 環境変数の生の値、またはすでにリスト
-
-        Returns:
-            リスト（空文字列なら既定値）
-        """
-        if isinstance(value, str):
-            queries = [q.strip() for q in value.split(",") if q.strip()]
-            return queries or list(DEFAULT_AI_SEARCH_QUERIES)
-        return value
 
     @field_validator("schedule_formats", mode="before")
     @classmethod
@@ -388,7 +357,7 @@ class Config(BaseSettings):
             raise ValueError(f"SCHEDULE_TIMEZONE が不正です: {value!r}") from e
         return value
 
-    @field_validator("x_post_times", "x_hashtags", mode="before")
+    @field_validator("x_post_times", mode="before")
     @classmethod
     def _parse_x_comma_separated(cls, value: object) -> object:
         """カンマ区切りの文字列をリストに変換する。

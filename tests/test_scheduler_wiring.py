@@ -74,7 +74,7 @@ def captured_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     calls: dict[str, Any] = {}
 
-    def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
+    async def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
         calls.update(kwargs)
         # 実物と同じ型を返す。呼び出し元は `skipped_reason` を読んで
         # ログに出すので、None を返すフェイクだと本物では起きない
@@ -132,7 +132,7 @@ def test_積まなかった理由をログに出す(tmp_path: Path, monkeypatch:
     async def fake_fetch_daily_news(news: Any, **kwargs: Any) -> None:
         return None
 
-    def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
+    async def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
         return DailyPostPlan(group_ids=[], skipped_reason="予算上限（概算 $40.00）")
 
     monkeypatch.setattr(dependencies, "plan_daily_batch", fake_plan_daily_batch)
@@ -183,6 +183,37 @@ def test_投稿ワーカーの_on_posted_が記事ストアに繋がっている
         context.aggregator.close()
 
 
+def test_投稿ワーカーの_fetch_image_が保存先に繋がっている(tmp_path: Path) -> None:
+    """`fetch_image=` の配線が無く、画像カードが**添付されずに**投稿されていた。
+
+    `post_due_once` は `fetch_image is None` なら media_ids を組まずに投稿する。
+    画像の生成（`gpt-image-2`。クォータはリージョン単位で上限4、動画生成と
+    共食いする）と Blob への保存は成功しログにも異常が出ないので、
+    **実物の投稿を見るまで気付けない**形で壊れる。`on_posted` と同じ種類の
+    配線漏れ（I4）なので、同じ形で見張る。
+
+    型も見る。`ArtifactStore.fetch` はコンテキストマネージャで、Blob 保存では
+    ブロックを抜けると一時ファイルが消える。素のパスを返す callable に
+    差し替えると、ローカルでは通るのに Blob 構成でだけ壊れる。
+    """
+    context = dependencies.AppContext.build(_config(tmp_path))
+    try:
+        fetch_image = context.post_worker._fetch_image
+        assert fetch_image is not None, "fetch_image が PostWorker に渡っていない"
+
+        source = tmp_path / "card.png"
+        source.write_bytes(b"png")
+        # `publish` の戻り値は保存先の絶対パスなので、キーは自分で持つ
+        # （`fetch` はキーを受ける）。
+        key = "social/cards/a1.png"
+        context.artifact_store.publish(source, key)
+
+        with fetch_image(key) as lent:
+            assert lent.read_bytes() == b"png"
+    finally:
+        context.aggregator.close()
+
+
 def test_動画ジョブを積んでもカードは作られる(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,7 +247,7 @@ def test_動画ジョブを積んでもカードは作られる(
         # no-op にすると「X が今回の取得を見られるか」を検証できない。
         news._save_category(NewsCategory.AI, [_fetched_article()])
 
-    def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
+    async def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
         jobs = kwargs["jobs"]
         enqueued_before_posts.append(jobs.has_active_jobs())
         news = args[0]
@@ -260,7 +291,7 @@ def test_日次タスクは取得を先に1回だけ呼ぶ(tmp_path: Path, monke
     async def fake_plan_daily_batch(*args: Any, **kwargs: Any) -> None:
         order.append(f"video(fetch={kwargs['fetch']})")
 
-    def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
+    async def fake_plan_daily_posts(*args: Any, **kwargs: Any) -> DailyPostPlan:
         order.append("posts")
         return DailyPostPlan(group_ids=[])
 
