@@ -9,6 +9,10 @@
   `id` はここが持つ。選択パネル側から解除したときに、このカードを
   out-of-band swap で戻すために必要（対になる操作でカードが古いまま
   残るのは、選択したときと同じ壊れ方）。
+
+  **高さを削っている。** 以前は1件あたり約160pxで、53件で 8,633px になった。
+  一覧を内部スクロールに閉じ込めた今、1件の高さは「一度に何件見えるか」を
+  直接決める。要約は1行に落とし、サムネイルを 96x64 から 56x56 にした。
 #}
 <article id="article-{{ article.id }}"
          {#
@@ -18,53 +22,54 @@
            htmx は `htmx:oobErrorNoTarget` を発火するだけで何もしない。
          #}
          {% if oob %}hx-swap-oob="true"{% endif %}
-         class="border rounded-lg p-4 hover:shadow-md transition-shadow
-                {% if article.is_selected %}bg-blue-50 border-blue-300{% else %}bg-white{% endif %}">
-    <div class="flex items-start gap-4">
-        <!-- Thumbnail -->
+         class="rounded-lg border p-3 transition-colors
+                {% if article.is_selected %}
+                border-teal/50 bg-teal/5
+                {% else %}
+                border-ink/10 bg-raised hover:border-ink/25
+                {% endif %}">
+    <div class="flex items-start gap-3">
+        {#
+          サムネイルは記事の見分けに効く（媒体ごとに絵の質感が違うので、
+          読んだ記事かどうかを文字より速く判断できる）。無いときは
+          プレースホルダを置かない——記号を置くと、絵が無いこと自体を
+          情報として読ませてしまう。
+        #}
         {% if article.thumbnail_url %}
         <img src="{{ article.thumbnail_url }}"
-             alt=""
-             class="w-24 h-16 object-cover rounded flex-shrink-0"
+             alt="" loading="lazy"
+             class="w-14 h-14 object-cover rounded shrink-0 bg-ink/5"
              onerror="this.style.display='none'">
-        {% else %}
-        <div class="w-24 h-16 bg-gray-200 rounded flex items-center justify-center flex-shrink-0">
-            <span class="text-2xl">📰</span>
-        </div>
         {% endif %}
 
-        <!-- Content -->
         <div class="flex-1 min-w-0">
-            <h4 class="font-semibold text-gray-800 line-clamp-2">
+            <h4 class="font-medium text-ink text-sm leading-snug line-clamp-2">
                 {{ article.title }}
             </h4>
-            <div class="flex items-center gap-2 mt-1 text-sm text-gray-500">
-                <span class="font-medium">{{ article.source }}</span>
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 text-xs text-ink/50">
+                <span>{{ article.source }}</span>
                 {% if article.published_at %}
-                <span>•</span>
-                <span>{{ article.published_at.strftime('%m/%d %H:%M') }}</span>
+                <span class="tnum">{{ article.published_at.strftime('%m/%d %H:%M') }}</span>
                 {% endif %}
                 {#
-                  チャネル別の消費を丸2つで出す。1本のフラグ
-                  （video_generated）では「動画にはしたが X には
-                  出していない」を表せないため、チャネルごとに見せる。
+                  消費はチャネルごとに語で出す。1本のフラグ（video_generated）
+                  では「動画にはしたが X には出していない」を表せない。
+                  以前は丸2つで色だけで示していたが、この画面の規律は
+                  「状態は色ではなく語で示す」（base.html）。
                 #}
-                <span class="inline-flex items-center gap-1 ml-1" title="動画 / X への消費状況">
-                    <span class="w-2 h-2 rounded-full {{ 'bg-teal' if article.is_consumed_by('video') else 'bg-gray-200' }}"
-                          title="動画: {{ '済' if article.is_consumed_by('video') else '未' }}"></span>
-                    <span class="w-2 h-2 rounded-full {{ 'bg-teal' if article.is_consumed_by('x') else 'bg-gray-200' }}"
-                          title="X: {{ '済' if article.is_consumed_by('x') else '未' }}"></span>
-                </span>
+                {% if article.is_consumed_by('video') %}
+                <span class="border border-teal/40 text-teal rounded px-1">動画済</span>
+                {% endif %}
+                {% if article.is_consumed_by('x') %}
+                <span class="border border-teal/40 text-teal rounded px-1">X済</span>
+                {% endif %}
             </div>
             {% if article.summary %}
-            <p class="text-gray-600 text-sm mt-2 line-clamp-2">
-                {{ article.summary }}
-            </p>
+            <p class="text-ink/60 text-xs mt-1 truncate">{{ article.summary }}</p>
             {% endif %}
         </div>
 
-        <!-- Select Button -->
-        <div class="flex-shrink-0">
+        <div class="shrink-0">
             {#
               押したカードそのものを差し替える。応答は
               `partials/news_card_swap.html` で、カード本体に加えて
@@ -74,18 +79,15 @@
                 hx-post="/news/{{ article.id }}/toggle"
                 hx-target="#article-{{ article.id }}"
                 hx-swap="outerHTML"
-                class="px-4 py-2 rounded-lg font-medium transition-colors
+                class="px-2.5 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap
+                       focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal
                        {% if article.is_selected %}
-                       bg-red-100 text-red-700 hover:bg-red-200
+                       bg-teal text-paper hover:bg-teal/90
                        {% else %}
-                       bg-blue-100 text-blue-700 hover:bg-blue-200
+                       border border-ink/20 text-ink/70 hover:bg-ink/5
                        {% endif %}"
             >
-                {% if article.is_selected %}
-                <span>✕ 解除</span>
-                {% else %}
-                <span>+ 選択</span>
-                {% endif %}
+                {{ "選択中" if article.is_selected else "選択" }}
             </button>
         </div>
     </div>

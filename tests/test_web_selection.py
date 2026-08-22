@@ -1,8 +1,11 @@
 """記事の選択が押した場所で見えることの検証。
 
-2026-08-22 の実測では、選択ボタンを押してもカードのラベル（「+ 選択」）も
-背景も変わらず、唯一の反映である件数のバッジはビューポートから 9,088px 下に
-あった。押しても画面上で何も起きない状態だったので、ここで固定する。
+2026-08-22 の実測では、選択ボタンを押してもカードのラベルも背景も変わらず、
+唯一の反映である件数のバッジはビューポートから 9,088px 下にあった。
+押しても画面上で何も起きない状態だったので、ここで固定する。
+
+ラベルは「選択中」の有無で見る。押した状態の語だけを見れば、未選択の語
+（「選択」）が選択中の語に部分一致することに引っかからない。
 """
 
 from collections.abc import Iterator
@@ -69,8 +72,7 @@ def test_選択するとカードが選択済みの見た目で返る(
     body = client.post(f"/news/{article_id}/toggle").text
 
     assert f'id="article-{article_id}"' in body
-    assert "解除" in body
-    assert "+ 選択" not in body
+    assert "選択中" in body
 
 
 def test_選択の応答が件数と選択パネルも運ぶ(client: TestClient, aggregator: NewsAggregator) -> None:
@@ -95,7 +97,7 @@ def test_もう一度押すと未選択に戻る(client: TestClient, aggregator:
 
     body = client.post(f"/news/{article_id}/toggle").text
 
-    assert "+ 選択" in body
+    assert "選択中" not in body
     assert "0件" in body
 
 
@@ -110,7 +112,7 @@ def test_選択パネルから解除するとカードも一緒に戻る(
 
     assert f'id="article-{article_id}"' in body
     assert 'hx-swap-oob="true"' in body
-    assert "+ 選択" in body
+    assert "選択中" not in body
 
 
 def test_知らない記事の選択は_404(client: TestClient) -> None:

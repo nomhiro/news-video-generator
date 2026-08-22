@@ -80,27 +80,31 @@ async def get_news_by_category(
 ):
     """カテゴリ別ニュース一覧を取得する（HTMXパーシャル）。
 
+    カテゴリの帯も out-of-band で返す（`news_list_swap.html`）。
+    アクティブなカテゴリを知っているのはサーバーだけなので、帯の見た目を
+    クライアント側の `onclick` で付け替えると権威が2つになる。
+
     Args:
         request: FastAPIリクエスト
         category: カテゴリ名
         aggregator: ニュース取得インスタンス
 
     Returns:
-        HTMLResponse: ニュース一覧パーシャルHTML
+        HTMLResponse: ニュース一覧 + カテゴリの帯（out-of-band）
     """
     try:
         cat = NewsCategory(category)
     except ValueError:
         cat = NewsCategory.GENERAL
 
-    articles = aggregator.get_articles_by_category(cat)
-
     return templates.TemplateResponse(
         request,
-        "partials/news_list.html",
+        "partials/news_list_swap.html",
         {
-            "articles": articles,
+            "articles": aggregator.get_articles_by_category(cat),
             "category": cat,
+            "categories": list(NewsCategory),
+            "active_category": cat,
         },
     )
 
@@ -113,12 +117,16 @@ async def fetch_news(
 ):
     """最新ニュースを取得する（HTMXパーシャル）。
 
+    **取得した一覧を返す。** 以前はカテゴリタブだけを返していたので、
+    取得しても一覧は古いまま残り、何件になったのかも分からなかった
+    （唯一の合図が「✅ 取得完了」の点滅だった）。
+
     Args:
         request: FastAPIリクエスト
         aggregator: ニュース取得インスタンス
 
     Returns:
-        HTMLResponse: カテゴリタブパーシャルHTML
+        HTMLResponse: ニュース一覧 + カテゴリの帯（out-of-band）
     """
     # 通常カテゴリのニュースを取得
     await aggregator.fetch_and_store()
@@ -126,17 +134,19 @@ async def fetch_news(
     # AI関連の記事も取得（発信元のフィードから。理由は src/news/feeds.py）
     await aggregator.fetch_ai_news_and_store(limit_per_feed=config.ai_news_limit_per_feed)
 
-    categories = list(NewsCategory)
-    selected_count = aggregator.get_selected_count()
+    # 取得後に見せるのは AI。自動生成が記事を選ぶのはこのカテゴリだけ
+    # （`AUTO_SOURCE_CATEGORIES`）。
+    active = NewsCategory.AI
 
     return templates.TemplateResponse(
         request,
-        "partials/category_tabs.html",
+        "partials/news_list_swap.html",
         {
-            "categories": categories,
-            "active_category": NewsCategory.AI,  # AIカテゴリをデフォルトに
-            "selected_count": selected_count,
-            "fetch_success": True,
+            "articles": aggregator.get_articles_by_category(active),
+            "category": active,
+            "categories": list(NewsCategory),
+            "active_category": active,
+            "fetched": True,
         },
     )
 

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!--
+    この画面のモチーフ。地はインク（#16232B）、走っている縦線が「いま」
+    （#B23B2E）で、左右の点が過ぎた枠とこれから出る枠。
+    トークンは static/css/input.css と揃えている。
+  -->
+  <rect width="32" height="32" rx="7" fill="#16232B"/>
+  <circle cx="9" cy="16" r="2.5" fill="#0F6E6B"/>
+  <circle cx="23" cy="16" r="2.5" fill="#C97A16"/>
+  <rect x="15.25" y="6" width="1.5" height="20" rx="0.75" fill="#B23B2E"/>
+</svg>

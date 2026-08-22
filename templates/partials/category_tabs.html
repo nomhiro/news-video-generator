@@ -1,36 +1,36 @@
-<div id="category-tabs" class="flex flex-wrap gap-2">
-    {% for category in categories %}
-    <button
-        hx-get="/news/{{ category.value }}"
-        hx-target="#news-list"
-        hx-swap="innerHTML"
-        hx-indicator="#loading-{{ category.value }}"
-        class="px-4 py-2 rounded-lg font-medium transition-all
-               {% if category == active_category %}
-               bg-blue-600 text-white shadow-md
-               {% else %}
-               bg-white text-gray-700 hover:bg-gray-50 border border-gray-200
-               {% endif %}"
-        onclick="document.querySelectorAll('#category-tabs button').forEach(b => {
-            b.classList.remove('bg-blue-600', 'text-white', 'shadow-md');
-            b.classList.add('bg-white', 'text-gray-700', 'border', 'border-gray-200');
-        });
-        this.classList.remove('bg-white', 'text-gray-700', 'border', 'border-gray-200');
-        this.classList.add('bg-blue-600', 'text-white', 'shadow-md');"
-    >
-        <span id="loading-{{ category.value }}" class="htmx-indicator mr-1">
-            <svg class="w-4 h-4 spinner inline" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-        </span>
-        {{ category.display_name }}
-    </button>
-    {% endfor %}
+{#
+  カテゴリの選択。
 
-    {% if fetch_success %}
-    <span class="px-4 py-2 text-green-600 font-medium animate-pulse">
-        ✅ 取得完了
-    </span>
-    {% endif %}
-</div>
+  **この partial は id を持たない。** 置き場所（#category-tabs）は呼び出し側が
+  持つ。以前はここにも同じ id があり、文書内に2つ存在していた——htmx は最初の
+  一致しか入れ替えないので、片方が古い状態を映したまま残る形の罠
+  （x_status.html で2回踏んでいる）。
+
+  **アクティブ状態の権威はサーバーだけ。** 以前は `{% if category ==
+  active_category %}` に加えて、`onclick` で全ボタンのクラスを手書きで
+  付け替えていた。同じことを2箇所で決めていたので、片方だけ変えるとずれる。
+  いまは `/news/{category}` の応答がこの帯を out-of-band で差し替える。
+
+  9つ並ぶので1行に収める。押せる的として十分な高さは保ちつつ、
+  記事一覧に高さを譲る（一覧は選ぶための場所で、タブは経路に過ぎない）。
+#}
+{% for item in categories %}
+<button
+    hx-get="/news/{{ item.value }}"
+    hx-target="#news-list"
+    hx-swap="innerHTML"
+    hx-indicator="#category-indicator"
+    aria-current="{{ 'page' if item == active_category else 'false' }}"
+    {# `px-2` は9つが1行に収まる幅から決めた（px-2.5 だと実測で2行に折れ、
+       28px ぶん記事一覧の高さを食う）。 #}
+    class="px-2 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap
+           focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal
+           {% if item == active_category %}
+           bg-ink text-paper
+           {% else %}
+           border border-ink/15 text-ink/70 hover:bg-ink/5
+           {% endif %}"
+>
+    {{ item.display_name }}
+</button>
+{% endfor %}
