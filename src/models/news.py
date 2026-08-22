@@ -8,6 +8,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from src.utils.html_text import strip_html
+
 
 class NewsCategory(StrEnum):
     """ニュースカテゴリの列挙型。
@@ -88,6 +90,26 @@ class NewsArticle:
     # デプロイ直後に同じ記事が再投稿される。記事データは Azure Files に
     # あるので残る。
     consumed: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """要約から HTML を落とす。
+
+        **正規化はここ1箇所で行う。** RSS の `summary` は HTML を含んでよい
+        仕様で、note.com のフィードは本文の先頭を要素ごと渡してくる。
+        画面はテンプレートで正しくエスケープするため、素で持つと
+        `<h2 id="dc8acd71-...">` がそのまま文字として見える（実測）。
+
+        情報源ごとに落とすと片方だけが腐る。実際に `GoogleNewsSource` は
+        インラインの正規表現で落としていた一方 `RssSource` は素で入れており、
+        フィードに切り替えた時点で症状が出た。**構築の時点**で正規化すれば、
+        `from_dict`（保存済み JSON の読み込み）も同じ経路を通るので、
+        すでに汚れているデータも読んだ瞬間から読めるようになり、
+        次の保存で自然に直る。
+
+        タイトルと本文には掛けない。タイトルは HTML を含まず、本文は
+        trafilatura が抽出した平文なので、どちらも対象ではない。
+        """
+        self.summary = strip_html(self.summary)
 
     @property
     def video_generated(self) -> bool:
