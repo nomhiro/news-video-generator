@@ -312,3 +312,41 @@ def test_status_shows_successes_alongside_failures(repository: JobRepository) ->
     assert "だめだった記事" in body
     assert "本文を取得できませんでした" in body
     assert "一部が失敗しました" in body
+
+
+def test_status_explains_a_content_filter_rejection(repository: JobRepository) -> None:
+    """拒否の理由が画面で読めること（issue #30 の④）。
+
+    直す前は「パイプライン実行に失敗しました: 台本生成に失敗しました:
+    Error code: 400 - {...}」という3段ラップの生 JSON が出るだけで、
+    **記事の題材が原因だと読み取れなかった**。
+
+    文言は手で書かず、実際に本番で作られるものを使う（`_input_filter_message`）。
+    手書きにすると、実装の文言を変えたときにテストだけが古い文言を守る。
+    """
+    from fastapi.testclient import TestClient
+
+    from src.generators.script_generator import _input_filter_message
+    from tests.test_content_filter import ISSUE_30_BODY, FakeBadRequest
+
+    message = _input_filter_message(FakeBadRequest(body=ISSUE_30_BODY))
+
+    repository.enqueue_batch([("ng", "成人向けサービスの発表記事")], video_format="short")
+    job = repository.claim_next("w")
+    assert job
+    repository.mark_failed(job.id, message)
+
+    application = FastAPI()
+    application.include_router(routes.router)
+    application.dependency_overrides[get_jobs] = lambda: repository
+
+    with TestClient(application) as client:
+        body = client.get("/status").text
+
+    assert "成人向けサービスの発表記事" in body
+    assert "コンテンツフィルタに拒否されました" in body
+    # 拒否されたカテゴリは手掛かりとして出す
+    assert "sexual" in body
+    # 生の応答の断片は出さない
+    assert "content_filter_offsets" not in body
+    assert "end_offset" not in body
