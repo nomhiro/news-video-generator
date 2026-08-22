@@ -218,3 +218,44 @@ def test_すべて解除は表示中のカテゴリの一覧を返す(
 def test_知らない記事を外すと_404(client: TestClient) -> None:
     assert client.post("/news/does-not-exist/dismiss").status_code == 404
     assert client.post("/news/does-not-exist/restore").status_code == 404
+
+
+# --------------------------------------------------------------------------
+# コンテンツフィルタに拒否された記事の表示（issue #30）
+# --------------------------------------------------------------------------
+
+
+def test_拒否された記事は対象外と分かる(client: TestClient, aggregator: NewsAggregator) -> None:
+    """自動生成が二度と選ばない理由が画面から読めること。
+
+    印が無いと「新しい記事なのにいつまでも使われない」に見え、原因を
+    ログでしか追えない。
+    """
+    article_id = _first_id(aggregator)
+    aggregator.mark_content_filtered(article_id)
+
+    body = client.get("/news/ai").text
+
+    assert "動画対象外" in body
+
+
+def test_対象外はチャネルごとに出す(client: TestClient, aggregator: NewsAggregator) -> None:
+    """動画で拒否された記事に「X対象外」と出さないこと。
+
+    拒否はチャネル別に記録する（動画で使えなくても X ではまだ使える）。
+    1つにまとめると、まだ X で使われている記事に「対象外」と出て嘘になる。
+    """
+    article_id = _first_id(aggregator)
+    aggregator.mark_content_filtered(article_id)
+
+    body = client.get("/news/ai").text
+
+    assert "動画対象外" in body
+    assert "X対象外" not in body
+
+
+def test_拒否されていない記事には出さない(client: TestClient, aggregator: NewsAggregator) -> None:
+    """印が無い記事に余計な語を出さないこと。"""
+    body = client.get("/news/ai").text
+
+    assert "対象外" not in body
