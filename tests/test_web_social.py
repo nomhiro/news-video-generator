@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import FastAPI
@@ -525,6 +526,30 @@ def test_取り消すと結果が取り消しましたになる(
     assert fake_posts.failed == [(1, "取り消しました")]
 
 
+def _earlier_today(delta: timedelta) -> datetime:
+    """いまより `delta` だけ前、ただし**今日のうち**に収めた時刻（UTC）。
+
+    帯（`/x/band`）は `schedule_timezone` の 00:00 で「今日」を切り、
+    `list_recent_failed` / `list_jobs_between` はその境界で絞る。素に
+    `now - 3h` と書くと、**JST の 0〜3時に走らせたときだけ**その時刻が
+    前日になり、対象から外れてテストが落ちる。
+
+    2026-08-23 の 00:20 JST に実際に落ちた（`main` が赤くなり、pre-push が
+    通らないので push そのものができなくなった）。**ずらす量を小さくする
+    緩和では防げない**——0:05 に走れば5分前でも前日になる。実測では
+    00:30:54 の時点で「30分前」が今日に入るかどうかが54秒差で決まっていた。
+
+    日付境界でクランプすれば、何時に走らせても「今日のうちの過去」を指す。
+    """
+    now = datetime.now(UTC)
+    day_start = (
+        now.astimezone(ZoneInfo(FakeConfig.schedule_timezone))
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .astimezone(UTC)
+    )
+    return max(now - delta, day_start)
+
+
 def _client_for(
     posts: FakeSocialPosts,
     switch: FakeSwitch,
@@ -550,14 +575,13 @@ def test_出せなかった投稿が帯とキューに出る(fake_switch: FakeSw
     見送る。運用者は空のキューを見て「今日はニュースが無かった」と
     解釈するしかなく、痕跡はログの1行だけだった。
     """
-    now = datetime.now(UTC)
     dropped = _post(
         5,
         PostStatus.FAILED,
         "遅れすぎて見送られた本文です。",
-        scheduled_at=now - timedelta(hours=3),
+        scheduled_at=_earlier_today(timedelta(hours=3)),
         error_message="予定時刻から60分以上遅れたため投稿しませんでした",
-        created_at=now - timedelta(hours=4),
+        created_at=_earlier_today(timedelta(hours=4)),
     )
     posts = FakeSocialPosts([], [], settled=[dropped])
 
@@ -620,14 +644,22 @@ def test_帯には早いバッチの動画も含めて今日の全ジョブが�
     「いま画像生成クォータを取り合っている」ことが画面から分からなくなる。
     2バッチぶんのジョブを渡し、両方が帯に出ることを確かめる。
     """
-    # 現在時刻の近傍に固定する（日付境界をまたぐと today のフィルタで
-    # 落ちてテストが不安定になるため、ずらす量は小さくする）。
-    now = datetime.now(UTC)
+    # 日付境界でクランプする（`_earlier_today` を参照）。ここには以前
+    # 「ずらす量は小さくする」と書いてあったが、それは緩和にすぎず、
+    # 深夜0時台に走らせると30分前が前日になって実際に落ちた。
     older_batch = _job(
-        1, "batch-old", JobStatus.SUCCEEDED, now - timedelta(minutes=30), "早いバッチの記事"
+        1,
+        "batch-old",
+        JobStatus.SUCCEEDED,
+        _earlier_today(timedelta(minutes=30)),
+        "早いバッチの記事",
     )
     newer_batch = _job(
-        2, "batch-new", JobStatus.RUNNING, now - timedelta(minutes=5), "新しいバッチの記事"
+        2,
+        "batch-new",
+        JobStatus.RUNNING,
+        _earlier_today(timedelta(minutes=5)),
+        "新しいバッチの記事",
     )
 
     app = FastAPI()
