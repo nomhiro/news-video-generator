@@ -25,8 +25,10 @@ import os
 import socket
 import threading
 import uuid
+from collections.abc import Callable
 from typing import Protocol
 
+from src.jobs.runner import ArticleRejected
 from src.models.job import GenerationJob
 from src.storage.jobs import DEFAULT_LEASE_SECONDS, JobRepository
 from src.utils.logger import log_error, log_step, log_success
@@ -67,6 +69,7 @@ class JobWorker:
         runner: JobRunner,
         poll_interval: float = POLL_INTERVAL_SEC,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
+        on_article_rejected: Callable[[GenerationJob], None] | None = None,
     ):
         """初期化する。
 
@@ -75,11 +78,16 @@ class JobWorker:
             runner: ジョブ1件を実行する処理
             poll_interval: キューが空のときの待ち時間（秒）
             lease_seconds: リースの長さ（秒）
+            on_article_rejected: 記事の題材がコンテンツフィルタに拒否された
+                ときに呼ぶ処理。代替の記事を同じバッチに積むために使う。
+                **ワーカー自身は記事ストアを知らない**ので、記事に関わる
+                判断はここから外に出す（`PostWorker.on_posted` と同じ形）
         """
         self._repository = repository
         self._runner = runner
         self._poll_interval = poll_interval
         self._lease_seconds = lease_seconds
+        self._on_article_rejected = on_article_rejected
 
         # ホスト名 + PID + 乱数。コンテナを複数動かしても衝突しない。
         self.worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
@@ -177,10 +185,34 @@ class JobWorker:
             # 例外を握りつぶすと「失敗したが理由が分からない」になる。
             self._repository.mark_failed(job.id, str(e))
             log_error(f"ジョブ {job.id} 失敗: {job.article_title[:30]} - {e}")
+            if isinstance(e, ArticleRejected):
+                self._notify_rejected(job)
         finally:
             heartbeat.set()
             self._current_job_id = None
         return True
+
+    def _notify_rejected(self, job: GenerationJob) -> None:
+        """拒否されたことを外に知らせる（代替の投入を任せる）。
+
+        **`mark_failed` の後に呼ぶ。** 代替を積む側は「このバッチで既に
+        いくつ失敗したか」を数えて打ち切りを判断するので、この失敗が
+        行に入っている必要がある。
+
+        **例外を外に出さない。** 記事ストアやジョブ表の I/O が失敗しても、
+        ワーカーのループを止めてはいけない（止まると以降のジョブが1件も
+        動かなくなる）。代替が積まれないだけなら、その日の動画が1本
+        減るだけで済む。
+
+        Args:
+            job: 拒否されたジョブ
+        """
+        if self._on_article_rejected is None:
+            return
+        try:
+            self._on_article_rejected(job)
+        except Exception as e:
+            log_error(f"ジョブ {job.id}: 代替の記事を積めませんでした - {e}")
 
     def _start_heartbeat(self, job_id: int) -> threading.Event:
         """リースを延ばし続けるタイマーを起動する。

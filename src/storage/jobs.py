@@ -84,6 +84,7 @@ def _to_domain(record: JobRecord) -> GenerationJob:
         article_title=record.article_title,
         video_format=record.video_format,
         language=record.language,
+        origin=record.origin,
         status=JobStatus(record.status),
         attempts=record.attempts,
         error_message=record.error_message,
@@ -117,11 +118,49 @@ class JobRepository:
     # 投入
     # ----------------------------------------------------------------
 
+    @staticmethod
+    def _queued_record(
+        batch_id: str,
+        article_id: str,
+        article_title: str,
+        video_format: str,
+        language: str,
+        origin: str | None,
+    ) -> JobRecord:
+        """QUEUED の行を1つ組み立てる。
+
+        `enqueue_batch` と `enqueue_into` で共有する。書き写すと、片方にだけ
+        列を足し忘れる形の欠陥が入る（`ARTICLE_OVERFETCH` が X 側にしか
+        入っていなかったのと同じ構造）。
+
+        Args:
+            batch_id: バッチID
+            article_id: 記事ID
+            article_title: 記事タイトル（表示用に複製して持つ）
+            video_format: 動画形式
+            language: 言語コード
+            origin: 積んだ主体（"schedule" / None）
+
+        Returns:
+            JobRecord: 未保存の行
+        """
+        return JobRecord(
+            batch_id=batch_id,
+            article_id=article_id,
+            article_title=article_title,
+            video_format=video_format,
+            language=language,
+            origin=origin,
+            status=JobStatus.QUEUED,
+            attempts=0,
+        )
+
     def enqueue_batch(
         self,
         articles: list[tuple[str, str]],
         video_format: str,
         language: str = "ja",
+        origin: str | None = None,
     ) -> str:
         """記事のリストを1つのバッチとして投入する。
 
@@ -129,6 +168,8 @@ class JobRepository:
             articles: (article_id, article_title) の並び
             video_format: 動画形式
             language: 言語コード
+            origin: 積んだ主体。定期実行は "schedule"、画面からの手動は
+                省略（None）。拒否されたときに代替を積んでよいかを分ける
 
         Returns:
             str: バッチID
@@ -142,18 +183,43 @@ class JobRepository:
         batch_id = str(uuid.uuid4())
         with session_scope(self._sessions) as session:
             session.add_all(
-                JobRecord(
-                    batch_id=batch_id,
-                    article_id=article_id,
-                    article_title=title,
-                    video_format=video_format,
-                    language=language,
-                    status=JobStatus.QUEUED,
-                    attempts=0,
-                )
+                self._queued_record(batch_id, article_id, title, video_format, language, origin)
                 for article_id, title in articles
             )
         return batch_id
+
+    def enqueue_into(
+        self,
+        batch_id: str,
+        article_id: str,
+        article_title: str,
+        video_format: str,
+        language: str,
+        origin: str | None = None,
+    ) -> None:
+        """既にあるバッチに1件足す。
+
+        **新しいバッチを作らないことが要点。** `enqueue_batch` は毎回
+        `uuid4()` で batch_id を作るので、代替を別バッチで積むと
+        `latest_batch_id()` が代替だけを指し、**拒否された記事が画面から
+        消える**。同じバッチに足せば `BatchProgress.from_jobs` が QUEUED を
+        見て status を running に戻し、完了後は失敗した記事と成功した記事の
+        両方を出す（`BatchProgress` 側の変更は要らない）。
+
+        Args:
+            batch_id: 足す先のバッチID
+            article_id: 記事ID
+            article_title: 記事タイトル
+            video_format: 動画形式
+            language: 言語コード
+            origin: 積んだ主体。元のジョブの値を引き継ぐ
+        """
+        with session_scope(self._sessions) as session:
+            session.add(
+                self._queued_record(
+                    batch_id, article_id, article_title, video_format, language, origin
+                )
+            )
 
     # ----------------------------------------------------------------
     # ワーカー向け

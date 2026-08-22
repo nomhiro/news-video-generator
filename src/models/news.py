@@ -99,6 +99,21 @@ class NewsArticle:
     # 権威は `consumed` と同じくこの記事データ（Azure Files 上の JSON）。
     # SQLite に置くとリビジョン更新で消え、外したはずの記事が翌日戻る。
     dismissed: bool = False
+    # チャネル名 -> 拒否された時刻（ISO 文字列）。
+    #
+    # Azure OpenAI のコンテンツフィルタが記事の題材を拒否した記録。
+    # **`consumed` とも `dismissed` とも別。** `consumed` は「もう出した」、
+    # `dismissed` は「人が出さないと決めた」、これは「出そうとしたが
+    # 恒久的に拒否された」。
+    #
+    # `consumed` を流用できない理由: `video_generated` が真になり、画面に
+    # 「動画を作り終えた」と嘘が出る（動画は1本も出来ていない）。
+    # `dismissed` を流用できない理由: 人の判断という意味論が壊れるうえ、
+    # 記事が一覧から消えるので拒否されたことが画面から分からなくなる。
+    #
+    # 形を `consumed` に揃えてあるのは、`_must_survive_refetch` が時刻を
+    # 読んで保持期間を判断する仕組みにそのまま乗せられるため。
+    content_filtered: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """要約から HTML を落とす。
@@ -146,6 +161,24 @@ class NewsArticle:
             at: 消費時刻。省略時は現在時刻
         """
         self.consumed[channel] = (at or datetime.now()).isoformat()
+
+    def is_content_filtered_for(self, channel: str) -> bool:
+        """そのチャネルでコンテンツフィルタに拒否されたか。"""
+        return channel in self.content_filtered
+
+    def mark_content_filtered(self, channel: str, at: datetime | None = None) -> None:
+        """そのチャネルで恒久的に使えないと記録する。
+
+        `mark_consumed` と同じく他のチャネルの記録は消さない。台本生成が
+        拒否された記事は、同じ Azure OpenAI を使う X の下書き生成でも
+        拒否されうるが、**判断はチャネルごとに分ける**（X は記事単位で次の
+        候補へ進むので当日の投稿は落ちない。動画側だけが1件で0本になる）。
+
+        Args:
+            channel: CHANNEL_VIDEO / CHANNEL_X
+            at: 拒否された時刻。省略時は現在時刻
+        """
+        self.content_filtered[channel] = (at or datetime.now()).isoformat()
 
     @classmethod
     def generate_id(cls, url: str) -> str:

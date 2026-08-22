@@ -27,6 +27,7 @@ import pytest
 import src.web.dependencies as dependencies
 from config import Config
 from src.jobs.post_planner import DailyPostPlan
+from src.models.job import ORIGIN_SCHEDULE
 from src.models.news import CHANNEL_X, NewsArticle, NewsCategory
 from src.social.card_visual import CardVisualGenerator
 from tests.test_config import REQUIRED_VALUES
@@ -307,3 +308,175 @@ def test_日次タスクは取得を先に1回だけ呼ぶ(tmp_path: Path, monke
         context.aggregator.close()
 
     assert order == ["fetch", "posts", "video(fetch=False)"]
+
+
+# --------------------------------------------------------------------------
+# コンテンツフィルタで拒否されたときの代替の投入（issue #30）
+# --------------------------------------------------------------------------
+
+
+def _stored_article(context: Any, suffix: str, content: str = "本文") -> NewsArticle:
+    """記事ストアに1件足して返す。"""
+    url = f"https://example.com/{suffix}"
+    article = NewsArticle(
+        id=NewsArticle.generate_id(url),
+        title=f"記事{suffix}",
+        url=url,
+        source="Example",
+        category=NewsCategory.AI,
+        content=content,
+    )
+    existing = context.aggregator._load_category(NewsCategory.AI)
+    context.aggregator._save_category(NewsCategory.AI, [*existing, article])
+    return article
+
+
+def test_動画ワーカーの拒否コールバックが代替を同じバッチに積む(tmp_path: Path) -> None:
+    """`on_article_rejected=` の配線が実際に働くこと。
+
+    渡し忘れても他のテストは緑のまま（ワーカー側は None を許す）。渡って
+    いないと、記事1件が拒否された時点で**その日の動画が黙って0本**になる
+    ——`fetch_image` を渡し忘れて画像を添付しない投稿が続いたのと同じ形の
+    欠陥なので、`on_posted` と同じやり方で見張る。
+    """
+    context = dependencies.AppContext.build(_config(tmp_path))
+    try:
+        rejected = _stored_article(context, "rejected")
+        substitute = _stored_article(context, "substitute")
+        batch_id = context.jobs.enqueue_batch(
+            [(rejected.id, rejected.title)], video_format="short", origin=ORIGIN_SCHEDULE
+        )
+        job = context.jobs.claim_next("w")
+        assert job is not None
+        # 実際の経路と同じ順序: 記事に印が付き、行が失敗になった後に呼ばれる
+        context.aggregator.mark_content_filtered(rejected.id)
+        context.jobs.mark_failed(job.id, "記事の題材が拒否されました")
+
+        callback = context.worker._on_article_rejected
+        assert callback is not None, "on_article_rejected が JobWorker に渡っていない"
+        callback(job)
+
+        jobs = context.jobs.list_batch(batch_id)
+        assert [j.article_id for j in jobs] == [rejected.id, substitute.id]
+        # 代替も定期実行の印を引き継ぐ（連鎖しても判定が効く）
+        assert jobs[-1].origin == ORIGIN_SCHEDULE
+        # 進捗は running に戻り、画面はポーリングを続ける
+        assert context.jobs.latest_progress().status == "running"
+    finally:
+        context.aggregator.close()
+
+
+def test_手動で選んだ記事は差し替えない(tmp_path: Path) -> None:
+    """人が選んだ記事の拒否を、別の記事の結果で上書きしないこと。
+
+    手動生成は人がその場で見ているので、失敗を見せて選び直させる方が正しい。
+    黙って別の記事の動画が出てくると、押した操作と画面が食い違う。
+    """
+    context = dependencies.AppContext.build(_config(tmp_path))
+    try:
+        rejected = _stored_article(context, "manual")
+        _stored_article(context, "other")
+        # origin を渡さない = 画面からの手動投入
+        batch_id = context.jobs.enqueue_batch([(rejected.id, rejected.title)], video_format="short")
+        job = context.jobs.claim_next("w")
+        assert job is not None
+        context.jobs.mark_failed(job.id, "記事の題材が拒否されました")
+
+        callback = context.worker._on_article_rejected
+        assert callback is not None
+        callback(job)
+
+        assert len(context.jobs.list_batch(batch_id)) == 1
+    finally:
+        context.aggregator.close()
+
+
+def test_拒否が続いたら代替の投入を打ち切る(tmp_path: Path) -> None:
+    """`MAX_ARTICLES_TRIED` で止まること。
+
+    止めないと、拒否が続く日に代替を積み続けて Azure の呼び出しを焼く。
+    """
+    context = dependencies.AppContext.build(_config(tmp_path))
+    try:
+        first = _stored_article(context, "first")
+        second = _stored_article(context, "second")
+        _stored_article(context, "third")
+        batch_id = context.jobs.enqueue_batch(
+            [(first.id, first.title)], video_format="short", origin=ORIGIN_SCHEDULE
+        )
+        context.jobs.enqueue_into(
+            batch_id, second.id, second.title, "short", "ja", origin=ORIGIN_SCHEDULE
+        )
+        # 2件とも失敗した状態を作る
+        last = None
+        for _ in range(2):
+            claimed = context.jobs.claim_next("w")
+            assert claimed is not None
+            context.jobs.mark_failed(claimed.id, "記事の題材が拒否されました")
+            last = claimed
+        assert last is not None
+
+        callback = context.worker._on_article_rejected
+        assert callback is not None
+        callback(last)
+
+        assert len(context.jobs.list_batch(batch_id)) == 2, "3件目を積んではいけない"
+    finally:
+        context.aggregator.close()
+
+
+def test_本文のある候補が無ければ代替を積まない(tmp_path: Path) -> None:
+    """本文なしを積んでも失敗が1件増えるだけなので積まないこと。
+
+    ここは同期の文脈なのでスクレイピングできない。本文なしを積むと
+    `ArticleUnavailable` になり、拒否の理由を画面から押し出してしまう。
+    """
+    context = dependencies.AppContext.build(_config(tmp_path))
+    try:
+        rejected = _stored_article(context, "rejected")
+        _stored_article(context, "no-content", content="")
+        batch_id = context.jobs.enqueue_batch(
+            [(rejected.id, rejected.title)], video_format="short", origin=ORIGIN_SCHEDULE
+        )
+        job = context.jobs.claim_next("w")
+        assert job is not None
+        context.aggregator.mark_content_filtered(rejected.id)
+        context.jobs.mark_failed(job.id, "記事の題材が拒否されました")
+
+        callback = context.worker._on_article_rejected
+        assert callback is not None
+        callback(job)
+
+        assert len(context.jobs.list_batch(batch_id)) == 1
+    finally:
+        context.aggregator.close()
+
+
+def test_印が付いていなくても同じ記事を選び直さない(tmp_path: Path) -> None:
+    """印の書き込みが失敗した場合の保険が効いていること。
+
+    `mark_content_filtered` が失敗しても `ArticleRejected` は投げる設計
+    （読める失敗理由の方が重要）。その経路では記事に印が無いので、
+    `pick_unconsumed` は拒否された記事を先頭で返す。id で除いていないと
+    同じ拒否をもう一度踏む。
+    """
+    context = dependencies.AppContext.build(_config(tmp_path))
+    try:
+        rejected = _stored_article(context, "rejected")
+        substitute = _stored_article(context, "substitute")
+        batch_id = context.jobs.enqueue_batch(
+            [(rejected.id, rejected.title)], video_format="short", origin=ORIGIN_SCHEDULE
+        )
+        job = context.jobs.claim_next("w")
+        assert job is not None
+        # **印は付けない**（書き込みが失敗した状況）
+        context.jobs.mark_failed(job.id, "記事の題材が拒否されました")
+
+        callback = context.worker._on_article_rejected
+        assert callback is not None
+        callback(job)
+
+        jobs = context.jobs.list_batch(batch_id)
+        assert [j.article_id for j in jobs] == [rejected.id, substitute.id]
+    finally:
+        context.aggregator.close()

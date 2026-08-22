@@ -74,6 +74,13 @@ def check_transition(current: JobStatus, new: JobStatus) -> None:
         raise InvalidJobTransition(f"{current} -> {new} は許可されていません")
 
 
+# `JobRecord.origin` に入る値。定期実行が積んだジョブだけが、拒否されたときに
+# 別の記事で作り直される（手動は人が選んだ記事を差し替えない）。
+# **文字列を書き写さない**——比較する側と入れる側で綴りがずれると、代替が
+# 静かに積まれなくなる（症状は「その日の動画が0本」で、直す前と同じに見える）。
+ORIGIN_SCHEDULE = "schedule"
+
+
 @dataclass(frozen=True)
 class GenerationJob:
     """生成ジョブ1件の読み取り用の写し。
@@ -98,6 +105,8 @@ class GenerationJob:
         finished_at: 終了時刻
         worker_id: 実行中のワーカーの識別子
         lease_expires_at: リースの期限。過ぎたら他のワーカーが回収できる
+        origin: 積んだ主体（"schedule" は定期実行、None は手動）。
+            拒否されたときに代替を積んでよいかの判断に使う
     """
 
     id: int
@@ -115,6 +124,8 @@ class GenerationJob:
     finished_at: datetime | None
     worker_id: str | None
     lease_expires_at: datetime | None
+    # 既定値を持たせるのは、既存の構築箇所（テストを含む）を壊さないため。
+    origin: str | None = None
 
     @property
     def is_terminal(self) -> bool:

@@ -12,11 +12,14 @@
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from config import Config
 from src.generators.remotion_renderer import ILLUSTRATION_SIZE
+from src.generators.script_generator import ScriptContentFilterError
 from src.generators.video_renderer import FfmpegRenderer, RemotionRenderer
 from src.models.scene import IllustrationConcept
-from src.pipeline import Pipeline
+from src.pipeline import Pipeline, PipelineError
 
 DUMMY_ENV: dict[str, object] = {
     "azure_openai_endpoint": "https://example.openai.azure.com",
@@ -265,3 +268,45 @@ def test_grounding_enforcement_follows_the_renderer(tmp_path: Path) -> None:
 
     not_drawing = _run_with_fakes(Pipeline(_config(tmp_path)), _FakeNonDrawingRenderer())
     assert not_drawing.calls[0]["enforce_scene_grounding"] is False
+
+
+class _FilteredScriptGenerator:
+    """台本生成がコンテンツフィルタに拒否される状態。"""
+
+    def generate(self, *args: object, **kwargs: object) -> object:
+        raise ScriptContentFilterError("記事の題材が拒否されました")
+
+
+def test_コンテンツフィルタの拒否はPipelineErrorに包まない(tmp_path: Path) -> None:
+    """`ScriptContentFilterError` を素通しすること。
+
+    包むと型が消え、`PipelineJobRunner` が「記事の題材が原因の恒久的な失敗」
+    だと判定できない。判定できなければ記事に印が付かず、代替も積まれず、
+    翌日また同じ記事で失敗する（issue #30 の症状そのもの）。
+
+    `ImageGenerator.generate_batch` が `ImageGenerationError` をそのまま
+    通しているのと同じ扱い。
+    """
+    pipeline = Pipeline(_config(tmp_path, video_renderer="remotion"))
+    pipeline.script_generator = _FilteredScriptGenerator()  # type: ignore[assignment]
+
+    with pytest.raises(ScriptContentFilterError):
+        pipeline.run("トピック", languages=["ja"])
+
+
+def test_台本生成の他の失敗はPipelineErrorに包む(tmp_path: Path) -> None:
+    """素通しの対象を広げていないこと。
+
+    何でも素通しすると、パイプラインのどこで失敗したのかが呼び出し側から
+    分からなくなる（`PipelineError` の文言がその役目を持っている）。
+    """
+
+    class _Broken:
+        def generate(self, *args: object, **kwargs: object) -> object:
+            raise RuntimeError("想定外")
+
+    pipeline = Pipeline(_config(tmp_path, video_renderer="remotion"))
+    pipeline.script_generator = _Broken()  # type: ignore[assignment]
+
+    with pytest.raises(PipelineError):
+        pipeline.run("トピック", languages=["ja"])

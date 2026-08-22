@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from src.jobs.article_supply import SupportsArticleSupply, supply_articles
+from src.models.job import ORIGIN_SCHEDULE
 from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
 from src.news.feeds import AI_FEEDS, Feed
 from src.utils.logger import log_error, log_step, log_success
@@ -96,7 +97,11 @@ class SupportsEnqueue(Protocol):
         ...
 
     def enqueue_batch(
-        self, articles: list[tuple[str, str]], video_format: str, language: str = ...
+        self,
+        articles: list[tuple[str, str]],
+        video_format: str,
+        language: str = ...,
+        origin: str | None = ...,
     ) -> str:
         """ジョブを投入する。"""
         ...
@@ -188,6 +193,9 @@ async def plan_daily_batch(
             [(a.id, a.title) for a in chosen],
             video_format=video_format,
             language=language,
+            # 定期実行の印。コンテンツフィルタに拒否されたとき、この印がある
+            # ジョブだけが別の記事で作り直される（手動は差し替えない）。
+            origin=ORIGIN_SCHEDULE,
         )
         titles = ", ".join(a.title[:24] for a in chosen)
         log_success(f"{video_format}: {len(chosen)}件を投入しました（{titles}）")
