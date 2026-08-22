@@ -299,6 +299,33 @@ class SocialPostRepository:
             ).all()
             return [_to_domain(r) for r in records]
 
+    def list_thread(self, post_id: int) -> list[SocialPost]:
+        """`post_id` を含むスレッド全体を position 順に返す。
+
+        プレビューで1行だけ見せても足りない。スレッドは連結して読んで
+        初めて「文脈が切れていないか」を判断できるし、リンクと画像を
+        背負うのは先頭の1件だけなので、先頭を見ずに2件目を見ても
+        「リンクが無い」ように見える。
+
+        Args:
+            post_id: プレビューしたい投稿の id
+
+        Returns:
+            list[SocialPost]: position の昇順。該当が無ければ空
+        """
+        with session_scope(self._sessions) as session:
+            group_id = session.scalar(
+                select(SocialPostRecord.group_id).where(SocialPostRecord.id == post_id)
+            )
+            if group_id is None:
+                return []
+            records = session.scalars(
+                select(SocialPostRecord)
+                .where(SocialPostRecord.group_id == group_id)
+                .order_by(SocialPostRecord.position)
+            ).all()
+            return [_to_domain(r) for r in records]
+
     def list_needs_review(self) -> list[SocialPost]:
         """人が見る必要のある投稿。画面の上の帯にも出す。"""
         with session_scope(self._sessions) as session:

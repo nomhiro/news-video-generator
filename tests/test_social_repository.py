@@ -186,3 +186,27 @@ def test_スレッドは_group_id_でまとまる(repository: SocialPostReposito
 
     assert {p.group_id for p in upcoming} == {group_id}
     assert sorted(p.position for p in upcoming) == [0, 1]
+
+
+def test_list_thread_は_スレッド全体を位置の順に返す(repository: SocialPostRepository) -> None:
+    """プレビューは1行だけでは足りない。
+
+    リンクと画像を背負うのは先頭の1件だけなので、2件目の id で引いた
+    ときにも先頭が返らなければ「リンクが無い」ように見える。
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    repository.enqueue([_post(position=0), _post(position=1)], {0: now, 1: now})
+    # 別スレッド。混ざらないことを確かめるために入れる
+    repository.enqueue([_post(position=0)], {0: now})
+
+    upcoming = repository.list_upcoming()
+    second = next(p for p in upcoming if p.position == 1)
+
+    thread = repository.list_thread(second.id)
+
+    assert [p.position for p in thread] == [0, 1]
+    assert {p.group_id for p in thread} == {second.group_id}
+
+
+def test_list_thread_は_存在しない_id_で空を返す(repository: SocialPostRepository) -> None:
+    assert repository.list_thread(999) == []

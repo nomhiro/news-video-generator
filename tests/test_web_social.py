@@ -68,18 +68,22 @@ def _post(
     posted_at: datetime | None = None,
     error_message: str | None = None,
     created_at: datetime | None = None,
+    group_id: str = "g",
+    position: int = 0,
+    kind: PostKind = PostKind.SINGLE,
+    image_key: str | None = None,
 ) -> SocialPost:
     return SocialPost(
         id=post_id,
-        group_id="g",
-        position=0,
+        group_id=group_id,
+        position=position,
         article_id=f"a-{post_id}",
         article_title=f"記事{post_id}",
-        kind=PostKind.SINGLE,
+        kind=kind,
         body=body,
         weighted_length=236,
         has_link=False,
-        image_key=None,
+        image_key=image_key,
         status=status,
         scheduled_at=scheduled_at,
         posted_at=posted_at,
@@ -126,6 +130,13 @@ class FakeSocialPosts:
 
     def monthly_post_counts(self, year: int, month: int) -> tuple[int, int]:
         return (3, 1)
+
+    def list_thread(self, post_id: int) -> list[SocialPost]:
+        rows = self._upcoming + self._needs_review + self._settled
+        found = next((p for p in rows if p.id == post_id), None)
+        if found is None:
+            return []
+        return sorted((p for p in rows if p.group_id == found.group_id), key=lambda p: p.position)
 
     def cancel(self, post_id: int, reason: str) -> None:
         """**本物と同じ規律で拒否する。**
@@ -496,3 +507,113 @@ def test_帯には早いバッチの動画も含めて今日の全ジョブが�
 
     assert "早いバッチの記事" in body
     assert "新しいバッチの記事" in body
+
+
+# --------------------------------------------------------------------------
+# 投稿プレビュー
+# --------------------------------------------------------------------------
+#
+# 「画像を作って Blob に上げたうえで添付せずに投稿する」事故は、実物の
+# 投稿を見るまで気付けなかった（`fetch_image` を渡し忘れていた期間が
+# 実際にある）。出る前に画面で見られることが、その気付きを前に倒す。
+
+
+def _preview_client(posts: FakeSocialPosts) -> TestClient:
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_posts] = lambda: posts
+    app.dependency_overrides[get_x_switch] = lambda: FakeSwitch()
+    app.dependency_overrides[get_config] = lambda: FakeConfig()
+    app.dependency_overrides[get_jobs] = lambda: FakeJobs()
+    app.dependency_overrides[get_token_store] = lambda: FakeTokenStore()
+    return TestClient(app)
+
+
+def test_プレビューはスレッドを位置の順に並べる() -> None:
+    scheduled = datetime.now(UTC)
+    thread = [
+        _post(11, PostStatus.SCHEDULED, "先頭の投稿", scheduled, group_id="t", position=0),
+        _post(12, PostStatus.SCHEDULED, "続きの投稿", scheduled, group_id="t", position=1),
+    ]
+    # 位置の逆順で持たせる。並べ替えを実装が行っていることを確かめるため
+    with _preview_client(FakeSocialPosts(list(reversed(thread)), [])) as client:
+        body = client.get("/x/posts/12/preview").text
+    assert body.index("先頭の投稿") < body.index("続きの投稿")
+
+
+def test_プレビューは画像カードを画面に出す() -> None:
+    """`image_key` があれば実物の画像を出すこと。
+
+    キーの有無だけを文字で出しても「添付されるはず」の確認にしかならない。
+    絵が出ることが、画像生成のクォータを使った結果の唯一の確認手段。
+    """
+    post = _post(
+        13,
+        PostStatus.SCHEDULED,
+        "画像付きの投稿",
+        datetime.now(UTC),
+        image_key="social/cards/a-13.png",
+    )
+    with _preview_client(FakeSocialPosts([post], [])) as client:
+        body = client.get("/x/posts/13/preview").text
+    assert 'src="/artifacts/social/cards/a-13.png"' in body
+
+
+def test_プレビューは本文のURLをリンクとカードにする() -> None:
+    post = _post(
+        14,
+        PostStatus.SCHEDULED,
+        "本文の後にリンクが付く https://www.example.com/news/1",
+        datetime.now(UTC),
+    )
+    with _preview_client(FakeSocialPosts([post], [])) as client:
+        body = client.get("/x/posts/14/preview").text
+    assert 'href="https://www.example.com/news/1"' in body
+    # X のリンクカードに出るのは媒体のドメイン。OG 情報は取りに行かない
+    assert "example.com" in body
+
+
+def test_プレビューは本文のHTMLをエスケープする() -> None:
+    """本文は LLM の出力で、記事タイトルに `<` が実際に混じる。"""
+    post = _post(15, PostStatus.SCHEDULED, "<script>alert(1)</script>", datetime.now(UTC))
+    with _preview_client(FakeSocialPosts([post], [])) as client:
+        body = client.get("/x/posts/15/preview").text
+    assert "<script>alert(1)</script>" not in body
+    assert "&lt;script&gt;" in body
+
+
+def test_存在しない投稿のプレビューは画面に理由を出す() -> None:
+    """404 にしない。
+
+    htmx はエラー応答で対象を差し替えないので、モーダルには前の投稿の
+    内容が残ったままになる。「別の投稿が出ている」のが最悪の見え方。
+    """
+    with _preview_client(FakeSocialPosts([], [])) as client:
+        response = client.get("/x/posts/999/preview")
+    assert response.status_code == 200
+    assert "見つかりません" in response.text
+
+
+def test_キューから投稿プレビューを開ける() -> None:
+    post = _post(16, PostStatus.SCHEDULED, "予定されている投稿", datetime.now(UTC))
+    with _preview_client(FakeSocialPosts([post], [])) as client:
+        body = client.get("/x/queue").text
+    assert "/x/posts/16/preview" in body
+
+
+def test_キューは画像の有無を絵で示す() -> None:
+    """一覧で画像の有無が分かること。
+
+    キーが入っているのに添付されない事故が実際にあった。一覧に絵が
+    出ていれば「作ったのに出ていない」を毎日見る場所で気付ける。
+    """
+    post = _post(
+        17,
+        PostStatus.SCHEDULED,
+        "画像付きの投稿",
+        datetime.now(UTC),
+        image_key="social/cards/a-17.png",
+    )
+    with _preview_client(FakeSocialPosts([post], [])) as client:
+        body = client.get("/x/queue").text
+    assert 'src="/artifacts/social/cards/a-17.png"' in body
