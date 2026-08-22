@@ -139,6 +139,8 @@ def client(store: FakeRemoteStore) -> Iterator[tuple[TestClient, RecordingUpload
     class FakeConfig:
         youtube_default_privacy = "public"
         tiktok_default_privacy = "SELF_ONLY"
+        # 生成時刻は運用者のタイムゾーンで出す（投稿キューと揃える）
+        schedule_timezone = "Asia/Tokyo"
 
         def is_tiktok_configured(self) -> bool:
             return True
@@ -534,3 +536,41 @@ def test_the_list_offers_a_delete_that_asks_first(
 
     assert "hx-delete=" in body
     assert "hx-confirm=" in body
+
+
+def test_the_list_leads_with_the_article_title(
+    client: tuple[TestClient, RecordingUploader],
+) -> None:
+    """見出しがファイル名だと、どの記事の動画か分からない。"""
+    test_client, _ = client
+    body = test_client.get("/videos").text
+
+    heading = body.index("台本のタイトル")
+    filename = body.index("20260814_000000_ja.mp4")
+    assert heading < filename, "タイトルはファイル名より前に出す"
+
+
+def test_the_list_shows_when_it_was_made(
+    client: tuple[TestClient, RecordingUploader],
+) -> None:
+    """キーの `20260814_000000` は区切りもタイムゾーンも無く、人が読む形ではない。
+
+    保存先が返すのは UTC なので、運用者のタイムゾーン（投稿キューと同じ）に
+    直す。フェイクは 2026-08-14 00:00Z から1分ずつずらすので、動画2件は
+    00:01Z / 00:02Z ——JST では 09:01 / 09:02 になる。UTC のまま出していると
+    00:01 / 00:02 が並ぶので、この検査は9時間の差を見ている。
+    """
+    test_client, _ = client
+    body = test_client.get("/videos").text
+
+    assert "08/14 09:02" in body
+    assert "08/14 09:01" in body
+    assert "08/14 00:0" not in body
+
+
+def test_a_video_without_a_script_still_shows_its_filename(
+    client: tuple[TestClient, RecordingUploader],
+) -> None:
+    """台本の無い動画（手で置いたもの）でも一覧に出ること。"""
+    test_client, _ = client
+    assert "20260814_010000_en.mp4" in test_client.get("/videos").text

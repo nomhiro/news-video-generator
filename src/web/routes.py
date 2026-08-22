@@ -472,6 +472,7 @@ async def youtube_authenticate(
 async def list_videos(
     request: Request,
     artifact_store: ArtifactStore = Depends(get_artifact_store),
+    config: Config = Depends(get_config),
 ):
     """生成済み動画一覧を表示する。
 
@@ -482,6 +483,7 @@ async def list_videos(
     Args:
         request: FastAPIリクエスト
         artifact_store: 生成物の保存先
+        config: アプリ設定（生成時刻を出すタイムゾーンに使う）
 
     Returns:
         HTMLResponse: 動画一覧パーシャルHTML
@@ -496,6 +498,12 @@ async def list_videos(
     # ダウンロードが走るため、表示しない分は読まない。
     recent = [a for a in found if a.key.endswith(".mp4")][:20]
 
+    # 生成時刻は運用者のタイムゾーンで出す。保存先が返すのは UTC なので、
+    # そのまま出すと投稿キュー（`astimezone` している）と9時間ずれた時刻が
+    # 同じ画面に並ぶ。キーの先頭にも日時は入っているが、区切りもタイム
+    # ゾーンも無い文字列なので人が読む形ではない。
+    zone = ZoneInfo(config.schedule_timezone)
+
     videos = [
         {
             "filename": artifact.name,
@@ -503,6 +511,7 @@ async def list_videos(
             "language": _language_from_key(artifact.key),
             "size_mb": round(artifact.size_bytes / (1024 * 1024), 2),
             "created": artifact.modified_at.timestamp(),
+            "created_at": artifact.modified_at.astimezone(zone).strftime("%m/%d %H:%M"),
             **_script_metadata(artifact_store, artifact.key),
         }
         for artifact in recent
@@ -522,6 +531,7 @@ async def delete_video(
     request: Request,
     key: str,
     artifact_store: ArtifactStore = Depends(get_artifact_store),
+    config: Config = Depends(get_config),
 ):
     """動画とその付随物を削除して、一覧を返す。
 
@@ -542,6 +552,7 @@ async def delete_video(
         request: FastAPIリクエスト
         key: 動画のキー（`videos/....mp4`）
         artifact_store: 生成物の保存先
+        config: アプリ設定（一覧の再描画にそのまま渡す）
 
     Returns:
         HTMLResponse: 更新後の動画一覧パーシャル
@@ -570,7 +581,7 @@ async def delete_video(
         except ArtifactStoreError as e:
             log_error(f"付随物を削除できません（{companion}）: {e}")
 
-    return await list_videos(request, artifact_store)
+    return await list_videos(request, artifact_store, config)
 
 
 def _language_from_key(key: str) -> str:
