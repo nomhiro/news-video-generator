@@ -73,6 +73,17 @@ SUBTITLE_ZONE_TOP = 1570
 CLIP_PROBE_TOP = SUBTITLE_ZONE_TOP + 2
 CLIP_PROBE_BOTTOM = SUBTITLE_ZONE_TOP + 10
 
+# 見出しゾーンの上端（`zones.ts`）。レイアウトで違う。
+# statement は図が無いぶん広い（1050〜1570）、compare/flow は挿絵の下の
+# 帯（970〜1370）。上の `SUBTITLE_ZONE_TOP` と同じ理由で値を写している。
+HEADLINE_ZONE_TOP = {"statement": 1050, "strip": 970}
+
+# 見出しの溢れを見る帯の深さ。**行送りより広く取る必要がある**（下の
+# `test_headline_is_not_clipped_at_the_zone_boundary` の docstring 参照）。
+# 収まっているときの余裕（45字・400pxゾーンで上下44pxずつ）より小さく、
+# 溢れたときに字面が現れる位置（ゾーン上端 + 十数px）より大きい値。
+HEADLINE_PROBE_DEPTH = 34
+
 # 白文字（`COLORS.text` = #eef1f5）の閾値。地は #14161a なので大きく離れている。
 INK_THRESHOLD = 170
 
@@ -369,3 +380,44 @@ def test_subtitle_is_actually_drawn(
     frame = _extract_frame(output, at_sec, tmp_path / f"{layout}-drawn.png")
     ink = _ink_in_band(frame, SUBTITLE_ZONE_TOP + 20, 1919)
     assert ink > 2000, f"{layout} の字幕が描かれていない（白い画素が{ink}個）"
+
+
+@pytest.mark.parametrize(
+    ("at_sec", "layout", "zone_key"),
+    [
+        (0.45, "statement", "statement"),
+        (1.15, "compare", "strip"),
+        (1.85, "flow", "strip"),
+    ],
+)
+def test_headline_is_not_clipped_at_the_zone_boundary(
+    rendered: tuple[Path, Path], tmp_path: Path, at_sec: float, layout: str, zone_key: str
+) -> None:
+    """45字の見出しがゾーンから溢れていないこと。**全レイアウトで**。
+
+    `statement` で45字の見出しが欠けたのは実際に起きた不具合で、そのとき
+    `Headline` の予算計算をゾーンの高さからの逆算に変えて直した。**その修正を
+    見張るテストは無かった**（`zones.ts` の `strip.headline` を 320→400 に
+    広げたのも同じ不具合の続きで、やはり検査は無い）。ここで固定する。
+
+    **上端だけを見る。** 見出しは `alignItems: center` で縦中央に置かれるので、
+    溢れた場合は上下**両方**にインクが出る。一方、見出しは spring で
+    `translateY` しながら入ってくる——入場中は最終位置より**下**にあるので、
+    下端を見るとアニメーション中のフレームで誤検出しうる。上端は入場中つねに
+    安全側なので、判定に使えるのは上端。
+
+    **帯の幅は行送りより広く取る（`HEADLINE_PROBE_DEPTH`）。** 最初 8px で
+    書いたが、それでは溢れを検出できなかった——ゾーンの高さを100pxまで
+    削って強制的に溢れさせても検査が通った。行ボックスの上端と字面の上端の
+    間には `(lineHeight - 1) / 2 + アセンダの余白` があり、フォント60pxなら
+    十数pxになる。**切り取られた最初の行の字面はゾーン上端より十数px下から
+    始まる**ので、8pxの帯はその隙間に収まってしまう。
+    """
+    output, _ = rendered
+    zone_top = HEADLINE_ZONE_TOP[zone_key]
+    frame = _extract_frame(output, at_sec, tmp_path / f"{layout}-headline.png")
+    ink = _ink_in_band(frame, zone_top, zone_top + HEADLINE_PROBE_DEPTH)
+    assert ink == 0, (
+        f"{layout} の見出しがゾーン上端（y={zone_top}）で切れている: "
+        f"y={zone_top}..{zone_top + HEADLINE_PROBE_DEPTH} に白い画素が{ink}個ある"
+    )
