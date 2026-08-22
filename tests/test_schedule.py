@@ -17,6 +17,7 @@ import pytest
 
 from src.jobs.planner import fetch_daily_news, plan_daily_batch
 from src.jobs.scheduler import DailyScheduler, next_run_at
+from src.models.job import ORIGIN_SCHEDULE
 from src.models.news import CHANNEL_VIDEO, NewsArticle, NewsCategory
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -198,14 +199,22 @@ class FakeJobs:
     def __init__(self, busy: bool = False):
         self.busy = busy
         self.batches: list[tuple[str, list[tuple[str, str]]]] = []
+        # 定期実行が渡した origin。拒否されたときに代替を積んでよいかを
+        # 決める値なので、渡っていることを検査できるように残す。
+        self.origins: list[str | None] = []
 
     def has_active_jobs(self) -> bool:
         return self.busy
 
     def enqueue_batch(
-        self, articles: list[tuple[str, str]], video_format: str, language: str = "ja"
+        self,
+        articles: list[tuple[str, str]],
+        video_format: str,
+        language: str = "ja",
+        origin: str | None = None,
     ) -> str:
         self.batches.append((video_format, articles))
+        self.origins.append(origin)
         return f"batch-{video_format}"
 
 
@@ -361,3 +370,18 @@ async def test_scrapes_the_chosen_articles() -> None:
     await plan_daily_batch(news, jobs, formats=["short", "long"])
 
     assert news.scraped == ["a1", "a2"]
+
+
+async def test_定期実行のジョブには_schedule_の印が付く() -> None:
+    """`origin=ORIGIN_SCHEDULE` を渡していること（issue #30）。
+
+    この印が無いと、記事の題材がコンテンツフィルタに拒否されたときに
+    代替が積まれず、**その日の動画が0本になる**（手動投入と区別できないので、
+    差し替えてよいか判断できない）。定数を見るのではなく実際に渡る値を見る。
+    """
+    news = FakeNews([_article("a1", "記事1")])
+    jobs = FakeJobs()
+
+    await plan_daily_batch(news, jobs, formats=["short"])
+
+    assert jobs.origins == [ORIGIN_SCHEDULE]

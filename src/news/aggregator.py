@@ -298,6 +298,9 @@ class NewsAggregator:
                 # 外した記録も引き継ぐ。落とすと、まだフィードに載っている
                 # 記事が取得のたびに戻ってきて「外す」が効かなくなる。
                 article.dismissed = old.dismissed
+                # 拒否の記録も引き継ぐ。**落とすと再取得のたびに初期値へ戻り、
+                # 拒否された記事が毎日選ばれ直す**（この機能そのものが効かない）。
+                article.content_filtered = dict(old.content_filtered)
                 article.content = old.content or article.content
                 article.thumbnail_url = old.thumbnail_url or article.thumbnail_url
             merged.append(article)
@@ -341,13 +344,19 @@ class NewsAggregator:
         """
         if article.is_selected:
             return True
-        if not article.consumed:
+
+        # 消費済みと「コンテンツフィルタに拒否された」を同じ扱いにする。
+        # どちらも失うと同じ記事が選び直され、前者は二重投稿、後者は毎日
+        # 同じ理由で失敗する生成に化ける。キーが衝突しうる（どちらも
+        # "video" を持つ）ので dict をマージせず値だけを並べる。
+        recorded = [*article.consumed.values(), *article.content_filtered.values()]
+        if not recorded:
             return False
 
-        # 消費時刻が読めないなら残す。判断できないときに落とす方向へ倒すと、
+        # 時刻が読めないなら残す。判断できないときに落とす方向へ倒すと、
         # 二重投稿という取り返しのつかない方の失敗に寄る。
         stamps = []
-        for value in article.consumed.values():
+        for value in recorded:
             try:
                 at = datetime.fromisoformat(value)
             except (TypeError, ValueError):
@@ -366,10 +375,22 @@ class NewsAggregator:
         外した記事（`dismissed`）は既定で返さない。畳めない一覧では、
         題材の合わない記事を毎回読み飛ばすことになる。
 
-        **自動生成の記事選択（`pick_unconsumed`）はここを通らない。**
-        あちらは `_load_category` を直接読むので、外した記事も候補に入る。
-        「画面で畳む」ことと「自動生成に使わせない」ことは別の判断で、
-        後者を人の操作に紐づけると、外し忘れが生成の停止に化ける。
+        **自動生成の記事選択（`pick_unconsumed`）もここを通る。**
+        つまり外した記事は自動生成の候補にも入らない。これは意図した挙動で、
+        人が「題材が合わない」と判断した記事から毎朝の動画が作られるのは
+        筋が違う。副産物として、コンテンツフィルタに拒否されるような記事を
+        **人が手で止められる逃げ道**になっている（`set_dismissed` の
+        「使わないと決めた記事が生成の対象に残っていると、押した操作と
+        画面の状態が食い違う」と整合する）。
+
+        以前ここには「`pick_unconsumed` はここを通らない。あちらは
+        `_load_category` を直接読む」と書いてあったが、**それは書かれた時点
+        から誤り**だった（`pick_unconsumed` は導入時から一貫してこのメソッド
+        経由）。確信を持って書かれた誤ったコメントの実例として残しておく。
+
+        引き換えに、記事を外しすぎると自動生成の候補が枯れる。ただし
+        `_must_survive_refetch` は `dismissed` だけの記事を保持しないので、
+        フィードから流れれば記事プールから抜け、詰まり続けることはない。
 
         Args:
             category: ニュースカテゴリ
@@ -565,6 +586,33 @@ class NewsAggregator:
 
         return self._update_article(article_id, mark) is not None
 
+    def mark_content_filtered(self, article_id: str, channel: str = CHANNEL_VIDEO) -> bool:
+        """記事をそのチャネルで恒久的に使えないとマークする。
+
+        Azure OpenAI のコンテンツフィルタが記事の題材を拒否したときに呼ぶ。
+        以降 `pick_unconsumed` はこの記事を返さないので、毎日同じ記事で
+        同じ理由の失敗を繰り返さなくなる。
+
+        **選択は外さない**（`mark_as_generated` との違い）。人が選んだ記事が
+        拒否されたなら、その事実は画面に残っている方がよい。
+
+        既定を CHANNEL_VIDEO にしてあるのは、`PipelineJobRunner` が要求する
+        Protocol を `mark_content_filtered(article_id)` の形に保つため。
+        X へ広げるときは呼び出し側が channel を渡すだけでよい。
+
+        Args:
+            article_id: 記事ID
+            channel: CHANNEL_VIDEO / CHANNEL_X
+
+        Returns:
+            bool: 記事が見つかって更新できたか
+        """
+
+        def mark(article: NewsArticle) -> None:
+            article.mark_content_filtered(channel)
+
+        return self._update_article(article_id, mark) is not None
+
     def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
         """そのチャネルでまだ使っていない記事を選ぶ。
 
@@ -584,7 +632,14 @@ class NewsAggregator:
             for article in self.get_articles_by_category(category):
                 if len(picked) >= needed:
                     return picked
-                if article.is_consumed_by(channel) or article.id in seen:
+                if (
+                    article.is_consumed_by(channel)
+                    # コンテンツフィルタに拒否された記事を毎日選び直さない。
+                    # 拒否は記事の題材が原因の恒久的な失敗なので、翌日
+                    # 同じ記事で同じ理由の失敗を繰り返すだけになる。
+                    or article.is_content_filtered_for(channel)
+                    or article.id in seen
+                ):
                     continue
                 seen.add(article.id)
                 picked.append(article)

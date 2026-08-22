@@ -50,6 +50,13 @@ class JobRecord(Base):
     video_format: Mapped[str] = mapped_column(String(16))
     language: Mapped[str] = mapped_column(String(8))
 
+    # 誰がこのジョブを積んだか。"schedule" は定期実行、None は画面からの手動。
+    #
+    # **代替の投入をこれで分ける。** コンテンツフィルタに拒否されたとき、
+    # 定期実行なら別の記事で作り直してよいが、手動なら人が選んだ記事を
+    # 勝手に差し替えてはいけない。区別する列が無いと、その判断ができない。
+    origin: Mapped[str | None] = mapped_column(String(16), default=None)
+
     status: Mapped[JobStatus] = mapped_column(String(16), index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
 

@@ -15,7 +15,8 @@ from src.jobs.post_worker import PostWorker
 from src.jobs.runner import PipelineJobRunner
 from src.jobs.scheduler import DailyScheduler
 from src.jobs.worker import JobWorker
-from src.models.news import CHANNEL_X
+from src.models.job import ORIGIN_SCHEDULE, GenerationJob, JobStatus
+from src.models.news import CHANNEL_VIDEO, CHANNEL_X
 from src.news.aggregator import NewsAggregator
 from src.pipeline import Pipeline
 from src.social.card_visual import CardVisualGenerator
@@ -33,7 +34,7 @@ from src.storage.social import SocialPostRepository
 from src.storage.tokens import TokenStore, build_token_store
 from src.uploaders.tiktok_uploader import TikTokUploader
 from src.uploaders.youtube_uploader import YouTubeUploader
-from src.utils.logger import log_error, log_step
+from src.utils.logger import log_error, log_step, log_warning
 
 
 @dataclass
@@ -191,7 +192,15 @@ class AppContext:
             pipeline=pipeline,
             artifact_store=artifact_store,
             jobs=jobs,
-            worker=JobWorker(jobs, PipelineJobRunner(pipeline, aggregator)),
+            worker=JobWorker(
+                jobs,
+                PipelineJobRunner(pipeline, aggregator),
+                # 拒否されたら代替を積む。**渡し忘れると、拒否された日の
+                # 動画が黙って0本になる**（`fetch_image` を渡し忘れて画像を
+                # 添付しない投稿が続いたのと同じ形の欠陥）。
+                # tests/test_scheduler_wiring.py が見張っている。
+                on_article_rejected=lambda job: _substitute_rejected_article(aggregator, jobs, job),
+            ),
             scheduler=_build_scheduler(
                 config,
                 aggregator,
@@ -219,6 +228,78 @@ class AppContext:
             post_worker=post_worker,
             metrics_scheduler=_build_metrics_scheduler(config, posts, token_store, artifact_store),
         )
+
+
+# 1つの形式について、同じバッチで試す記事の総数（元の1件を含む）。
+#
+# **数えているのはバッチ内の FAILED 件数**で、代替を積んだ回数そのものでは
+# ない（`ArticleUnavailable` など別の理由の失敗も同じ数に入る近似）。
+# `schedule_articles_per_format` が既定の 1 なら近似ではなく厳密。
+#
+# 上限を置く理由: 拒否が続く日に代替を積み続けると、そのぶん Azure の
+# 呼び出しを焼く。2 なら「元の記事 + 代替1件」で止まる。
+MAX_ARTICLES_TRIED = 2
+
+# 代替を探すときに `pick_unconsumed` から取る件数。
+# 本文が無い記事は runner が `ArticleUnavailable` で弾くので、本文つきが
+# 見つかるまで少し多めに見る（ここは同期の文脈なのでスクレイピングできない。
+# 3倍の overfetch で `scrape_articles` が本文をストアに書き戻してある）。
+SUBSTITUTE_LOOKAHEAD = 5
+
+
+def _substitute_rejected_article(
+    aggregator: NewsAggregator, jobs: JobRepository, job: GenerationJob
+) -> None:
+    """拒否されたジョブの代わりを、**同じバッチ**に1件積む。
+
+    これが無いと、記事1件が拒否された時点でその形式の動画は0本で1日が
+    終わる（既定は形式ごと1件なので、拒否1件＝その日0本）。X 側は計画の
+    ループが次の候補へ進むので落ちない——**動画側だけがこの形で弱かった**。
+
+    新しいバッチにしないのが要点。`enqueue_batch` は毎回 batch_id を作るので、
+    別バッチにすると `latest_batch_id()` が代替だけを指し、拒否された記事が
+    画面から消える。同じバッチなら `BatchProgress` が QUEUED を見て status を
+    running に戻し、完了後は失敗した記事と作れた記事の両方を出す。
+
+    Args:
+        aggregator: 記事ストア
+        jobs: ジョブ表
+        job: 拒否されたジョブ
+    """
+    if job.origin != ORIGIN_SCHEDULE:
+        # **手動生成では差し替えない。** 人が選んだ記事が拒否された事実を
+        # 別の記事の結果で上書きすると、押した操作と画面が食い違う。
+        return
+
+    failed = [j for j in jobs.list_batch(job.batch_id) if j.status is JobStatus.FAILED]
+    if len(failed) >= MAX_ARTICLES_TRIED:
+        log_warning(f"拒否が続いたので代替の投入を打ち切ります（{len(failed)}件失敗）")
+        return
+
+    # 記事には既に印が付いているので `pick_unconsumed` はこれを返さない。
+    # それでも id で除くのは、印の書き込みが失敗していても同じ記事を選び
+    # 直さないため（同じ拒否をもう一度踏むだけになる）。
+    candidates = [
+        article
+        for article in aggregator.pick_unconsumed(CHANNEL_VIDEO, SUBSTITUTE_LOOKAHEAD)
+        if article.id != job.article_id and article.content
+    ]
+    if not candidates:
+        # 本文なしを積んでも `ArticleUnavailable` になるだけで、拒否の理由を
+        # 画面から押し出してしまう。積まずに理由をログに残す。
+        log_warning("代替に使える記事（本文つき）が見つかりませんでした")
+        return
+
+    replacement = candidates[0]
+    jobs.enqueue_into(
+        job.batch_id,
+        replacement.id,
+        replacement.title,
+        job.video_format,
+        job.language,
+        origin=job.origin,
+    )
+    log_step(f"代替の記事を投入しました: {replacement.title[:30]}", "♻️")
 
 
 def _mark_posted_consumed(aggregator: NewsAggregator, article_id: str) -> None:

@@ -3,6 +3,7 @@
 from openai import (
     APIConnectionError,
     APITimeoutError,
+    BadRequestError,
     InternalServerError,
     OpenAI,
     RateLimitError,
@@ -28,6 +29,7 @@ from src.models.script import (
     Script,
     ScriptDraft,
 )
+from src.utils.content_filter import filtered_categories, is_content_filter_error
 from src.utils.grounding import ungrounded_numbers
 from src.utils.logger import log_error, log_step, log_success, log_warning
 
@@ -36,6 +38,55 @@ class ScriptGenerationError(Exception):
     """Script generation failed."""
 
     pass
+
+
+class ScriptContentFilterError(ScriptGenerationError):
+    """Azure のコンテンツフィルタが記事の題材を拒否した。
+
+    **引き直しても結果は変わらない。** 拒否されるのは入力（記事のタイトルと
+    本文）で、システムプロンプトを直しても同じ入力を送れば同じ 400 が返る。
+    だから引き直しのループに乗せず、記事そのものを諦める判断に繋げる
+    （`ContentFilterError` と同じ役割で、あちらは画像側）。
+    """
+
+    pass
+
+
+def _input_filter_message(exc: Exception) -> str:
+    """入力が拒否されたことを、画面にそのまま出せる日本語にする。
+
+    **生の 400 JSON を出さない。** これは「失敗した記事」の欄に出る文字列で、
+    `content_filter_offsets` や 19,473 文字ぶんのオフセットを見せても
+    「記事の題材が原因」だとは読み取れない（issue #30）。
+
+    Args:
+        exc: 元の `BadRequestError`
+
+    Returns:
+        str: 画面に出す文言
+    """
+    categories = filtered_categories(exc)
+    detail = f"（{'、'.join(categories)}）" if categories else ""
+    return (
+        f"記事の題材が Azure OpenAI のコンテンツフィルタに拒否されました{detail}。"
+        "拒否されたのは入力（記事のタイトルと本文）なので、"
+        "プロンプトを直しても引き直しても結果は変わりません"
+    )
+
+
+def _output_filter_message() -> str:
+    """生成結果が拒否されたことを日本語にする。
+
+    入力側と文言を分けるのは、直す手立てが違って見えるため。どちらも
+    記事の題材に由来するので引き直しはしない。
+
+    Returns:
+        str: 画面に出す文言
+    """
+    return (
+        "生成された台本が Azure OpenAI のコンテンツフィルタに拒否されました。"
+        "記事の題材に由来するので、引き直しても結果は変わりません"
+    )
 
 
 # 構成のパート名。プロンプトに出す順序そのもの。
@@ -790,6 +841,8 @@ Before output, verify:
             Script: 生成された台本
 
         Raises:
+            ScriptContentFilterError: 記事の題材がコンテンツフィルタに
+                拒否された場合。引き直さずそのまま伝播する
             ScriptGenerationError: 台本生成に失敗した場合
         """
         spec = get_spec(video_format)
@@ -806,6 +859,17 @@ Before output, verify:
             remaining = self.VALIDATION_RETRIES - attempt - 1
             try:
                 draft = self._request_script(instructions, news_topic)
+            except ScriptContentFilterError as e:
+                # **この節を消すと出力側の扉が黙って機能しなくなる。**
+                # ScriptContentFilterError は ScriptGenerationError の
+                # サブクラス、つまり Exception のサブクラスなので、下の
+                # `except Exception` に食われて素の ScriptGenerationError に
+                # 再ラップされ、型が消える。型が消えると Pipeline の素通しも
+                # 記事への印付けも代替の投入も発火せず、症状は直す前と同じに
+                # なる。**引き直しのために continue してはいけない**——
+                # 拒否されたのは入力なので、送り直しても同じ結果になる。
+                log_error(f"コンテンツフィルタに拒否されました: {e}")
+                raise
             except ValidationError as e:
                 last_problem = self._summarize_validation_error(e)
                 if remaining:
@@ -920,18 +984,36 @@ Before output, verify:
 
         Raises:
             ValidationError: スキーマ検証に失敗した場合
+            ScriptContentFilterError: コンテンツフィルタに拒否された場合
+                （入力・出力のどちらでも）
             ScriptGenerationError: モデルが出力を拒否した場合
         """
-        response = self.client.responses.parse(
-            model=self.model,
-            instructions=instructions,
-            input=news_topic,
-            text_format=ScriptDraft,
-        )
+        try:
+            response = self.client.responses.parse(
+                model=self.model,
+                instructions=instructions,
+                input=news_topic,
+                text_format=ScriptDraft,
+            )
+        except BadRequestError as e:
+            # **入力側の扉。** 記事のタイトルと本文が拒否されると 400 で返る。
+            # tenacity の retry は許可リスト方式で BadRequestError を含まないので、
+            # ここに来る時点で再試行は済んでいない（そして再試行してはいけない）。
+            if is_content_filter_error(e):
+                raise ScriptContentFilterError(_input_filter_message(e)) from e
+            raise
 
         draft = response.output_parsed
         if draft is None:
-            # 安全機構による拒否や打ち切りで parse できなかった場合
+            # **出力側の扉。** 応答は返っているが構造化出力を作れなかった場合。
+            # 理由がコンテンツフィルタなら入力側と同じ恒久的な失敗として扱う
+            # ——ここを閉じないと、同じ失敗が別の扉から入って毎日の再試行を
+            # 起こす。`reason` は SDK で
+            # `Literal["max_output_tokens", "content_filter"]`
+            # （openai/types/responses/response.py の IncompleteDetails）。
+            reason = getattr(response.incomplete_details, "reason", None)
+            if reason == "content_filter":
+                raise ScriptContentFilterError(_output_filter_message())
             raise ScriptGenerationError(
                 f"モデルが台本を出力しませんでした "
                 f"(status={response.status!r}, incomplete={response.incomplete_details!r})"

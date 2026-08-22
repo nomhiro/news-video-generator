@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 from config import Config
 from src.generators.image_generator import ImageGenerator
 from src.generators.remotion_renderer import ILLUSTRATION_SIZE, build_illustration_prompt
-from src.generators.script_generator import ScriptGenerator
+from src.generators.script_generator import ScriptContentFilterError, ScriptGenerator
 from src.generators.video_renderer import VideoRenderer, build_video_renderer
 from src.generators.voice_generator import VoiceGenerator
 from src.models.formats import get_spec
@@ -344,6 +344,13 @@ class Pipeline:
                 "published": artifact_keys,
             }
 
+        except ScriptContentFilterError:
+            # **PipelineError に包まない。** 包むと型が消え、呼び出し側
+            # （`PipelineJobRunner`）が「記事の題材が原因の恒久的な失敗」だと
+            # 判定できなくなる。`ImageGenerator.generate_batch` が
+            # `ImageGenerationError` をそのまま通しているのと同じ扱い。
+            # ログは `ScriptGenerator.generate` が既に出している。
+            raise
         except Exception as e:
             log_error(f"パイプラインエラー: {e}")
             raise PipelineError(f"パイプライン実行に失敗しました: {e}") from e

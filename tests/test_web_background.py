@@ -160,6 +160,9 @@ def test_a_missing_body_fails_with_a_reason(repository: JobRepository) -> None:
         def mark_as_generated(self, article_id: str) -> bool:  # pragma: no cover
             raise AssertionError("生成していないのに印を付けてはいけない")
 
+        def mark_content_filtered(self, article_id: str) -> bool:  # pragma: no cover
+            raise AssertionError("本文が無いだけの失敗を拒否として記録してはいけない")
+
     class ExplodingPipeline:
         def run(self, *args: object, **kwargs: object) -> dict[str, object]:
             raise AssertionError("本文が無いのにパイプラインを呼んではいけない")

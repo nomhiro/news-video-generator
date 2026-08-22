@@ -14,9 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from src.jobs.runner import ArticleUnavailable, PipelineJobRunner
+from src.jobs.runner import ArticleRejected, ArticleUnavailable, PipelineJobRunner
 from src.jobs.worker import JobWorker
 from src.models.job import (
+    ORIGIN_SCHEDULE,
     BatchProgress,
     GenerationJob,
     InvalidJobTransition,
@@ -513,12 +514,17 @@ class FakeArticleStore:
     def __init__(self, articles: dict[str, FakeArticle]):
         self._articles = articles
         self.generated: list[str] = []
+        self.content_filtered: list[str] = []
 
     def get_article_by_id(self, article_id: str) -> FakeArticle | None:
         return self._articles.get(article_id)
 
     def mark_as_generated(self, article_id: str) -> bool:
         self.generated.append(article_id)
+        return True
+
+    def mark_content_filtered(self, article_id: str) -> bool:
+        self.content_filtered.append(article_id)
         return True
 
 
@@ -637,3 +643,171 @@ def test_runner_tolerates_a_result_without_keys() -> None:
     store = FakeArticleStore({"a-1": FakeArticle("a-1", "記事1", "本文")})
     runner = PipelineJobRunner(RecordingPipeline(result={"status": "success"}), store)
     assert runner(_job()) is None
+
+
+# --------------------------------------------------------------------------
+# 既にあるバッチへの追加（コンテンツフィルタで拒否されたときの代替）
+# --------------------------------------------------------------------------
+
+
+def test_enqueue_into_adds_to_the_same_batch(repository: JobRepository) -> None:
+    """代替を**同じバッチ**に足せること。
+
+    別バッチにすると `latest_batch_id()` が代替だけを指し、拒否された記事が
+    画面から消える。`enqueue_batch` は毎回 batch_id を作るので、この口が
+    無いと同じバッチには足せない。
+    """
+    batch_id = repository.enqueue_batch([("a-1", "記事1")], video_format="short")
+
+    repository.enqueue_into(batch_id, "a-2", "記事2", "short", "ja")
+
+    jobs = repository.list_batch(batch_id)
+    assert [job.article_id for job in jobs] == ["a-1", "a-2"]
+    assert repository.latest_batch_id() == batch_id
+
+
+def test_enqueue_into_brings_the_batch_back_to_running(repository: JobRepository) -> None:
+    """失敗で終わったバッチに足すと、進捗が running に戻ること。
+
+    `BatchProgress` 側は変更していない。QUEUED が1件あれば running になる
+    （`from_jobs` の `if running or pending`）ので、画面はポーリングを続ける。
+    """
+    batch_id = repository.enqueue_batch([("a-1", "記事1")], video_format="short")
+    first = repository.claim_next("w")
+    assert first
+    repository.mark_failed(first.id, "記事の題材がコンテンツフィルタに拒否されました")
+    assert repository.latest_progress().status == "error"
+
+    repository.enqueue_into(batch_id, "a-2", "記事2", "short", "ja")
+
+    assert repository.latest_progress().status == "running"
+
+
+def test_the_batch_shows_both_the_rejected_and_the_substitute(repository: JobRepository) -> None:
+    """完了後に「拒否された記事」と「作れた記事」の両方が出ること。
+
+    黙って差し替えると、その日なぜ別の記事になったのかが画面から分からない。
+    """
+    batch_id = repository.enqueue_batch([("a-1", "記事1")], video_format="short")
+    rejected = repository.claim_next("w")
+    assert rejected
+    repository.mark_failed(rejected.id, "記事の題材がコンテンツフィルタに拒否されました")
+    repository.enqueue_into(batch_id, "a-2", "記事2", "short", "ja")
+    substitute = repository.claim_next("w")
+    assert substitute
+    repository.mark_succeeded(substitute.id, video_key="videos/2.mp4")
+
+    progress = repository.latest_progress()
+    assert progress.failed_articles == ("記事1",)
+    assert progress.completed_articles == ("記事2",)
+    assert progress.total_count == 2
+
+
+def test_origin_round_trips(repository: JobRepository) -> None:
+    """`origin` が行に入って読み出せること。
+
+    この値で「代替を積んでよいか」を決めるので、落ちると定期実行の拒否から
+    代替が積まれなくなる（症状は「その日の動画が0本」で直す前と同じ）。
+    """
+    scheduled = repository.enqueue_batch(
+        [("a-1", "記事1")], video_format="short", origin=ORIGIN_SCHEDULE
+    )
+    manual = repository.enqueue_batch([("a-2", "記事2")], video_format="short")
+
+    assert repository.list_batch(scheduled)[0].origin == ORIGIN_SCHEDULE
+    assert repository.list_batch(manual)[0].origin is None
+
+
+def test_enqueue_into_inherits_origin(repository: JobRepository) -> None:
+    """代替も定期実行の印を引き継げること（連鎖しても判定が効く）。"""
+    batch_id = repository.enqueue_batch(
+        [("a-1", "記事1")], video_format="short", origin=ORIGIN_SCHEDULE
+    )
+
+    repository.enqueue_into(batch_id, "a-2", "記事2", "short", "ja", origin=ORIGIN_SCHEDULE)
+
+    assert [job.origin for job in repository.list_batch(batch_id)] == [
+        ORIGIN_SCHEDULE,
+        ORIGIN_SCHEDULE,
+    ]
+
+
+def test_worker_calls_the_rejection_callback(repository: JobRepository) -> None:
+    """`ArticleRejected` のときだけコールバックを呼ぶこと。
+
+    ここは `_run_one` の分岐そのものを通す。配線のテスト
+    （`tests/test_scheduler_wiring.py`）はコールバックを直接呼ぶので、
+    **この分岐を消しても緑のまま**だった。消えると代替が積まれず、その日の
+    動画が黙って0本になる。
+    """
+    repository.enqueue_batch([("a-1", "記事1")], video_format="short")
+    called: list[str] = []
+
+    def rejecting_runner(job: GenerationJob) -> str | None:
+        raise ArticleRejected("記事の題材がコンテンツフィルタに拒否されました")
+
+    worker = JobWorker(
+        repository,
+        rejecting_runner,
+        poll_interval=0.05,
+        on_article_rejected=lambda job: called.append(job.article_id),
+    )
+
+    assert worker._run_one() is True
+
+    assert called == ["a-1"]
+    # 失敗として記録するのは従来どおり。読める理由がそのまま行に入る
+    job = repository.list_batch(repository.latest_batch_id() or "")[0]
+    assert job.status is JobStatus.FAILED
+    assert "コンテンツフィルタ" in (job.error_message or "")
+
+
+def test_worker_does_not_call_the_callback_for_other_failures(
+    repository: JobRepository,
+) -> None:
+    """一時的な失敗で代替を積まないこと。
+
+    積むと、ffmpeg が落ちただけの日に別の記事の動画が増える（そして元の
+    記事は失敗のまま残る）。
+    """
+    repository.enqueue_batch([("a-1", "記事1")], video_format="short")
+    called: list[str] = []
+
+    def failing_runner(job: GenerationJob) -> str | None:
+        raise RuntimeError("ffmpeg が異常終了しました")
+
+    worker = JobWorker(
+        repository,
+        failing_runner,
+        poll_interval=0.05,
+        on_article_rejected=lambda job: called.append(job.article_id),
+    )
+
+    assert worker._run_one() is True
+
+    assert called == []
+
+
+def test_worker_survives_a_failing_callback(repository: JobRepository) -> None:
+    """コールバックの例外でワーカーのループを止めないこと。
+
+    止まると以降のジョブが1件も動かなくなる。代替が積まれないだけなら、
+    その日の動画が1本減るだけで済む。
+    """
+    repository.enqueue_batch([("a-1", "記事1")], video_format="short")
+
+    def rejecting_runner(job: GenerationJob) -> str | None:
+        raise ArticleRejected("拒否されました")
+
+    def exploding_callback(job: GenerationJob) -> None:
+        raise OSError("記事データを読めませんでした")
+
+    worker = JobWorker(
+        repository,
+        rejecting_runner,
+        poll_interval=0.05,
+        on_article_rejected=exploding_callback,
+    )
+
+    # 例外が外に出ないこと（出るとワーカーのスレッドが死ぬ）
+    assert worker._run_one() is True

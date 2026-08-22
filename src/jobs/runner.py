@@ -19,7 +19,9 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from src.generators.script_generator import ScriptContentFilterError
 from src.models.job import GenerationJob
+from src.utils.logger import log_error
 
 # 台本生成に渡す本文の長さ。
 # 長すぎるとトークン上限に当たる。ニュース記事は冒頭に要点が来るので、
@@ -74,12 +76,28 @@ class SupportsArticleLookup(Protocol):
         """生成済みとして記録する。"""
         ...
 
+    def mark_content_filtered(self, article_id: str) -> bool:
+        """コンテンツフィルタに拒否されたと記録する。"""
+        ...
+
 
 class ArticleUnavailable(Exception):
     """記事が見つからない、または本文が無い。
 
     再実行しても直らない種類の失敗なので、ワーカーはこれを
     そのまま失敗として記録する（リトライしても同じ結果になる）。
+    """
+
+
+class ArticleRejected(Exception):
+    """記事の題材が Azure OpenAI のコンテンツフィルタに拒否された。
+
+    `ArticleUnavailable` と同じく再実行しても直らないが、**扱いが1つ違う**
+    ——ワーカーはこの型を見たときだけ「代替の記事を積む」コールバックを
+    呼ぶ。記事側には既に印が付いているので、代替の選択で同じ記事は返らない。
+
+    メッセージは生の 400 JSON ではなく、画面にそのまま出せる日本語を持つ
+    （`jobs.error_message` を経由して「失敗した記事」の欄に出る）。
     """
 
 
@@ -107,6 +125,7 @@ class PipelineJobRunner:
 
         Raises:
             ArticleUnavailable: 記事または本文が無い場合
+            ArticleRejected: 記事の題材がコンテンツフィルタに拒否された場合
         """
         article = self._articles.get_article_by_id(job.article_id)
         if article is None:
@@ -123,13 +142,31 @@ class PipelineJobRunner:
         # 台本本文に書き込もうとするので、出典は引数で渡してコード側が
         # 説明文に追記する（src/models/script.py の _with_source）。
         topic = f"{article.title}\n\n{article.content[:MAX_CONTENT_CHARS]}"
-        result = self._pipeline.run(
-            topic,
-            languages=[job.language],
-            output_name=article.title,
-            video_format=job.video_format,
-            source_url=article.url,
-        )
+        try:
+            result = self._pipeline.run(
+                topic,
+                languages=[job.language],
+                output_name=article.title,
+                video_format=job.video_format,
+                source_url=article.url,
+            )
+        except ScriptContentFilterError as e:
+            # 記事の題材が原因の恒久的な失敗。**印を付けてから投げる**
+            # ——印が先なら、代替を選ぶ側（ワーカーのコールバック）が
+            # `pick_unconsumed` を呼んだ時点でこの記事は候補から外れている。
+            #
+            # 印の書き込みに失敗しても `ArticleRejected` は投げる。読める
+            # 失敗理由が画面に出ることの方が重要で、ここで例外にすると
+            # 生の 400 JSON に戻る。
+            try:
+                self._articles.mark_content_filtered(job.article_id)
+            except Exception as mark_error:
+                # 印が付かなくても拒否は伝える。ここで例外にすると画面は
+                # 生の 400 JSON に戻り、代替の投入も起きない。印が無いぶん
+                # 代替の選択で同じ記事が候補に戻りうるが、そちら側が
+                # `job.article_id` を除いて選ぶので二重に踏むことはない。
+                log_error(f"拒否の印を付けられませんでした: {mark_error}")
+            raise ArticleRejected(str(e)) from e
 
         # 生成に成功したのでニュース側にも印を付ける。
         # ここで失敗しても動画は出来ているので、例外にはしない。

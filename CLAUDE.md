@@ -1118,10 +1118,21 @@ Chromium で再生して `readyState=4` / 1080x1920 / `webkitAudioDecodedByteCou
 （SQLite に置くとリビジョン更新で消え、外したはずの記事が翌日戻る）。
 
 - `get_articles_by_category` は既定で外した記事を返さない。
-- **`pick_unconsumed` はこれを見ない。** 自動生成の記事選択は
-  `_load_category` を直接読む。「画面で畳む」ことと「自動生成に使わせない」
-  ことは別の判断で、後者を人の操作に紐づけると**外し忘れが毎朝の生成の
-  停止に化ける**。
+- **`pick_unconsumed` もこれを見る**（＝外した記事は自動生成の候補にも
+  入らない）。あちらは `get_articles_by_category` 経由で読むため。
+  人が「題材が合わない」と決めた記事から毎朝の動画が作られるのは筋が違い、
+  副産物として**コンテンツフィルタに拒否されるような記事を人が手で止める
+  逃げ道**にもなる。`tests/test_aggregator_consumed.py` が挙動を固定している。
+
+  ここには 2026-08-22 まで「**`pick_unconsumed` はこれを見ない。**
+  自動生成の記事選択は `_load_category` を直接読む」と書いてあったが、
+  **これは `dismissed` を入れた時点から誤りだった**（`pick_unconsumed` は
+  導入時から一貫して `get_articles_by_category` を呼んでいる）。
+  確信を持って書かれた誤った記述の実例として残しておく。
+
+  引き換えに、記事を外しすぎると自動生成の候補が枯れる。ただし
+  `_must_survive_refetch` は `dismissed` だけの記事を保持しないので、
+  フィードから流れれば記事プールから抜け、詰まり続けることはない。
 - `_merge_preserving_state` で引き継ぐ。落とすと、まだフィードに載っている
   記事が取得のたびに戻ってきて「外す」が効かなくなる。
 
@@ -1782,8 +1793,89 @@ X のリンクカードに出るのは **Google News**（媒体名もタイト�
 - **海外メディアはコンテンツフィルタに当たる。** 実測で TechCrunch の
   記事1件が Azure OpenAI のプロンプトフィルタ（sexual: high）で
   `BadRequestError` になった。`plan_daily_posts` が記事単位で捕まえて
-  次の候補に進むので1日は落ちないが、その記事は消費済みにならないため
-  毎日再試行される。
+  次の候補に進むので1日は落ちない。**X 側は記事に印を付けないので、
+  その記事は毎日1回試され続ける**（動画側は印を付けるようにした。
+  次節を参照）。
+- **題材が原因の拒否は国内メディア経由でも起きる。** 2026-08-22 に
+  成人向けサービスの発表ニュース（普通の IT メディア経由）で台本生成が
+  拒否された。フィードの選定では防げない——記事の内容の問題なので、
+  一次情報のフィードに絞っても入ってくる。
+
+### 台本生成が拒否されたら、記事を諦めて代替を積む
+
+記事の題材が Azure OpenAI のコンテンツフィルタに拒否されたとき（入力が
+`sexual: medium` などで弾かれる）、2026-08-22 まで次の3つが同時に起きていた。
+
+1. `SCHEDULE_FORMATS=short` / `schedule_articles_per_format=1` なので
+   毎朝のジョブは1本だけ。**拒否1件＝その日の動画0本**
+2. 記事が消費済みになるのは成功後だけなので、`pick_unconsumed` は翌日も
+   同じ記事を選ぶ。**フィードから流れるまで毎日同じ理由で失敗する**
+3. 画面には「パイプライン実行に失敗しました: 台本生成に失敗しました:
+   Error code: 400 - {...}」という3段ラップの生 JSON が出るだけで、
+   記事の題材が原因だと読み取れない
+
+いまは拒否を専用の型で運び、記事に印を付け、**同じバッチに代替を1件積む**。
+
+- **判定は `src/utils/content_filter.py` に1つだけ置く。** 画像側にあった
+  `_is_content_filter_error` を出した。**綴りが2つある**——画像 API は
+  `contentFilter`（camelCase）、Chat / Responses API は `content_filter`
+  （snake_case）。移す前は camelCase だけを明示判定しており、snake_case は
+  `str(exc)` の部分文字列一致で*偶然*拾えていた。
+- **拒否の扉は2つある。** 入力側（`BadRequestError`）と出力側
+  （`response.incomplete_details.reason == "content_filter"`）。どちらも
+  `_request_script` の中で `ScriptContentFilterError` に変換する。
+  **片方だけ閉じても、同じ失敗が別の扉から入って毎日の再試行が残る。**
+- **`generate` の except chain の先頭に `except ScriptContentFilterError:
+  raise` を置く。** これが無いと `except Exception` に食われて素の
+  `ScriptGenerationError` に再ラップされ、**型が消えて症状が直す前と同じに
+  なる**（Pipeline の素通しも記事への印付けも代替の投入も発火しない）。
+  `Pipeline.run` にも同じ理由で素通しの節がある。
+  `tests/test_script_content_filter.py` が実際にこの退行を捕まえる
+  （ガードを外して落ちることを確認済み）。
+- **引き直さない。** 拒否されたのは入力なので、同じプロンプトを送り直すのは
+  API 呼び出しを捨てるだけ。tenacity の許可リストにも入れない。
+- **記録は `NewsArticle.content_filtered`**（チャネル → 時刻。`consumed` と
+  同じ形）。`consumed` を流用すると `video_generated` が真になり画面に
+  「動画を作り終えた」と嘘が出る。`dismissed` を流用すると人の判断という
+  意味論が壊れ、記事が一覧から消えて拒否が見えなくなる。
+  形を `consumed` に揃えたのは `_must_survive_refetch` の保持期間の仕組みに
+  そのまま乗せられるため——**`_merge_preserving_state` と
+  `_must_survive_refetch` の両方に足す**（前者を落とすと再取得のたびに
+  初期値へ戻り、この機能自体が効かなくなる）。
+- **失敗は失敗として見せ、別の記事で作り直す。** 黙って差し替えると
+  「なぜ作れなかったか」が画面から消える（`plan_daily_batch` が本文なしの
+  記事でもジョブに投入しているのと同じ判断）。`BatchProgress` は**変更して
+  いない**——同じバッチに足すと QUEUED が生まれて status が `running` に
+  戻り、完了後は「1件でも失敗したら error」の既存の規則で拒否された記事と
+  作れた記事の両方が出る。
+- **代替は別バッチにしてはいけない。** `enqueue_batch` は毎回 batch_id を
+  作るので、`latest_batch_id()` が代替だけを指し**拒否された記事が画面から
+  消える**。既存のバッチに足す口（`enqueue_into`）を用意した。
+- **手動生成では差し替えない。** `jobs.origin`（`"schedule"` / None）で
+  区別する。人が選んだ記事の拒否を別の記事の結果で上書きすると、押した
+  操作と画面が食い違う。手動は人がその場で見ているので、失敗を見せて
+  選び直させる方が正しい。
+- **上限は `MAX_ARTICLES_TRIED = 2`**（`src/web/dependencies.py`）。数えて
+  いるのは**バッチ内の FAILED 件数**で、代替を積んだ回数そのものではない
+  （`ArticleUnavailable` など別の理由の失敗も入る近似。
+  `schedule_articles_per_format` が既定の1なら厳密）。
+- **代替は本文を持つ候補から選ぶ。** コールバックは同期の文脈なので
+  スクレイピングできない。3倍の overfetch で `scrape_articles` が本文を
+  ストアに書き戻してあるので、たいてい候補が残っている。本文つきが無ければ
+  **積まない**（本文なしを積むと `ArticleUnavailable` になるだけで、拒否の
+  理由を画面から押し出す）。
+- **印の書き込みが失敗しても拒否は伝える。** 読める失敗理由が画面に出る方が
+  重要。その経路では記事に印が無いので、代替の選択は `job.article_id` を
+  除いて選ぶ（同じ拒否を二度踏まない保険）。
+- **コールバックの例外はワーカーのループを止めない**（`_notify_rejected`）。
+  止めると以降のジョブが1件も動かなくなる。代替が積まれないだけなら、
+  その日の動画が1本減るだけで済む。
+- **X チャネルへの記録は未実装**（意図的）。X は記事単位で次の候補へ進むので
+  その日の投稿は落ちない。`content_filtered` はチャネル別なので、広げるときは
+  呼び出し側が channel を渡すだけでよい。
+- **挿絵（画像）の拒否は別経路で、動画は出る。**
+  `tests/test_pipeline_renderer.py` が「挿絵の生成に失敗しても動画生成は
+  失敗させない」ことを検査している。
 
 ### 記事の供給は動画と X で共通（`supply_articles`）
 

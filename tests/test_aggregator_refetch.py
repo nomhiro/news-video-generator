@@ -128,3 +128,74 @@ def test_選択が再取得をまたいで画面に残る(tmp_path) -> None:
     aggregator._save_category(NewsCategory.AI, merged)
 
     assert [a.id for a in aggregator.get_selected_articles()] == [selected.id]
+
+
+# --------------------------------------------------------------------------
+# コンテンツフィルタに拒否された記録（issue #30）
+# --------------------------------------------------------------------------
+
+
+def test_拒否の記録は再取得でも引き継がれる() -> None:
+    """フィードに残っている記事の印を落とさないこと。
+
+    **落とすと再取得のたびに初期値へ戻り、拒否された記事が毎日選ばれ直す**
+    ——つまりこの機能そのものが効かなくなる。`dismissed` を落として
+    「外す」が効かなくなるのと同じ形の欠陥。
+    """
+    rejected = _article("rejected")
+    rejected.mark_content_filtered(CHANNEL_VIDEO)
+    # 同じ記事がまだフィードに載っている（数日は載り続ける）
+    same_from_feed = _article("rejected")
+
+    result = _merge([same_from_feed], [rejected])
+
+    assert result[rejected.id].is_content_filtered_for(CHANNEL_VIDEO) is True
+
+
+def test_拒否された記事はフィードから消えても保持期間の内側なら残る() -> None:
+    """`consumed` と同じ扱いにすること。
+
+    記録が落ちると、記事が再取得されたときに選び直されて同じ拒否を踏む。
+    `dismissed` は保持条件に入っていないので、同じ形にすると落ちてしまう。
+    """
+    rejected = _article("rejected")
+    rejected.mark_content_filtered(CHANNEL_VIDEO)
+    fresh = _article("fresh")
+
+    result = _merge([fresh], [rejected])
+
+    assert rejected.id in result
+
+
+def test_古い拒否は保持期間を過ぎたら落ちる() -> None:
+    """記事プールが単調増加しないこと。
+
+    フィードが運ぶのは数日ぶんなので、保持期間を大きく超えたものは
+    「もう一度取得されて選び直される」経路が実質的に無い。
+    """
+    old = _article("old-rejection")
+    old.mark_content_filtered(
+        CHANNEL_VIDEO, at=datetime.now(UTC) - CONSUMED_RETENTION - timedelta(days=1)
+    )
+    fresh = _article("fresh")
+
+    result = _merge([fresh], [old])
+
+    assert old.id not in result
+
+
+def test_消費と拒否の両方があっても新しい方で判断する() -> None:
+    """キーが衝突する（どちらも video）形でも時刻を取り違えないこと。
+
+    dict をマージすると片方の時刻が消える。値だけを並べて最大を見る。
+    """
+    article = _article("both")
+    article.mark_consumed(
+        CHANNEL_VIDEO, at=datetime.now(UTC) - CONSUMED_RETENTION - timedelta(days=1)
+    )
+    article.mark_content_filtered(CHANNEL_VIDEO)
+    fresh = _article("fresh")
+
+    result = _merge([fresh], [article])
+
+    assert article.id in result, "新しい拒否の記録があるので残すべき"

@@ -245,3 +245,42 @@ def test_from_dict_は_to_dict_の_出力を_復元できる():
     restored = NewsArticle.from_dict(article.to_dict())
 
     assert restored.consumed == article.consumed
+
+
+def test_拒否の記録も_to_dict_と_from_dict_を往復する():
+    """新しいフィールドが保存と読み込みを往復すること。
+
+    `to_dict` は `asdict`、`from_dict` は既知のフィールドだけを通すので
+    どちらも変更は要らない。**往復しないと拒否の記録が保存されず**、
+    次に読み直した時点で消える（毎日同じ記事で失敗する状態に戻る）。
+    """
+    article = NewsArticle(
+        id="x", title="t", url="https://example.com/e", source="s", category=NewsCategory.AI
+    )
+    article.mark_content_filtered(CHANNEL_VIDEO)
+
+    restored = NewsArticle.from_dict(article.to_dict())
+
+    assert restored.content_filtered == article.content_filtered
+    assert restored.is_content_filtered_for(CHANNEL_VIDEO) is True
+
+
+def test_拒否の記録を持たない古いJSONも読める():
+    """このフィールドが無い世代が書いた JSON を読めること。
+
+    足りないキーは既定値に落ちる必要がある。落ちなければ、切り戻し後に
+    書かれた JSON を読んだ時点で記事一覧・動画の計画・投稿の計画が
+    まとめて落ちる（`consumed` を入れたときに実際に踏んでいる形）。
+    """
+    payload = {
+        "id": "y",
+        "title": "t",
+        "url": "https://example.com/old",
+        "source": "s",
+        "category": "ai",
+    }
+
+    restored = NewsArticle.from_dict(payload)
+
+    assert restored.content_filtered == {}
+    assert restored.is_content_filtered_for(CHANNEL_VIDEO) is False

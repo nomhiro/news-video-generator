@@ -21,6 +21,7 @@ from tenacity import (
 )
 
 from src.models.formats import get_spec
+from src.utils.content_filter import is_content_filter_error
 from src.utils.logger import log_error, log_step, log_success, log_warning
 
 
@@ -89,28 +90,6 @@ def validate_size(size: str) -> tuple[int, int]:
         )
 
     return width, height
-
-
-def _is_content_filter_error(exc: BadRequestError) -> bool:
-    """BadRequestError がコンテンツフィルタ由来かを判定する。
-
-    Azure はプロンプト拒否と生成画像拒否の両方で
-    error.code == "contentFilter" を返す。
-
-    Args:
-        exc: openai SDK の BadRequestError
-
-    Returns:
-        bool: コンテンツフィルタ由来なら True
-    """
-    if getattr(exc, "code", None) == "contentFilter":
-        return True
-    body = getattr(exc, "body", None)
-    if isinstance(body, dict):
-        error = body.get("error")
-        if isinstance(error, dict) and error.get("code") == "contentFilter":
-            return True
-    return "content_filter" in str(exc) or "contentFilter" in str(exc)
 
 
 class ImageGenerator:
@@ -344,7 +323,7 @@ class ImageGenerator:
                 output_format=self.OUTPUT_FORMAT,
             )
         except BadRequestError as e:
-            if _is_content_filter_error(e):
+            if is_content_filter_error(e):
                 raise ContentFilterError(str(e)) from e
             raise
         except RateLimitError:
