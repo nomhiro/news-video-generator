@@ -1,7 +1,11 @@
-<!-- Update badge count -->
-<script>
-    document.getElementById('selected-badge').textContent = '{{ selected_count }}件';
-</script>
+{#
+  件数のバッジは out-of-band で更新する。
+
+  以前はここに `<script>` を置いて innerHTML を直書きしていた。
+  フラグメントに script を混ぜると、このパネルを差し替える経路以外では
+  バッジが更新されず、更新の仕組みがテンプレートの中に隠れる。
+#}
+<span id="selected-badge" hx-swap-oob="innerHTML">{{ selected_count }}件</span>
 
 {% if selected_articles %}
 <div class="space-y-3 mb-4 max-h-96 overflow-y-auto">

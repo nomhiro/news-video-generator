@@ -147,25 +147,41 @@ async def toggle_article_selection(
 ):
     """記事の選択状態を切り替える（HTMXパーシャル）。
 
+    **押したカードそのものを返す。** 以前は選択パネルだけを返していたので、
+    カードのラベルと背景は `article.is_selected` に依存しているのに再描画
+    されず、カテゴリを読み直すまで古い見た目のまま残った。実測では唯一の
+    反映（件数のバッジ）がビューポートから 9,088px 下にあり、画面上の
+    フィードバックが無かった。
+
+    選択パネルは out-of-band で一緒に更新する（`news_card_swap.html`）。
+
     Args:
         request: FastAPIリクエスト
         article_id: 記事ID
         aggregator: ニュース取得インスタンス
 
     Returns:
-        HTMLResponse: 選択パネルパーシャルHTML
+        HTMLResponse: 記事カード + 選択パネル（out-of-band）
+
+    Raises:
+        HTTPException: 記事が見つからない場合（404）
     """
-    aggregator.toggle_selection(article_id)
+    if aggregator.toggle_selection(article_id) is None:
+        raise HTTPException(status_code=404, detail="記事が見つかりません")
+
+    article = aggregator.get_article_by_id(article_id)
+    if article is None:
+        raise HTTPException(status_code=404, detail="記事が見つかりません")
 
     selected_articles = aggregator.get_selected_articles()
-    selected_count = len(selected_articles)
 
     return templates.TemplateResponse(
         request,
-        "partials/selected_panel.html",
+        "partials/news_card_swap.html",
         {
+            "article": article,
             "selected_articles": selected_articles,
-            "selected_count": selected_count,
+            "selected_count": len(selected_articles),
         },
     )
 
@@ -200,25 +216,31 @@ async def remove_from_selection(
 ):
     """記事を選択から削除する（HTMXパーシャル）。
 
+    一覧に出ているカードも out-of-band で戻す。戻さないと、解除したのに
+    一覧では「選択中」の見た目が残る（選択したときにカードが変わらなかった
+    のと同じ壊れ方の裏返し）。
+
     Args:
         request: FastAPIリクエスト
         article_id: 記事ID
         aggregator: ニュース取得インスタンス
 
     Returns:
-        HTMLResponse: 選択パネルパーシャルHTML
+        HTMLResponse: 選択パネル + 記事カード（out-of-band）
     """
     aggregator.clear_selection(article_id)
 
     selected_articles = aggregator.get_selected_articles()
-    selected_count = len(selected_articles)
 
     return templates.TemplateResponse(
         request,
-        "partials/selected_panel.html",
+        "partials/selected_panel_swap.html",
         {
+            # 記事が既にストアから消えていても選択パネルは返す（解除は成立
+            # している）。カードの out-of-band は article が無ければ出ない。
+            "article": aggregator.get_article_by_id(article_id),
             "selected_articles": selected_articles,
-            "selected_count": selected_count,
+            "selected_count": len(selected_articles),
         },
     )
 

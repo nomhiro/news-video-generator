@@ -1,0 +1,92 @@
+{#
+  記事1件のカード。
+
+  一覧から切り出したのは、**選択ボタンの応答でこのカードだけを差し替える**
+  ため。以前はボタンが選択パネルだけを差し替えていたので、押したカードは
+  ラベルも背景もそのまま残り、画面上のフィードバックが実質ゼロだった
+  （唯一の反映はバッジで、実測でビューポートから 9,088px 下にあった）。
+
+  `id` はここが持つ。選択パネル側から解除したときに、このカードを
+  out-of-band swap で戻すために必要（対になる操作でカードが古いまま
+  残るのは、選択したときと同じ壊れ方）。
+#}
+<article id="article-{{ article.id }}"
+         {#
+           `oob` が真のときだけ out-of-band swap の印を付ける。選択パネル側
+           から解除したときに、一覧に出ているカードを一緒に戻すために使う。
+           一覧に出ていない（別カテゴリを見ている）場合は照合先が無く、
+           htmx は `htmx:oobErrorNoTarget` を発火するだけで何もしない。
+         #}
+         {% if oob %}hx-swap-oob="true"{% endif %}
+         class="border rounded-lg p-4 hover:shadow-md transition-shadow
+                {% if article.is_selected %}bg-blue-50 border-blue-300{% else %}bg-white{% endif %}">
+    <div class="flex items-start gap-4">
+        <!-- Thumbnail -->
+        {% if article.thumbnail_url %}
+        <img src="{{ article.thumbnail_url }}"
+             alt=""
+             class="w-24 h-16 object-cover rounded flex-shrink-0"
+             onerror="this.style.display='none'">
+        {% else %}
+        <div class="w-24 h-16 bg-gray-200 rounded flex items-center justify-center flex-shrink-0">
+            <span class="text-2xl">📰</span>
+        </div>
+        {% endif %}
+
+        <!-- Content -->
+        <div class="flex-1 min-w-0">
+            <h4 class="font-semibold text-gray-800 line-clamp-2">
+                {{ article.title }}
+            </h4>
+            <div class="flex items-center gap-2 mt-1 text-sm text-gray-500">
+                <span class="font-medium">{{ article.source }}</span>
+                {% if article.published_at %}
+                <span>•</span>
+                <span>{{ article.published_at.strftime('%m/%d %H:%M') }}</span>
+                {% endif %}
+                {#
+                  チャネル別の消費を丸2つで出す。1本のフラグ
+                  （video_generated）では「動画にはしたが X には
+                  出していない」を表せないため、チャネルごとに見せる。
+                #}
+                <span class="inline-flex items-center gap-1 ml-1" title="動画 / X への消費状況">
+                    <span class="w-2 h-2 rounded-full {{ 'bg-teal' if article.is_consumed_by('video') else 'bg-gray-200' }}"
+                          title="動画: {{ '済' if article.is_consumed_by('video') else '未' }}"></span>
+                    <span class="w-2 h-2 rounded-full {{ 'bg-teal' if article.is_consumed_by('x') else 'bg-gray-200' }}"
+                          title="X: {{ '済' if article.is_consumed_by('x') else '未' }}"></span>
+                </span>
+            </div>
+            {% if article.summary %}
+            <p class="text-gray-600 text-sm mt-2 line-clamp-2">
+                {{ article.summary }}
+            </p>
+            {% endif %}
+        </div>
+
+        <!-- Select Button -->
+        <div class="flex-shrink-0">
+            {#
+              押したカードそのものを差し替える。応答は
+              `partials/news_card_swap.html` で、カード本体に加えて
+              選択パネルを out-of-band で更新する。
+            #}
+            <button
+                hx-post="/news/{{ article.id }}/toggle"
+                hx-target="#article-{{ article.id }}"
+                hx-swap="outerHTML"
+                class="px-4 py-2 rounded-lg font-medium transition-colors
+                       {% if article.is_selected %}
+                       bg-red-100 text-red-700 hover:bg-red-200
+                       {% else %}
+                       bg-blue-100 text-blue-700 hover:bg-blue-200
+                       {% endif %}"
+            >
+                {% if article.is_selected %}
+                <span>✕ 解除</span>
+                {% else %}
+                <span>+ 選択</span>
+                {% endif %}
+            </button>
+        </div>
+    </div>
+</article>

@@ -1,0 +1,11 @@
+{#
+  選択パネル側から解除したときの応答。
+
+  パネル本体（対象に入る）と、記事一覧に出ているカード（out-of-band）を
+  1回で返す。カードを戻さないと、解除したのに一覧では「選択中」の見た目が
+  残る——選択したときにカードが変わらなかったのと同じ壊れ方の裏返し。
+#}
+{% include "partials/selected_panel.html" %}
+{% if article %}
+{% with oob = True %}{% include "partials/news_card.html" %}{% endwith %}
+{% endif %}
