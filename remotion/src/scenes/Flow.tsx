@@ -23,6 +23,7 @@ export const Flow: React.FC<LayoutProps> = ({
   items,
   relation,
   chapter,
+  format,
   durationInFrames,
 }) => {
   const { width } = useVideoConfig();
@@ -56,7 +57,7 @@ export const Flow: React.FC<LayoutProps> = ({
         boxB={boxB}
         relationReveal={arrowReveal}
       />
-      <Subtitle text={subtitle} zone={zones.subtitle} />
+      <Subtitle text={subtitle} zone={zones.subtitle} format={format} />
     </>
   );
 };

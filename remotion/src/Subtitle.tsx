@@ -1,7 +1,7 @@
 import { AbsoluteFill, interpolate, useCurrentFrame, useVideoConfig } from "remotion";
 import { estimateEmWidth } from "./fitText";
 import { COLORS, FONT_STACK } from "./theme";
-import type { Zone } from "./zones";
+import { useSafeBottom, type VideoFormat, type Zone } from "./zones";
 
 /**
  * 字幕の基準フォントサイズ。
@@ -12,11 +12,16 @@ import type { Zone } from "./zones";
  * 状態だった。原因は下の `SCRIM_*` のコメントに書いたパディングの食い潰しと、
  * 「4行ぶんの高さがゾーンに無い」ことの二重。
  *
- * 46 の根拠は逆算である。ゾーン350px からパディング（12 + 72）を引いた
+ * 46 の根拠は逆算である。ゾーン440px からパディング（12 + 162）を引いた
  * 266px に、行送り `LINE_HEIGHT`（1.38）で**4行**が収まる最大値が
  * 266 / (4 × 1.38) = 48.2px。48 では余裕が1pxしか無く、行送りの丸めや
  * フォントの差（ローカル Yu Gothic / 本番 Noto Sans CJK）を吸収できないので
  * 46 を採る（4行 = 254px、余裕12px）。
+ *
+ * **266px は 2026-08-23 の変更でも変えていない。** プラットフォームの UI を
+ * 避けるために下パディングを 72→162 に増やしたぶん、ゾーンを 350→440 に
+ * 伸ばして相殺した（`zones.ts`）。この値が変わるとフォントサイズの根拠が
+ * 崩れるので、片方だけ動かさないこと。
  *
  * **1〜4行では常にこのサイズで描く。** シーンごとに字幕の大きさが変わると
  * それ自体が粗く見えるので、縮小は「4行に収まらない病的な入力」に限る
@@ -43,12 +48,27 @@ const LINE_HEIGHT = 1.38;
 const PADDING_TOP = 12;
 
 /**
- * フレーム下端に残す余白。
+ * フレーム下端に残す余白の**下限**。
  *
- * 96 → 72。4行ぶんの高さを作るために削った。縦動画の最下部はプラットフォーム
- * の UI（タイトル・アカウント名）が重なるので 0 にはしない。
+ * 96 → 72（4行ぶんの高さを作るために削った）。**2026-08-23 から下限として
+ * だけ使う。** 実際の余白はプラットフォームの UI が覆う帯
+ * （`zones.ts` の `SAFE_BOTTOM`）から導く——「UI が重なるので 0 にはしない」
+ * とだけ書いて 72 を置いていたが、**実測 150px の半分未満**で、字幕の最終行は
+ * 行数に関わらず丸ごと UI の下に隠れていた（Issue #44）。
+ *
+ * 下限として残す理由は `long`（横画面、UI の帯を空けない形式）。そこでは
+ * 導出値が 12px になり、文字がフレーム下端に寄ってしまう。
  */
-const PADDING_BOTTOM = 72;
+const MIN_PADDING_BOTTOM = 72;
+
+/**
+ * セーフライン（UI の帯の上端）と文字の間に空ける余白。
+ *
+ * 0 にすると行ボックスの下端がセーフラインに接する。実測値そのものに文字を
+ * 寄せて得るものは無いので、丸めやフォントの差（ローカル Yu Gothic / 本番
+ * Noto Sans CJK）を吸収するぶんだけ空ける（`PADDING_TOP` と同じ趣旨）。
+ */
+const BOTTOM_CLEARANCE = 12;
 
 /** 左右の余白。フレーム幅から引いて1行に使える幅を出す。 */
 const PADDING_X = 72;
@@ -110,22 +130,33 @@ export function fitSubtitleSize(text: string, availableWidth: number, availableH
  * **スクリムはテキストの箱に持たせない（2026-08-22）。** 以前は
  * `padding: "160px 72px 96px"` を当てた div にグラデーションを敷いていた。
  * グラデーションを滑らかに立ち上げるための上パディング160pxが**ゾーンの
- * 高さ（350px）を食い**、テキストに使える高さは 350 − 160 − 96 = **94px**
+ * 高さ（当時 350px、いまは 440px）を食い**、テキストに使える高さは
+ * 350 − 160 − 96 = **94px**
  * ——1.2行ぶんしか残っていなかった。3行（235px）ですでにゾーン上端を
  * 越えており、`overflow: hidden` が上を切っていた（3行は境界の上が
  * パディングだったので偶然無事、4行（313px）で1行目が切れた）。
  * **スクリムはゾーン全体を覆う独立した層**にすれば、パディングは
  * 「文字を端から離す」ぶんだけで済む。副作用として、切られた
- * グラデーションが作っていた y=1570 の硬い横線も消える。
+ * グラデーションが作っていたゾーン上端（当時 y=1570）の硬い横線も消える。
  */
-export const Subtitle: React.FC<{ text: string; zone: Zone }> = ({ text, zone }) => {
+export const Subtitle: React.FC<{ text: string; zone: Zone; format: VideoFormat }> = ({
+  text,
+  zone,
+  format,
+}) => {
   const frame = useCurrentFrame();
   const { width } = useVideoConfig();
+  const safeBottom = useSafeBottom(format);
   const opacity = interpolate(frame, [0, 6], [0, 1], {
     extrapolateRight: "clamp",
   });
   const availableWidth = width - PADDING_X * 2;
-  const availableHeight = zone.height - PADDING_TOP - PADDING_BOTTOM;
+  // **ゾーンは下端まで伸ばしたまま、文字だけを UI の上へ持ち上げる。**
+  // ゾーンを縮めて逃げると、下端のスクリムはゾーンの高さと無関係に必ず
+  // フレーム下端まで伸びるため、ゾーンの値がレイアウトの実態を表さなくなり
+  // 「ゾーンで重なりを防ぐ」仕組み全体が信じられなくなる（`zones.ts`）。
+  const paddingBottom = Math.max(MIN_PADDING_BOTTOM, safeBottom + BOTTOM_CLEARANCE);
+  const availableHeight = zone.height - PADDING_TOP - paddingBottom;
   const fontSize = fitSubtitleSize(text, availableWidth, availableHeight);
 
   return (
@@ -161,7 +192,7 @@ export const Subtitle: React.FC<{ text: string; zone: Zone }> = ({ text, zone })
       <div
         style={{
           position: "relative",
-          padding: `${PADDING_TOP}px ${PADDING_X}px ${PADDING_BOTTOM}px`,
+          padding: `${PADDING_TOP}px ${PADDING_X}px ${paddingBottom}px`,
         }}
       >
         <span

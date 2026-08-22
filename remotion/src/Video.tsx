@@ -5,6 +5,7 @@ import { Compare } from "./scenes/Compare";
 import { Flow } from "./scenes/Flow";
 import { Statement } from "./scenes/Statement";
 import { COLORS } from "./theme";
+import type { VideoFormat } from "./zones";
 
 /**
  * 各レイアウトが受け取る props。`layout` によって使わないフィールドが
@@ -29,6 +30,13 @@ export type LayoutProps = {
   relation: string;
   /** 章ラベル（例: "仕組み"）。空文字列なら ChapterTag は何も描かない。 */
   chapter: string;
+  /**
+   * 動画の形式。字幕がプラットフォームの UI をどれだけ避けるかを決める
+   * （`zones.ts` の `SAFE_BOTTOM`）。解像度だけでは決められない——
+   * `short` と `tiktok` は同じ 1080x1920 だが、覆われる高さは同じとは
+   * 限らない（いまは `tiktok` が `short` から値を借りている）。
+   */
+  format: VideoFormat;
   durationInFrames: number;
 };
 
@@ -53,6 +61,8 @@ export type VideoProps = {
   width: number;
   height: number;
   fps: number;
+  /** 形式名。Python 側が `src/models/formats.py` の名前をそのまま渡す。 */
+  format: VideoFormat;
   durationInFrames: number;
   /**
    * 動画全体で共有する挿絵のファイル名（`remotion/public/` からの相対名）。
@@ -71,7 +81,7 @@ const LAYOUTS = {
   flow: Flow,
 } as const;
 
-export const NewsVideo: React.FC<VideoProps> = ({ illustration, scenes }) => (
+export const NewsVideo: React.FC<VideoProps> = ({ illustration, scenes, format }) => (
   <AbsoluteFill style={{ backgroundColor: COLORS.bg }}>
     <Background />
     {/* すべての `<Sequence>` の外（トップレベル）で描く。`Illustration.tsx`
@@ -93,6 +103,7 @@ export const NewsVideo: React.FC<VideoProps> = ({ illustration, scenes }) => (
             items={scene.items}
             relation={scene.relation}
             chapter={scene.chapter}
+            format={format}
             durationInFrames={scene.durationInFrames}
           />
         </Sequence>
@@ -109,6 +120,7 @@ export const SAMPLE_PROPS: VideoProps = {
   width: 1080,
   height: 1920,
   fps: 30,
+  format: "short",
   durationInFrames: 90,
   // Studio 上での見た目確認用。実運用では Pipeline が `remotion/public/` に
   // 置いたファイル名を渡す（`RemotionRenderer._place_illustration`）。

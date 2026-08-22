@@ -17,6 +17,7 @@ export const Statement: React.FC<LayoutProps> = ({
   headline,
   subtitle,
   chapter,
+  format,
   durationInFrames,
 }) => {
   const zones = useZones("statement");
@@ -34,7 +35,7 @@ export const Statement: React.FC<LayoutProps> = ({
         />
       )}
       <Headline text={headline} size={112} startFrame={headlineStart} zone={zones.headline} />
-      <Subtitle text={subtitle} zone={zones.subtitle} />
+      <Subtitle text={subtitle} zone={zones.subtitle} format={format} />
     </AbsoluteFill>
   );
 };
