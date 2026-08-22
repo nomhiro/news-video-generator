@@ -265,12 +265,35 @@ SSML の `<mark>` に対応せず、実装が3系統（個別合成して結合 
 `static/css/app.css` は Tailwind v4 の生成物で、**テンプレートで実際に使われている
 クラスだけ**が入っている。新しいユーティリティクラスを使ったら
 `npm run build:css` を実行しないと、そのスタイルは効かない。
+**忘れても画面は正しく描画される**（クラスが無いだけ）ので、目で見るまで
+気付かない。`tests/test_css_build.py` が生成し直して一致を検査する
+（落ちたら `npm run build:css` を実行して差分をコミットする。
+**`app.css` を手で編集してはいけない**——次の再生成で消える）。
+
+**走査範囲は `source(none)` で閉じている。** Tailwind v4 の自動検出は
+`@source` に**加えて**プロジェクト全体を走査するので、閉じないと
+**ドキュメントの散文に書かれたクラス名まで CSS に入る**。実測では
+`bg-blue-600`（この文書が「使ってはいけない例」として挙げている綴りそのもの）
+や `table` / `transition` / `filter` など11個の死んだ規則、2,709バイトぶんが
+入っていた。害は容量だけではない——**`npm run build:css` の出力が
+ドキュメントの編集で変わる**ので、無関係な差分が出て上の一致検査も
+成立しなくなる。`input.css` のコメントは以前から「テンプレートを走査して、
+実際に使われているクラスだけを出力する」と書いていたが、自動検出が
+その意図を黙って破っていた。
+
+閉じても失うものは無いことを確認済み: 消えた11個はどれもテンプレートで
+使われておらず、`focus-visible:outline` のような変種付きのものと
+`.tnum`（`input.css` の手書き規則）は残る。**クラスの供給元はテンプレートだけ**
+——`src/uploaders/tiktok_auth.py` は HTML を組むが自前の `<style>` を持ち
+`app.css` に依存しない。
 
 CDN（`cdn.tailwindcss.com`）は使わない。公式が本番非推奨としており、
 ブラウザ側で JIT コンパイルするため初回描画が遅く、オフラインで動かない。
 HTMX も `static/vendor/htmx.min.js` にベンダリングしてある（2.0.4）。
 
-Node は CSS のビルドにだけ必要で、アプリの実行には不要。
+Node は CSS のビルドにだけ必要で、アプリの実行には不要。ルート側の
+`node_modules` が無いと一致検査は静かに skip されるので、`.githooks/pre-push`
+が Tailwind の CLI の存在も検査する（ffmpeg / remotion と同じ理由）。
 
 ### 運用画面の高さは記事の件数から切り離す
 
@@ -1428,6 +1451,10 @@ git config core.hooksPath .githooks   # clone した直後に一度だけ
 - **`node` に加えて `remotion/node_modules` の存在も検査する。** node があっても
   `npm install` していなければ Remotion の slow テストは静かに skip される。
   ffmpeg / ffprobe と同じ理由（下記）で、hook の先頭で両方落とす。
+- **ルート側の `node_modules`（Tailwind の CLI）も同じ理由で検査する。**
+  無いと `tests/test_css_build.py` が静かに skip され、**生成済み CSS が
+  古いまま push できてしまう**。新しい worktree では `npm install` と
+  `cd remotion && npm install` の2つが要る。
 - **`uv sync --frozen` ではなく `uv lock --check` を使う。** 見たいのは
   「lock が pyproject と一致しているか」だけで、sync は `.venv` を書き換えるため、
   Windows で開発サーバを上げたまま push すると

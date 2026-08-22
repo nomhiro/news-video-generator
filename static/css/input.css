@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 
 /* テンプレートを走査して、実際に使われているクラスだけを出力する */
 @source "../../templates/**/*.html";
