@@ -69,7 +69,7 @@
             {% endif %}
         </div>
 
-        <div class="shrink-0">
+        <div class="shrink-0 flex flex-col items-stretch gap-1">
             {#
               押したカードそのものを差し替える。応答は
               `partials/news_card_swap.html` で、カード本体に加えて
@@ -88,6 +88,22 @@
                        {% endif %}"
             >
                 {{ "選択中" if article.is_selected else "選択" }}
+            </button>
+            {#
+              一覧から外す。消費済み（もう出した）とは別で、人が「使わない」と
+              決めた記録。AI カテゴリは実測53件あり、題材の合わない記事を
+              毎回読み飛ばすことになる。取り消せる行に変わるので確認は挟まない。
+            #}
+            <button
+                hx-post="/news/{{ article.id }}/dismiss"
+                hx-target="#article-{{ article.id }}"
+                hx-swap="outerHTML"
+                class="px-2.5 py-0.5 rounded text-[10px] text-ink/40
+                       hover:text-ink/70 hover:bg-ink/5 transition-colors whitespace-nowrap
+                       focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal"
+                title="この記事を一覧から外す"
+            >
+                外す
             </button>
         </div>
     </div>

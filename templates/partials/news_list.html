@@ -10,8 +10,9 @@
     <h3 class="font-display font-semibold text-ink text-xs tracking-wide">
         {{ category.display_name }}
     </h3>
-    <span class="text-xs text-ink/50 tnum" aria-live="polite">
-        {% if fetched %}取得しました ・ {% endif %}{{ articles|length }}件
+    {# 件数は「外す」からも out-of-band で直すので id を持つ #}
+    <span class="text-xs text-ink/50" aria-live="polite">
+        {% if fetched %}取得しました ・ {% endif %}<span id="news-count" class="tnum">{{ articles|length }}件</span>
     </span>
 </div>
 

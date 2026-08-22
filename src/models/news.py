@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -90,6 +90,15 @@ class NewsArticle:
     # デプロイ直後に同じ記事が再投稿される。記事データは Azure Files に
     # あるので残る。
     consumed: dict[str, str] = field(default_factory=dict)
+    # 人が「この記事は使わない」と決めた記録。
+    #
+    # **消費済み（`consumed`）とは別。** あちらは「もう出した」で、こちらは
+    # 「出さない」。AI カテゴリは実測53件あり、題材の合わない記事（芸能・
+    # PR 転載）を毎回読み飛ばすことになるので、畳む手段が要る。
+    #
+    # 権威は `consumed` と同じくこの記事データ（Azure Files 上の JSON）。
+    # SQLite に置くとリビジョン更新で消え、外したはずの記事が翌日戻る。
+    dismissed: bool = False
 
     def __post_init__(self) -> None:
         """要約から HTML を落とす。
@@ -217,7 +226,17 @@ class NewsArticle:
             stamp = fetched.isoformat() if isinstance(fetched, datetime) else ""
             data["consumed"] = {CHANNEL_VIDEO: stamp or datetime.now().isoformat()}
 
-        return cls(**data)
+        # 知らないキーは捨てる。
+        #
+        # 以前は `cls(**data)` だったので、**新しいフィールドを足した版で
+        # 保存した JSON を古い版が読めなかった**（`unexpected keyword
+        # argument` で `_load_category` の捕まえない例外になり、記事一覧・
+        # 動画の計画・投稿の計画がまとめて落ちる）。CLAUDE.md が
+        # 「切り戻しを安全にしたいなら2段階で入れる」と書いているのはこの罠で、
+        # その1段目がこれ。**ここから先に足すフィールドは切り戻しても壊れない**
+        # （このコードを含むイメージまで戻せる限り）。
+        known = {f.name for f in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in known})
 
     def to_json_file(self, path: Path) -> None:
         """JSONファイルに保存する。

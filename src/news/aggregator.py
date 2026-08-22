@@ -295,6 +295,9 @@ class NewsAggregator:
             if old is not None:
                 article.is_selected = old.is_selected
                 article.consumed = dict(old.consumed)
+                # 外した記録も引き継ぐ。落とすと、まだフィードに載っている
+                # 記事が取得のたびに戻ってきて「外す」が効かなくなる。
+                article.dismissed = old.dismissed
                 article.content = old.content or article.content
                 article.thumbnail_url = old.thumbnail_url or article.thumbnail_url
             merged.append(article)
@@ -355,17 +358,74 @@ class NewsAggregator:
 
         return datetime.now(UTC) - max(stamps) < CONSUMED_RETENTION
 
-    def get_articles_by_category(self, category: NewsCategory) -> list[NewsArticle]:
+    def get_articles_by_category(
+        self, category: NewsCategory, include_dismissed: bool = False
+    ) -> list[NewsArticle]:
         """カテゴリの記事を取得する。
+
+        外した記事（`dismissed`）は既定で返さない。畳めない一覧では、
+        題材の合わない記事を毎回読み飛ばすことになる。
+
+        **自動生成の記事選択（`pick_unconsumed`）はここを通らない。**
+        あちらは `_load_category` を直接読むので、外した記事も候補に入る。
+        「画面で畳む」ことと「自動生成に使わせない」ことは別の判断で、
+        後者を人の操作に紐づけると、外し忘れが生成の停止に化ける。
 
         Args:
             category: ニュースカテゴリ
+            include_dismissed: 外した記事も含めるか
 
         Returns:
             List[NewsArticle]: 記事のリスト（公開日時の降順）
         """
         articles = self._load_category(category)
+        if not include_dismissed:
+            articles = [a for a in articles if not a.dismissed]
         return sorted(articles, key=_sort_key, reverse=True)
+
+    def set_dismissed(self, article_id: str, dismissed: bool) -> NewsArticle | None:
+        """記事を一覧から外す / 戻す。
+
+        外すときは選択も外す。「使わない」と決めた記事が生成の対象に
+        残っていると、押した操作と画面の状態が食い違う。
+
+        Args:
+            article_id: 記事ID
+            dismissed: 外すなら True、戻すなら False
+
+        Returns:
+            NewsArticle | None: 更新後の記事。見つからなければ None
+        """
+
+        def apply(article: NewsArticle) -> None:
+            article.dismissed = dismissed
+            if dismissed:
+                article.is_selected = False
+
+        return self._update_article(article_id, apply)
+
+    def clear_all_selections(self) -> int:
+        """選択をすべて外す。
+
+        1件ずつ解除するしかない状態だと、選び直すたびに選択の数だけ操作が
+        要る。カテゴリごとに read-modify-write を1回で済ませる
+        （`clear_selection` を件数ぶん呼ぶと保存も件数ぶん走る）。
+
+        Returns:
+            int: 解除した件数
+        """
+        cleared = 0
+        for category in NewsCategory:
+            with self._category_lock(category):
+                articles = self._load_category(category)
+                selected = [a for a in articles if a.is_selected]
+                if not selected:
+                    continue
+                for article in selected:
+                    article.is_selected = False
+                cleared += len(selected)
+                self._save_category(category, articles)
+        return cleared
 
     def get_all_articles(self) -> dict[NewsCategory, list[NewsArticle]]:
         """全カテゴリの記事を取得する。

@@ -1,0 +1,32 @@
+{#
+  外したあとの行。
+
+  カードを消してしまうのではなく、取り消せる行に置き換える。そうすれば
+  確認のダイアログが要らない（押し間違いは1クリックで戻る）し、
+  何を外したのかが画面に残る。
+
+  `id` はカードと同じ。「戻す」がこの行を差し替えてカードに戻す。
+#}
+<div id="article-{{ article.id }}"
+     class="rounded-lg border border-dashed border-ink/15 p-3
+            flex items-center justify-between gap-2 text-xs">
+    <span class="min-w-0 truncate text-ink/40">
+        一覧から外しました ・ {{ article.title }}
+    </span>
+    <button
+        hx-post="/news/{{ article.id }}/restore"
+        hx-target="#article-{{ article.id }}"
+        hx-swap="outerHTML"
+        class="shrink-0 px-2 py-0.5 rounded border border-ink/20 text-ink/70
+               hover:bg-ink/5 transition-colors
+               focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal"
+    >
+        戻す
+    </button>
+</div>
+
+{# 件数と選択パネルは別の場所にあるので out-of-band で直す #}
+<span id="news-count" hx-swap-oob="innerHTML" class="tnum">{{ remaining }}件</span>
+<div id="selected-panel" hx-swap-oob="innerHTML">
+    {% include "partials/selected_panel.html" %}
+</div>

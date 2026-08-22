@@ -80,7 +80,6 @@ def test_選択の応答が件数と選択パネルも運ぶ(client: TestClient,
     body = client.post(f"/news/{_first_id(aggregator)}/toggle").text
 
     assert 'id="selected-panel" hx-swap-oob="innerHTML"' in body
-    assert 'id="selected-badge" hx-swap-oob="innerHTML"' in body
     assert "1件" in body
 
 
@@ -118,3 +117,104 @@ def test_選択パネルから解除するとカードも一緒に戻る(
 def test_知らない記事の選択は_404(client: TestClient) -> None:
     """静かに 200 を返すと、押しても何も起きない状態が再現する。"""
     assert client.post("/news/does-not-exist/toggle").status_code == 404
+
+
+# --------------------------------------------------------------------------
+# 一覧の整理（外す / 戻す / すべて解除）
+# --------------------------------------------------------------------------
+
+
+def test_外すと取り消せる行に変わる(client: TestClient, aggregator: NewsAggregator) -> None:
+    """消してしまうと押し間違いが戻せず、確認のダイアログが必要になる。"""
+    article_id = _first_id(aggregator)
+
+    body = client.post(f"/news/{article_id}/dismiss").text
+
+    assert "一覧から外しました" in body
+    assert f'hx-post="/news/{article_id}/restore"' in body
+
+
+def test_外した記事は一覧に出ない(client: TestClient, aggregator: NewsAggregator) -> None:
+    article_id = _first_id(aggregator)
+    client.post(f"/news/{article_id}/dismiss")
+
+    assert f'id="article-{article_id}"' not in client.get("/news/ai").text
+
+
+def test_外すと件数も直る(client: TestClient, aggregator: NewsAggregator) -> None:
+    """畳んだ直後に古い件数が残ると、画面の数と実際の数が食い違う。"""
+    body = client.post(f"/news/{_first_id(aggregator)}/dismiss").text
+
+    assert 'id="news-count" hx-swap-oob="innerHTML"' in body
+    assert "1件" in body
+
+
+def test_外すと選択も外れる(client: TestClient, aggregator: NewsAggregator) -> None:
+    """「使わない」と決めた記事が生成の対象に残っていてはいけない。"""
+    article_id = _first_id(aggregator)
+    client.post(f"/news/{article_id}/toggle")
+
+    client.post(f"/news/{article_id}/dismiss")
+
+    assert aggregator.get_selected_articles() == []
+
+
+def test_外した記録は再取得でも残る(client: TestClient, aggregator: NewsAggregator) -> None:
+    """引き継がないと、フィードに載っている間は取得のたびに戻ってくる。"""
+    article_id = _first_id(aggregator)
+    client.post(f"/news/{article_id}/dismiss")
+
+    stored = aggregator._load_category(NewsCategory.AI)
+    # フィードが同じ記事を返した状況を作る（取得結果は dismissed を知らない）
+    refetched = []
+    for article in stored:
+        payload = article.to_dict()
+        payload["dismissed"] = False
+        refetched.append(NewsArticle.from_dict(payload))
+
+    merged = NewsAggregator._merge_preserving_state(refetched, {a.id: a for a in stored})
+
+    assert next(a for a in merged if a.id == article_id).dismissed is True
+
+
+def test_戻すとカードに戻る(client: TestClient, aggregator: NewsAggregator) -> None:
+    article_id = _first_id(aggregator)
+    client.post(f"/news/{article_id}/dismiss")
+
+    body = client.post(f"/news/{article_id}/restore").text
+
+    assert f'id="article-{article_id}"' in body
+    assert "一覧から外しました" not in body
+    assert f'id="article-{article_id}"' in client.get("/news/ai").text
+
+
+def test_すべて解除で選択が空になる(client: TestClient, aggregator: NewsAggregator) -> None:
+    for article in aggregator.get_articles_by_category(NewsCategory.AI):
+        client.post(f"/news/{article.id}/toggle")
+    assert len(aggregator.get_selected_articles()) == 2
+
+    body = client.post("/selected/clear", data={"category": "ai"}).text
+
+    assert aggregator.get_selected_articles() == []
+    assert "0件" in body
+    # 一覧を作り直すので、どのカードにも「選択中」は残らない
+    assert "選択中" not in body
+
+
+def test_すべて解除は表示中のカテゴリの一覧を返す(
+    client: TestClient, aggregator: NewsAggregator
+) -> None:
+    """推測すると別のカテゴリの一覧に差し替わる。"""
+    tech = _article("t", "テクノロジーの記事")
+    tech.category = NewsCategory.TECHNOLOGY
+    aggregator._save_category(NewsCategory.TECHNOLOGY, [tech])
+
+    body = client.post("/selected/clear", data={"category": "technology"}).text
+
+    assert "テクノロジーの記事" in body
+    assert "推論コストが10分の1になった" not in body
+
+
+def test_知らない記事を外すと_404(client: TestClient) -> None:
+    assert client.post("/news/does-not-exist/dismiss").status_code == 404
+    assert client.post("/news/does-not-exist/restore").status_code == 404

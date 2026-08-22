@@ -1,0 +1,10 @@
+{#
+  「すべて解除」の応答。
+
+  一括操作なので一覧を作り直す。1件の解除なら out-of-band でそのカードだけを
+  戻せるが、ここでは何枚が「選択中」の見た目で残っているか分からない。
+#}
+{% include "partials/news_list_swap.html" %}
+<div id="selected-panel" hx-swap-oob="innerHTML">
+    {% include "partials/selected_panel.html" %}
+</div>

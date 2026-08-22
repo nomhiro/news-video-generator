@@ -196,6 +196,121 @@ async def toggle_article_selection(
     )
 
 
+@router.post("/news/{article_id}/dismiss", response_class=HTMLResponse)
+async def dismiss_article(
+    request: Request, article_id: str, aggregator: NewsAggregator = Depends(get_aggregator)
+):
+    """記事を一覧から外す（HTMXパーシャル）。
+
+    消えるのではなく「外しました ・ 戻す」の行に変わる。取り消せる形に
+    しておけば確認のダイアログが要らず、押し間違いが1クリックで戻る。
+
+    Args:
+        request: FastAPIリクエスト
+        article_id: 記事ID
+        aggregator: ニュース取得インスタンス
+
+    Returns:
+        HTMLResponse: 外した行 + 件数と選択パネル（out-of-band）
+
+    Raises:
+        HTTPException: 記事が見つからない場合（404）
+    """
+    article = aggregator.set_dismissed(article_id, True)
+    if article is None:
+        raise HTTPException(status_code=404, detail="記事が見つかりません")
+
+    selected_articles = aggregator.get_selected_articles()
+
+    return templates.TemplateResponse(
+        request,
+        "partials/news_card_dismissed.html",
+        {
+            "article": article,
+            # 件数は外した記事のカテゴリで数える。畳んだ直後に「53件」と
+            # 出たままだと、画面に出ている数と実際の数が食い違う。
+            "remaining": len(aggregator.get_articles_by_category(article.category)),
+            "selected_articles": selected_articles,
+            "selected_count": len(selected_articles),
+        },
+    )
+
+
+@router.post("/news/{article_id}/restore", response_class=HTMLResponse)
+async def restore_article(
+    request: Request, article_id: str, aggregator: NewsAggregator = Depends(get_aggregator)
+):
+    """外した記事を一覧に戻す（HTMXパーシャル）。
+
+    Args:
+        request: FastAPIリクエスト
+        article_id: 記事ID
+        aggregator: ニュース取得インスタンス
+
+    Returns:
+        HTMLResponse: 記事カード + 件数（out-of-band）
+
+    Raises:
+        HTTPException: 記事が見つからない場合（404）
+    """
+    article = aggregator.set_dismissed(article_id, False)
+    if article is None:
+        raise HTTPException(status_code=404, detail="記事が見つかりません")
+
+    return templates.TemplateResponse(
+        request,
+        "partials/news_card_restored.html",
+        {
+            "article": article,
+            "remaining": len(aggregator.get_articles_by_category(article.category)),
+        },
+    )
+
+
+@router.post("/selected/clear", response_class=HTMLResponse)
+async def clear_all_selections(
+    request: Request,
+    category: str = Form("ai"),
+    aggregator: NewsAggregator = Depends(get_aggregator),
+):
+    """選択をすべて外す（HTMXパーシャル）。
+
+    一括操作なので一覧を作り直す。1件の解除では out-of-band でそのカードだけを
+    戻すが、ここでは何枚が「選択中」の見た目で残っているか分からない。
+
+    表示中のカテゴリは画面から受け取る（`#category-tabs` の hidden input）。
+    サーバーはどのカテゴリが出ているかを知らないので、推測すると別の
+    カテゴリの一覧に差し替わる。
+
+    Args:
+        request: FastAPIリクエスト
+        category: いま表示しているカテゴリ
+        aggregator: ニュース取得インスタンス
+
+    Returns:
+        HTMLResponse: ニュース一覧 + カテゴリの帯・選択パネル（out-of-band）
+    """
+    aggregator.clear_all_selections()
+
+    try:
+        cat = NewsCategory(category)
+    except ValueError:
+        cat = NewsCategory.AI
+
+    return templates.TemplateResponse(
+        request,
+        "partials/selection_cleared.html",
+        {
+            "articles": aggregator.get_articles_by_category(cat),
+            "category": cat,
+            "categories": list(NewsCategory),
+            "active_category": cat,
+            "selected_articles": [],
+            "selected_count": 0,
+        },
+    )
+
+
 @router.get("/selected", response_class=HTMLResponse)
 async def get_selected(request: Request, aggregator: NewsAggregator = Depends(get_aggregator)):
     """選択済み記事パネルを取得する（HTMXパーシャル）。

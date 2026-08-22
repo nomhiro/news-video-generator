@@ -5,12 +5,37 @@
   （8,633px）の下にあったため、選ぶ場所と生成ボタンが同時に見えなかった。
   1件選ぶたびに 8,600px 往復することになる。
 
-  件数のバッジは out-of-band で更新する。以前はここに `<script>` を置いて
-  innerHTML を直書きしていた。フラグメントに script を混ぜると、このパネルを
-  差し替える経路以外ではバッジが更新されず、更新の仕組みがテンプレートの
-  中に隠れる。
+  **件数と見出しもここが描く。** 以前は呼び出し側（index.html）が持つ
+  バッジを、このフラグメントに混ぜた `<script>` が innerHTML で書き換えて
+  いた。フラグメントに script を混ぜると、このパネルを差し替える経路以外
+  ではバッジが更新されず、更新の仕組みがテンプレートの中に隠れる。
+  パネルと同じ場所で描けば、パネルが差し替わるたびに必ず一致する。
 #}
-<span id="selected-badge" hx-swap-oob="innerHTML">{{ selected_count }}件</span>
+<div class="flex items-center justify-between mb-2">
+    <div class="flex items-center gap-2">
+        <h3 class="font-display font-semibold text-ink text-xs tracking-wide">選択した記事</h3>
+        <span class="bg-teal text-paper px-2 py-0.5 rounded-full text-xs font-semibold tnum">
+            {{ selected_count }}件
+        </span>
+    </div>
+    {% if selected_articles %}
+    {#
+      一括解除。1件ずつ解除するしかないと、選び直すたびに選択の数だけ
+      操作が要る。表示中のカテゴリを一緒に送るのは、応答が一覧を作り直す
+      ため（何枚が「選択中」の見た目で残っているかはサーバーから分からない）。
+    #}
+    <button
+        hx-post="/selected/clear"
+        hx-include="#category-tabs [name=category]"
+        hx-target="#news-list"
+        hx-swap="innerHTML"
+        class="text-xs text-ink/50 hover:text-vermilion transition-colors
+               focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal"
+    >
+        すべて解除
+    </button>
+    {% endif %}
+</div>
 
 {% if selected_articles %}
 {#

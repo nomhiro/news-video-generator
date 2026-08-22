@@ -14,6 +14,13 @@
   9つ並ぶので1行に収める。押せる的として十分な高さは保ちつつ、
   記事一覧に高さを譲る（一覧は選ぶための場所で、タブは経路に過ぎない）。
 #}
+{#
+  いま表示しているカテゴリ。「すべて解除」が一覧を作り直すときに送る。
+  サーバーはどのカテゴリが画面に出ているかを知らないので、推測すると
+  別のカテゴリの一覧に差し替わる。
+#}
+<input type="hidden" name="category" value="{{ active_category.value }}">
+
 {% for item in categories %}
 <button
     hx-get="/news/{{ item.value }}"
