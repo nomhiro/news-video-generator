@@ -75,6 +75,26 @@
                     </svg>
                     TikTok
                 </button>
+                {#
+                  削除。取り消せない操作なので確認を挟む（hx-confirm）。
+                  生成物は消えない限り溜まり続け、一覧は新しい20件しか
+                  出さないので、古い失敗作は見えないまま Blob の課金だけが
+                  増えていく。
+                #}
+                <button
+                    type="button"
+                    hx-delete="/videos/{{ video.key | urlencode }}"
+                    hx-target="#video-list"
+                    hx-swap="innerHTML"
+                    hx-confirm="{{ video.filename }} を削除します。元に戻せません。"
+                    class="px-3 py-1.5 rounded text-sm font-medium border border-vermilion/30
+                           text-vermilion hover:bg-vermilion/10 transition-colors
+                           whitespace-nowrap
+                           focus-visible:outline focus-visible:outline-2 focus-visible:outline-vermilion"
+                    title="動画と台本・音声を削除する"
+                >
+                    削除
+                </button>
             </div>
         </div>
     </div>

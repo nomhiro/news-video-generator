@@ -485,6 +485,62 @@ async def list_videos(
     )
 
 
+@router.delete("/videos/{key:path}", response_class=HTMLResponse)
+async def delete_video(
+    request: Request,
+    key: str,
+    artifact_store: ArtifactStore = Depends(get_artifact_store),
+):
+    """動画とその付随物を削除して、一覧を返す。
+
+    削除できるのは `videos/*.mp4` **だけ**。キーは HTML 経由でフォームから
+    戻ってくる値なので `normalize_key` で `..` と絶対パスを弾き、そのうえで
+    プレフィックスと拡張子を縛る（`serve_artifact` と同じ姿勢）。
+    「保存先の中身なら何でも消せる」形にすると、台本も音声もトークンも
+    画面から消せる経路が黙って出来上がる。
+
+    付随物は**同じ stem を持つ台本と音声だけ**を消す。画像
+    （`images/`）は消さない——言語をまたいで共有されるため、片方の動画を
+    消した拍子にもう片方の素材を落としうる。
+
+    付随物の削除に失敗しても動画の削除は成功として扱う。消したい対象は
+    動画で、孤児になった台本が残ることは実害が小さい。
+
+    Args:
+        request: FastAPIリクエスト
+        key: 動画のキー（`videos/....mp4`）
+        artifact_store: 生成物の保存先
+
+    Returns:
+        HTMLResponse: 更新後の動画一覧パーシャル
+
+    Raises:
+        HTTPException: 削除対象にできないキー（404）
+    """
+    try:
+        normalized = normalize_key(key)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail="削除できないキーです") from e
+
+    if not normalized.startswith("videos/") or PurePosixPath(normalized).suffix.lower() != ".mp4":
+        raise HTTPException(status_code=404, detail="削除できない生成物です")
+
+    try:
+        artifact_store.delete(normalized)
+    except ArtifactStoreError as e:
+        log_error(f"動画を削除できません: {e}")
+        raise HTTPException(status_code=502, detail="削除に失敗しました") from e
+
+    stem = PurePosixPath(normalized).stem
+    for companion in (f"scripts/{stem}.json", f"audio/{stem}.mp3"):
+        try:
+            artifact_store.delete(companion)
+        except ArtifactStoreError as e:
+            log_error(f"付随物を削除できません（{companion}）: {e}")
+
+    return await list_videos(request, artifact_store)
+
+
 def _language_from_key(key: str) -> str:
     """動画のキーから言語コードを取り出す。
 
