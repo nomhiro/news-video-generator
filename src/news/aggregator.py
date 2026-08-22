@@ -613,25 +613,23 @@ class NewsAggregator:
 
         return self._update_article(article_id, mark) is not None
 
-    def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
-        """そのチャネルでまだ使っていない記事を選ぶ。
+    def _iter_unconsumed(self, channel: str) -> Iterator[NewsArticle]:
+        """そのチャネルでまだ使える記事を、新しい順に返す。
 
         **見るのは `AUTO_SOURCE_CATEGORIES` だけ**（動画と X で共通）。
+        外した記事（`dismissed`）は `get_articles_by_category` が既定で
+        落とすので、ここにも出てこない。
 
-        Args:
-            channel: CHANNEL_VIDEO / CHANNEL_X
-            needed: 必要な件数
-
-        Returns:
-            list[NewsArticle]: 選んだ記事（足りなければ少なく返す）
+        絞り込みをこのメソッド1つに置いている理由は、**画面に出す在庫の
+        件数（`count_unconsumed`）と、実際に選ばれる記事（`pick_unconsumed`）が
+        同じ条件で決まらなければならない**こと。条件を写すと、片方だけが
+        変わったときに「在庫はあると出ているのに毎朝の生成が記事を見つけ
+        られない」という、画面からは原因の分からない食い違いになる。
         """
-        picked: list[NewsArticle] = []
         seen: set[str] = set()
 
         for category in AUTO_SOURCE_CATEGORIES:
             for article in self.get_articles_by_category(category):
-                if len(picked) >= needed:
-                    return picked
                 if (
                     article.is_consumed_by(channel)
                     # コンテンツフィルタに拒否された記事を毎日選び直さない。
@@ -642,9 +640,40 @@ class NewsAggregator:
                 ):
                     continue
                 seen.add(article.id)
-                picked.append(article)
+                yield article
 
+    def pick_unconsumed(self, channel: str, needed: int) -> list[NewsArticle]:
+        """そのチャネルでまだ使っていない記事を選ぶ。
+
+        Args:
+            channel: CHANNEL_VIDEO / CHANNEL_X
+            needed: 必要な件数
+
+        Returns:
+            list[NewsArticle]: 選んだ記事（足りなければ少なく返す）
+        """
+        picked: list[NewsArticle] = []
+        for article in self._iter_unconsumed(channel):
+            if len(picked) >= needed:
+                break
+            picked.append(article)
         return picked
+
+    def count_unconsumed(self, channel: str) -> int:
+        """そのチャネルでまだ使える記事の件数を返す。
+
+        画面に「在庫が何日ぶんあるか」を出すために要る。**枯渇に気付く
+        手段がこれしかない**——外した記事も消費済みの記事も一覧には残るので、
+        件数を見ないと「記事は並んでいるのに自動生成が記事を見つけられない」
+        状態に気付けない。
+
+        Args:
+            channel: CHANNEL_VIDEO / CHANNEL_X
+
+        Returns:
+            int: まだ使える記事の件数
+        """
+        return sum(1 for _ in self._iter_unconsumed(channel))
 
     async def scrape_selected_content(self) -> list[NewsArticle]:
         """選択記事の本文をスクレイピングする。

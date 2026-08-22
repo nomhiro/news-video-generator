@@ -17,8 +17,10 @@ from fastapi.testclient import TestClient
 
 from src.models.news import NewsArticle, NewsCategory
 from src.news.aggregator import NewsAggregator
+from src.storage.publications import PublicationStore
 from src.web import routes
-from src.web.dependencies import get_aggregator
+from src.web.dependencies import get_aggregator, get_posts, get_publications
+from tests.conftest import FakePostQueue
 
 
 def _article(suffix: str, title: str) -> NewsArticle:
@@ -44,10 +46,15 @@ def aggregator(tmp_path: Path) -> NewsAggregator:
 
 
 @pytest.fixture
-def client(aggregator: NewsAggregator) -> Iterator[TestClient]:
+def client(
+    aggregator: NewsAggregator, publications: PublicationStore, post_queue: FakePostQueue
+) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(routes.router)
     app.dependency_overrides[get_aggregator] = lambda: aggregator
+    # 記事カードは到達段（公開の記録・X のキュー）も見る。
+    app.dependency_overrides[get_publications] = lambda: publications
+    app.dependency_overrides[get_posts] = lambda: post_queue
     with TestClient(app) as test_client:
         yield test_client
 

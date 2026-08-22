@@ -52,16 +52,31 @@
                 <span class="tnum">{{ article.published_at.strftime('%m/%d %H:%M') }}</span>
                 {% endif %}
                 {#
-                  消費はチャネルごとに語で出す。1本のフラグ（video_generated）
-                  では「動画にはしたが X には出していない」を表せない。
-                  以前は丸2つで色だけで示していたが、この画面の規律は
-                  「状態は色ではなく語で示す」（base.html）。
+                  **到達段をチャネルごとに1つだけ出す。**
+
+                  以前は `動画済` / `X済` を同じ teal の枠で並べていたが、
+                  あの2つは意味が違った——`X済` は投稿が成功した後に立つので
+                  「公開した」だが、`動画済` は**動画ファイルを作った時点**で
+                  立ち、YouTube に出したかはどこにも記録が無かった。同じ色・
+                  同じ形で並べれば読み手は同じ種類の「済」と受け取る。
+
+                  段が増えてもバッジは増やさない（最も進んだ段だけ）。1件の
+                  カードの高さが「一度に何件見えるか」を直接決めるため。
+                  色だけで区別しないのはこの画面の規律（base.html）。
                 #}
-                {% if article.is_consumed_by('video') %}
-                <span class="border border-teal/40 text-teal rounded px-1">動画済</span>
+                {% if article.id in (published_article_ids | default([])) %}
+                <span class="border border-teal/40 text-teal rounded px-1"
+                      title="この記事から作った動画を YouTube / TikTok に公開しました">動画:公開</span>
+                {% elif article.is_consumed_by('video') %}
+                <span class="border border-ink/25 text-ink/60 rounded px-1"
+                      title="動画は作りましたが、まだ公開していません">動画:生成</span>
                 {% endif %}
                 {% if article.is_consumed_by('x') %}
-                <span class="border border-teal/40 text-teal rounded px-1">X済</span>
+                <span class="border border-teal/40 text-teal rounded px-1"
+                      title="X に投稿しました">X:投稿</span>
+                {% elif article.id in (queued_article_ids | default([])) %}
+                <span class="border border-amber/40 text-amber rounded px-1"
+                      title="X の下書きがキューにあります（まだ出ていません）">X:予定</span>
                 {% endif %}
                 {#
                   コンテンツフィルタに拒否された記事。自動生成は二度と選ばない

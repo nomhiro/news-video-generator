@@ -55,7 +55,19 @@
                         flex flex-col gap-3
                         lg:h-[calc(100vh-17rem)] lg:min-h-[28rem]">
             <div class="flex items-center justify-between gap-3">
-                <h2 class="font-display font-semibold text-ink text-sm tracking-wide">記事プール</h2>
+                <h2 class="font-display font-semibold text-ink text-sm tracking-wide">
+                    記事プール
+                    {#
+                      **ここが動画と X の共通の在庫であることを書く。** 左カラムが
+                      投稿キュー（X）・右カラムが記事プールと生成済み動画という
+                      配置なので、画面は「左が X、右が動画」と読めてしまう。
+                      実際は取得・保存・記事の選択（`supply_articles`）まで
+                      完全に共通で、チャネルごとに分かれるのは消費の記録だけ。
+                    #}
+                    <span class="font-normal text-ink/45 tracking-normal">
+                        — 動画と X の共通の在庫
+                    </span>
+                </h2>
                 <span id="category-indicator" class="htmx-indicator text-ink/40">
                     <svg class="w-4 h-4 spinner" fill="none" viewBox="0 0 24 24">
                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -63,6 +75,32 @@
                     </svg>
                 </span>
             </div>
+
+            {#
+              在庫の内訳。**枯渇に気付く唯一の手段がこれ。** 記事を外しすぎると
+              自動生成の候補が減るが、外した記事も消費済みの記事も一覧には
+              残るので、件数を見ないと「記事は並んでいるのに毎朝の生成が
+              記事を見つけられない」状態に気付けない。
+
+              件数は設定から導出する（`_inventory`）。画面に数字を焼き付けると
+              `SCHEDULE_FORMATS` や `X_POSTS_PER_DAY` を変えた瞬間に嘘になる。
+            #}
+            <p class="text-xs text-ink/50 leading-relaxed">
+                自動生成が記事を選ぶのは
+                {% for category in auto_categories %}
+                <span class="text-teal">{{ category.display_name }}</span>{% if not loop.last %} / {% endif %}
+                {% endfor %}
+                だけ。
+                {% if inventory.days is not none %}
+                在庫は<span class="tnum text-ink/70">約{{ inventory.days }}日</span>ぶん
+                {% else %}
+                在庫を使う設定が無い
+                {% endif %}
+                <span class="text-ink/40">
+                    （未消費 動画<span class="tnum">{{ inventory.video_left }}</span>件・X<span class="tnum">{{ inventory.x_left }}</span>件
+                    ／1日 動画<span class="tnum">{{ inventory.video_per_day }}</span>件{% if inventory.x_enabled %}・X<span class="tnum">{{ inventory.x_per_day }}</span>件{% else %}・X は停止中{% endif %}）
+                </span>
+            </p>
 
             <div id="category-tabs" class="flex flex-wrap gap-1.5">
                 {% include "partials/category_tabs.html" %}
@@ -158,6 +196,16 @@
             </button>
         </div>
 
+        {#
+          すでに公開している動画への警告。**押させないのではなく読ませる。**
+          限定公開からのやり直しはありうるので、operation を塞ぐと正当な
+          やり直しができない。X 側は「二度出さない」ことを機械で保証して
+          いるが（`POSTING → SCHEDULED` の遷移が無い）、YouTube は人が
+          ボタンを押す経路なので、人が読める場所に出すのが対応する対策。
+        #}
+        <p id="upload-warning"
+           class="hidden mb-4 text-xs text-vermilion border border-vermilion/30 rounded px-2 py-1.5"></p>
+
         <form hx-post="/youtube/upload"
               hx-target="#upload-result"
               hx-swap="innerHTML"
@@ -219,6 +267,9 @@
                 </svg>
             </button>
         </div>
+
+        <p id="tiktok-upload-warning"
+           class="hidden mb-4 text-xs text-vermilion border border-vermilion/30 rounded px-2 py-1.5"></p>
 
         <form hx-post="/tiktok/upload"
               hx-target="#tiktok-upload-result"
@@ -331,11 +382,26 @@
 </div>
 
 <script>
-function openUploadModal(videoKey, title, description) {
+// 公開済みの警告を出し入れする。**開くたびに必ず設定し直す**——前に
+// 開いた動画の警告が残ると、出していない動画に「公開済み」と出る。
+function setUploadWarning(elementId, channelLabel, publishedAt) {
+    const warning = document.getElementById(elementId);
+    if (publishedAt) {
+        warning.textContent = 'この動画はすでに ' + channelLabel + ' に公開済みです（'
+            + publishedAt + '）。もう一度アップロードすると、同じ動画がもう1本公開されます。';
+        warning.classList.remove('hidden');
+    } else {
+        warning.textContent = '';
+        warning.classList.add('hidden');
+    }
+}
+
+function openUploadModal(videoKey, title, description, publishedAt) {
     document.getElementById('modal-video-key').value = videoKey;
     document.getElementById('modal-title').value = title || '';
     document.getElementById('modal-description').value = description || '';
     document.getElementById('upload-result').innerHTML = '';
+    setUploadWarning('upload-warning', 'YouTube', publishedAt);
     document.getElementById('upload-modal').classList.remove('hidden');
 }
 
@@ -344,10 +410,11 @@ function closeUploadModal() {
 }
 
 // TikTok modal functions
-function openTiktokUploadModal(videoKey, title) {
+function openTiktokUploadModal(videoKey, title, publishedAt) {
     document.getElementById('tiktok-modal-video-key').value = videoKey;
     document.getElementById('tiktok-modal-title').value = title || '';
     document.getElementById('tiktok-upload-result').innerHTML = '';
+    setUploadWarning('tiktok-upload-warning', 'TikTok', publishedAt);
     document.getElementById('tiktok-upload-modal').classList.remove('hidden');
 }
 
@@ -414,7 +481,7 @@ document.addEventListener('click', function(e) {
         const key = btn.dataset.key;
         const title = btn.dataset.title;
         const description = btn.dataset.description;
-        openUploadModal(key, title, description);
+        openUploadModal(key, title, description, btn.dataset.published);
     }
 });
 
@@ -424,7 +491,7 @@ document.addEventListener('click', function(e) {
     if (btn) {
         const key = btn.dataset.key;
         const title = btn.dataset.title;
-        openTiktokUploadModal(key, title);
+        openTiktokUploadModal(key, title, btn.dataset.published);
     }
 });
 </script>

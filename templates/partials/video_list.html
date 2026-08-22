@@ -30,6 +30,19 @@
             {% if video.created_at %}
             <span class="tnum">{{ video.created_at }}</span>
             {% endif %}
+            {#
+              公開の記録。**「作った」と「出した」は別**で、以前はどちらも
+              画面から区別できなかった（`動画済` は動画ファイルを生成した
+              だけで、YouTube に出したかはどこにも残っていなかった）。
+              出した先と時刻は title 属性に入れる——メタ行は幅が限られて
+              いるので、常に見せるのは語だけにする。
+            #}
+            {% for channel, pub in video.published.items() %}
+            <span class="border border-teal/40 text-teal rounded px-1"
+                  title="{{ pub.label }} に公開しました{% if pub.at %}（{{ pub.at }}）{% endif %}">
+                {{ pub.label }}公開済
+            </span>
+            {% endfor %}
         </div>
         <p class="text-[10px] text-ink/35 truncate mt-0.5" title="{{ video.key }}">
             {{ video.filename }}
@@ -67,6 +80,12 @@
                 data-key="{{ video.key }}"
                 data-title="{{ video.title | default(video.filename, true) }}"
                 data-description="{{ video.description }}"
+                {#
+                  すでに出しているかをモーダルに伝える。**押せなくはしない**
+                  ——限定公開から公開へやり直す経路が実在する。止めるのでは
+                  なく、2本目が公開されることを読める場所に出す。
+                #}
+                data-published="{% if video.published.get('youtube') %}{{ video.published['youtube'].at }}{% endif %}"
                 title="YouTubeにアップロード"
             >
                 <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
@@ -82,6 +101,7 @@
                        focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal tiktok-upload-btn"
                 data-key="{{ video.key }}"
                 data-title="{{ video.title | default(video.filename, true) }}"
+                data-published="{% if video.published.get('tiktok') %}{{ video.published['tiktok'].at }}{% endif %}"
                 title="TikTokにアップロード"
             >
                 <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">

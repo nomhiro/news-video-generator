@@ -28,12 +28,28 @@
     hx-swap="innerHTML"
     hx-indicator="#category-indicator"
     aria-current="{{ 'page' if item == active_category else 'false' }}"
-    {# `px-2` は9つが1行に収まる幅から決めた（px-2.5 だと実測で2行に折れ、
-       28px ぶん記事一覧の高さを食う）。 #}
+    {% if item in (auto_categories | default([])) %}
+    title="自動生成（毎朝の動画と X の投稿）が記事を選ぶのはこのカテゴリだけ"
+    {% endif %}
+    {#
+      `px-2` は9つが1行に収まる幅から決めた（px-2.5 だと実測で2行に折れ、
+      28px ぶん記事一覧の高さを食う）。
+
+      **自動生成の対象の印を文字で足してはいけない。** `*` を1つのタブに
+      付けただけで実測 5.8px 増え、タブの合計 531px ＋ 隙間 48px が容器の
+      578px を1px 超えて **2行に折れた**（幅に1pxの余裕も無い）。印は幅を
+      増やさない形——枠と文字の色——で付ける。
+
+      ここは色だけで示すことになるが、この帯の外（記事プールのヘッダ）に
+      「自動生成が記事を選ぶのは AI だけ」と**語で**書いてあるので、
+      色は語の裏付けであって唯一の手掛かりではない。
+    #}
     class="px-2 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap
            focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal
            {% if item == active_category %}
            bg-ink text-paper
+           {% elif item in (auto_categories | default([])) %}
+           border border-teal/50 text-teal hover:bg-teal/5
            {% else %}
            border border-ink/15 text-ink/70 hover:bg-ink/5
            {% endif %}"
