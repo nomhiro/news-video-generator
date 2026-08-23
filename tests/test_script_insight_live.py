@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from config import Config
 from src.generators.script_generator import ScriptGenerator
 from src.models.formats import get_spec
+from src.models.script import draft_type_for
 
 pytestmark = pytest.mark.live
 
@@ -108,3 +109,45 @@ def test_generates_script_with_insight(
         f"尺が上限を超えました: {len(script.full_narration)}文字 / "
         f"{script.estimated_duration}秒 (上限{spec.max_duration_sec}秒)"
     )
+
+
+def test_probe_whether_the_schema_pins_the_array_count(generator: ScriptGenerator) -> None:
+    """**実験**: 配列の `minItems`/`maxItems` が文法として強制されるか。
+
+    受け入れ条件ではない。どちらの結果でも #61 の修正（フィードバック再生成 +
+    要素数のスキーマ化）は成立する——これは「何が効いているか」を知るための
+    観測であり、失敗させる意味が無いので `pytest.skip` で結果を報告する。
+
+    切り分け方: **プロンプトと違う個数をスキーマで要求する。** short の
+    プロンプトは「4つの配列を必ず6個ずつ」と書いてあるので、そこへ 7 を
+    要求した型を渡す。
+
+    - 7要素が返れば → Azure が `minItems`/`maxItems` を文法に落としている
+    - 6要素で `ValidationError` になれば → キーワードは無視されている。
+      つまり配列長の不一致から救っているのはフィードバック再生成だけ、
+      という結論になる（Azure の Learn ページは 2026-08 時点で
+      `minItems`/`maxItems` を unsupported と書いており、そちらが正しい）
+
+    素の `generate()` ではなく `_request_script` を1回だけ呼ぶ。`generate()`
+    は要素数が揃った下書きしか返さないので、**そこを見ても恒真の assert に
+    なって何も観測できない。**
+    """
+    topic, _ = TOPICS[0]
+    spec = get_spec("short")
+    mismatched = spec.segment_count + 1
+    instructions = ScriptGenerator._build_system_prompt("ja", "short")
+
+    try:
+        draft = generator._request_script(instructions, topic, draft_type_for(mismatched))
+    except ValidationError as e:
+        pytest.skip(
+            f"minItems は強制されていない（プロンプトの{spec.segment_count}個が返った）: {e}"
+        )
+
+    counts = {
+        "segment_narrations": len(draft.segment_narrations),
+        "image_prompts": len(draft.image_prompts),
+        "text_overlays": len(draft.text_overlays),
+        "scenes": len(draft.scenes),
+    }
+    pytest.skip(f"minItems は強制されている（{mismatched}個を要求して {counts}）")

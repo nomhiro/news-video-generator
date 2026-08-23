@@ -164,6 +164,15 @@ class SceneVisual(BaseModel):
 #
 # 上限が必要な理由もカードと同じ。上限を置かないとモデルは1項目に
 # パネル1枚ぶんの記述を書き、図がコマ割りになってスマホで読めなくなる。
+#
+# **これはレイアウトの制約ではない**（2026-08-23 に確認）。`key_details` は
+# 画面に一度も描かれず、画像生成プロンプトに連結されるだけなので、
+# 「動画の帯（1080x800）で実測し直す」という測り方は成立しない——測る対象が
+# 無い。決めるとしたら「どこまで長い句なら挿絵が壊れないか」を実画像で見る
+# ことになる。値を 120 のまま据え置いているのはそのため（#61 で観測した
+# 131字・155字は正常な句（40〜100字）と壊れた出力（250〜350字）の間にあり、
+# 2例では閾値を動かす根拠にならない）。超過は `length_problem` が予算として
+# 見るので、外れても動画は出る。
 MAX_DETAIL_CHARS = 120
 
 
@@ -221,35 +230,64 @@ class IllustrationConcept(BaseModel):
     labels: list[str] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
-    def _check_lengths(self) -> IllustrationConcept:
-        """主題が非空であること、要素と名札が長さ上限以内であることを検証する。
+    def _check_structure(self) -> IllustrationConcept:
+        """主題・要素・名札が空でないことを検証する。
 
-        `_validate_insights` と同じ理由で strip 後の長さを見る
-        （空白だけの文字列を `Field(min_length=...)` では弾けない）。
+        **文字数の上限はここで見ない**（`length_problem` に分けてある）。
+        `key_details` と `labels` は画面に一度も描かれず、
+        `build_illustration_prompt` が画像生成プロンプトへ連結するだけである
+        （Remotion 側は `filename` しか受け取らない）。長すぎる句の害は
+        「挿絵が少し下手になる」に留まるのに、`model_validator` で弾くと
+        `responses.parse` ごと失敗して**動画が1本も作れない**——実際に
+        131字・155字で再試行を2回消費し、その日の生成が0本になった（#61）。
+        `tests/test_pipeline_renderer.py` は「挿絵の生成に失敗しても動画生成は
+        失敗させない」を担保しているのだから、その概念が11字長いだけで
+        全部が落ちるのは筋が通らない。
+
+        空と要素数（ちょうど2個 / 名札は4個まで）は**残す**。スキーマ側で
+        強制できる種類の制約であり、欠けると図の構造そのものが成立しない。
 
         Returns:
             IllustrationConcept: 検証済みの自身
 
         Raises:
-            ValueError: subject が空、または要素・名札が長すぎる場合
+            ValueError: subject・要素・名札のいずれかが空の場合
         """
         if not self.subject.strip():
             raise ValueError("subject が空です")
         for detail in self.key_details:
-            stripped = detail.strip()
-            if not stripped:
+            if not detail.strip():
                 raise ValueError("key_details に空の要素があります")
+        for label in self.labels:
+            if not label.strip():
+                raise ValueError("labels に空のラベルがあります")
+        return self
+
+    def length_problem(self) -> str | None:
+        """要素・名札が長すぎないか調べる。
+
+        `ScriptDraft.check_length_budget` と同じ「予算」の形にしてある
+        ——残り試行があれば理由を伝えて引き直し、最終試行では警告だけ残して
+        採用する。理由は `_check_structure` の説明を参照。
+
+        strip 後の長さで見るのは `_validate_insights` と同じ理由
+        （空白を並べた文字列を `Field(max_length=...)` では弾けない）。
+        そもそも**文字列の `maxLength` は Structured Outputs のスキーマに
+        載せられない**（OpenAI の supported properties に無い。配列の
+        `minItems`/`maxItems` は載る）ので、検査するならここしかない。
+
+        Returns:
+            超過していれば理由の文字列。収まっていれば None
+        """
+        for detail in self.key_details:
+            stripped = detail.strip()
             if len(stripped) > MAX_DETAIL_CHARS:
-                raise ValueError(
+                return (
                     f"視覚要素が長すぎます（{len(stripped)}字、最大{MAX_DETAIL_CHARS}字）。"
                     f"場面の説明ではなく短い句にしてください: {stripped[:40]!r}"
                 )
         for label in self.labels:
             stripped = label.strip()
-            if not stripped:
-                raise ValueError("labels に空のラベルがあります")
             if len(stripped) > MAX_LABEL_CHARS:
-                raise ValueError(
-                    f"ラベルが長すぎます（{len(stripped)}字、最大{MAX_LABEL_CHARS}字）: {stripped!r}"
-                )
-        return self
+                return f"ラベルが長すぎます（{len(stripped)}字、最大{MAX_LABEL_CHARS}字）: {stripped!r}"
+        return None

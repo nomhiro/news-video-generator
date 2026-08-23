@@ -31,8 +31,10 @@ from sqlalchemy import Select, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.models.job import (
+    MAX_JOB_ATTEMPTS,
     BatchProgress,
     GenerationJob,
+    InvalidJobTransition,
     JobStatus,
     check_transition,
 )
@@ -350,7 +352,74 @@ class JobRepository:
             record.lease_expires_at = None
             record.worker_id = None
 
-    def requeue_expired(self, max_attempts: int = 3) -> int:
+    def retry(self, job_id: int) -> None:
+        """失敗したジョブを人の操作で実行待ちに戻す。
+
+        **`requeue_expired` とは別物。** あちらは「ワーカーが落ちてリースが
+        切れた RUNNING」の自動回収で、試行回数を増やし、上限を超えたら
+        FAILED にする。こちらは人が画面で押す再実行である。
+
+        `attempts` は**据え置く**。掴むときに `claim_next` が +1 するので、
+        ここで戻すと上限が働かず、押すたびに何度でも実行できてしまう
+        （取り消せない外向きの操作ではないが、画像生成のクォータを食う）。
+
+        `error_message` は消す。残すと、実行待ちの行に前回の失敗理由が
+        付いたままになり、画面で「もう一度落ちた」のか「まだ動いていない」のか
+        区別できない。
+
+        Args:
+            job_id: 戻すジョブのID
+
+        Raises:
+            InvalidJobTransition: 失敗していない行（成功済み・実行中・実行待ち）
+                を指した場合、または試行回数が上限に達している場合
+        """
+        with session_scope(self._sessions) as session:
+            record = session.get(JobRecord, job_id)
+            if record is None:
+                raise InvalidJobTransition(f"ジョブ {job_id} は見つかりません")
+            # 上限の検査を遷移の検査より先に置く。順序を逆にすると、
+            # 上限に達した FAILED 行が「遷移は可能」と判定されてから
+            # 弾かれるので、理由が2種類の例外に分かれて読みにくくなる。
+            if record.attempts >= MAX_JOB_ATTEMPTS:
+                raise InvalidJobTransition(
+                    f"ジョブ {job_id} は {record.attempts} 回試行しているので"
+                    f"再実行できません（上限{MAX_JOB_ATTEMPTS}回）"
+                )
+            check_transition(JobStatus(record.status), JobStatus.QUEUED)
+            record.status = JobStatus.QUEUED
+            record.error_message = None
+            record.started_at = None
+            record.finished_at = None
+            # リースは掴むときに入る。終了時に外れているが、念のため揃える。
+            record.lease_expires_at = None
+            record.worker_id = None
+
+    def list_recent_failed(self, limit: int = 10) -> list[GenerationJob]:
+        """失敗したジョブを新しい順に返す。
+
+        **`latest_progress()` では届かない。** あちらは直近1バッチしか見ないので、
+        別のバッチが走った時点で古い失敗が画面から消える。#61 のジョブは
+        「長く止まっていて後から見つかった」もので、毎朝1バッチ積む運用では
+        「気付いた時には別バッチが最新」が通常ケースになる。再実行の導線は
+        バッチに依存しない一覧の上に置く必要がある。
+
+        Args:
+            limit: 返す最大件数
+
+        Returns:
+            list[GenerationJob]: 終了時刻の新しい順（未設定なら id 順）
+        """
+        with session_scope(self._sessions) as session:
+            records = session.scalars(
+                select(JobRecord)
+                .where(JobRecord.status == JobStatus.FAILED)
+                .order_by(JobRecord.finished_at.desc(), JobRecord.id.desc())
+                .limit(limit)
+            ).all()
+            return [_to_domain(r) for r in records]
+
+    def requeue_expired(self, max_attempts: int = MAX_JOB_ATTEMPTS) -> int:
         """リースが切れた RUNNING を回収する。
 
         ワーカーが落ちた（コンテナの再起動・OOM）ときに、握られたままの

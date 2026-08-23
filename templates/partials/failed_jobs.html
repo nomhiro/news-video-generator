@@ -1,0 +1,55 @@
+{#
+  直近の失敗（`#failed-jobs` の中身）。
+
+  なぜ生成状況のパネルと別にあるか
+  --------------------------------
+  `/status` は直近1バッチしか見ないので、次のバッチが走った時点で古い失敗が
+  画面から消える。毎朝1バッチ積む運用では「気付いた時には別バッチが最新」が
+  通常ケースで、再実行の導線がそこにあると届かない（#4 / #61）。
+
+  **置き場所は高さ固定のカードの外**（「生成済み動画」セクション）。
+  `#generation-status` の中に置くと `lg:h-[calc(100vh-17rem)]` のカードの
+  内側になり、伸びたぶん `flex-1` の記事一覧が縮んで一度に見える件数が減る。
+
+  1件1行に収める。状態は語で示し、色だけに頼らない（`base.html` の規律）。
+#}
+{% if retry_message %}
+<p class="mb-2 text-xs text-vermilion" role="alert">{{ retry_message }}</p>
+{% endif %}
+
+{% if not failed_jobs %}
+<p class="text-xs text-ink/40">失敗した生成はありません。</p>
+{% else %}
+<ul class="space-y-1">
+    {% for job in failed_jobs %}
+    <li class="flex items-baseline gap-2 text-xs">
+        <span class="shrink-0 text-vermilion">失敗</span>
+        <span class="shrink-0 text-ink/40 tnum">{{ job.attempts }}/{{ max_attempts }}回</span>
+        <span class="min-w-0 flex-1 truncate text-ink/70"
+              title="{{ job.error_message or '理由不明' }}">
+            {{ job.article_title }} ・ {{ job.error_message or "理由不明" }}
+        </span>
+        {% if job.can_retry %}
+        {#
+          押した場所（この一覧）と生成状況の両方が1回の応答で変わる。
+          `hx-disabled-elt` で連打を止める——再実行は画像生成のクォータを
+          消費する（リージョン単位で上限4、X の画像カードと共食い）。
+        #}
+        <button
+            hx-post="/jobs/{{ job.id }}/retry"
+            hx-target="#failed-jobs"
+            hx-swap="innerHTML"
+            hx-disabled-elt="this"
+            class="shrink-0 px-2 py-0.5 rounded border border-ink/20 text-ink/70
+                   hover:bg-ink/5 transition-colors
+                   focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal"
+        >
+            再実行
+        </button>
+        {% else %}
+        <span class="shrink-0 text-ink/40">上限</span>
+        {% endif %}
+    </li>
+    {% endfor %}
+</ul>
+{% endif %}

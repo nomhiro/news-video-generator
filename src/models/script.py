@@ -6,10 +6,11 @@ Azure OpenAI の Structured Outputs (responses.parse) のスキーマを兼ね�
 """
 
 import json
+from functools import cache
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, cast
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, create_model, model_validator
 
 from src.models.scene import IllustrationConcept, SceneLayout, SceneVisual
 
@@ -396,6 +397,19 @@ class ScriptDraft(BaseModel):
             "字幕は1セグメントを1画面に出すため、長いセグメントは画面に収まりません"
         )
 
+    def check_illustration_budget(self) -> str | None:
+        """挿絵の視覚要素・名札が長すぎないか調べる。
+
+        `IllustrationConcept` の `model_validator` ではなくここで見る理由は
+        `IllustrationConcept._check_structure` の説明を参照——あれを
+        バリデータに置くと `responses.parse` ごと失敗し、画面に描かれもしない
+        文字列のせいで動画が1本も作れなくなる（#61）。
+
+        Returns:
+            超過していれば理由の文字列。収まっていれば None
+        """
+        return self.illustration_concept.length_problem()
+
     def to_script(
         self,
         language: str,
@@ -433,6 +447,66 @@ class ScriptDraft(BaseModel):
             source_url=source_url,
             **payload,
         )
+
+
+@cache
+def draft_type_for(segment_count: int) -> type[ScriptDraft]:
+    """要素数を固定した `ScriptDraft` の派生型を返す（`text_format` 専用）。
+
+    4つの並列な配列（`segment_narrations` / `image_prompts` /
+    `text_overlays` / `scenes`）の要素数が一致することは
+    `_validate_aligned_segments` が見ているが、それは**生成後**の検査であり、
+    外れると `VALIDATION_RETRIES` を消費する。実際に `text_overlays` だけが
+    7個で返って再試行を1回使い、他の理由と合わせて3回を使い切った結果、
+    その日の動画が0本になった（#61）。
+
+    配列の `minItems` / `maxItems` は Structured Outputs の
+    supported properties にあるので、**スキーマに書けば文法の段階で
+    要素数を縛れる**（`IllustrationConcept.key_details` の
+    `Field(min_length=2, max_length=2)` 由来で既に本番のリクエストに載っており、
+    Azure が 400 を返さないことは実測済み。なお Azure の Learn ページは
+    2026-08 時点でこれを unsupported と書いたままで、実測と食い違う）。
+
+    **ベースの `ScriptDraft` には制約を入れない。** あちらは保存済みの台本 JSON の
+    読み込みとテストのフィクスチャ（形式を問わず3要素）に使われる。派生型なので
+    `isinstance` / 戻り値の型注釈はそのまま通る。
+
+    副作用を2つ記録しておく。
+
+    - 4配列すべてが揃って `segment_count` 以外の個数で返っていた場合、
+      これまでは黙ってその個数の動画ができていたが、今後は不一致として
+      引き直す。`chars_per_segment` / `segment_char_cap` / `chapter_labels` は
+      すべて `segment_count` を前提にしているので、揃える方が正しい。
+    - 一致を強制するとモデルは**空要素でパディング**しうる
+      （`full_narration` を導出にした理由と同じ罠）。`_validate_aligned_segments`
+      が空要素を弾き、`ScriptGenerator` が理由を伝えて引き直すので閉じている。
+
+    Args:
+        segment_count: 固定したい要素数（`FormatSpec.segment_count`）
+
+    Returns:
+        type[ScriptDraft]: 4配列に `minItems == maxItems == segment_count` を
+            持たせた派生型。同じ個数なら同じクラスを返す（キャッシュ）
+    """
+
+    # **`Field(...)` を4フィールドで共有しない。** pydantic は FieldInfo に
+    # 注釈などを書き込むので、同じインスタンスを回すと後から壊れうる。
+    def pinned() -> Any:
+        return Field(min_length=segment_count, max_length=segment_count)
+
+    # create_model の戻りは pydantic 側で厳密に型付けできないので、
+    # cast をこの1箇所に閉じる（呼び出し側は type[ScriptDraft] として扱える）。
+    return cast(
+        type[ScriptDraft],
+        create_model(
+            f"ScriptDraft{segment_count}",
+            __base__=ScriptDraft,
+            segment_narrations=(list[str], pinned()),
+            image_prompts=(list[str], pinned()),
+            text_overlays=(list[str], pinned()),
+            scenes=(list[SceneVisual], pinned()),
+        ),
+    )
 
 
 class Script(BaseModel):

@@ -18,7 +18,14 @@ from src.generators.script_generator import (
     ScriptGenerationError,
     ScriptGenerator,
 )
+from src.models.formats import get_spec
+from src.models.script import draft_type_for
 from tests.test_content_filter import ISSUE_30_BODY
+
+# `_request_script` は `text_format` に渡す型を引数で受ける（要素数を固定した
+# 派生型。`src/models/script.py` の `draft_type_for` を参照）。ここでは何を
+# 渡しても経路は同じなので、既定の形式のものを使う。
+DRAFT_TYPE = draft_type_for(get_spec("short").segment_count)
 
 
 def _bad_request(body: object) -> BadRequestError:
@@ -86,7 +93,7 @@ def test_入力が拒否されたら専用の型になる(monkeypatch: pytest.Mo
     monkeypatch.setattr(generator, "client", FakeClient(responses))
 
     with pytest.raises(ScriptContentFilterError):
-        generator._request_script("指示", "トピック")
+        generator._request_script("指示", "トピック", DRAFT_TYPE)
 
     # tenacity の許可リストに BadRequestError は入っていない。再試行すると
     # 拒否される入力を4回投げることになる。
@@ -104,7 +111,7 @@ def test_フィルタ以外の400はそのまま伝播する(monkeypatch: pytest
     monkeypatch.setattr(generator, "client", FakeClient(FakeResponses(error=_bad_request(body))))
 
     with pytest.raises(BadRequestError):
-        generator._request_script("指示", "トピック")
+        generator._request_script("指示", "トピック", DRAFT_TYPE)
 
 
 def test_出力が拒否されたら専用の型になる(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,7 +124,7 @@ def test_出力が拒否されたら専用の型になる(monkeypatch: pytest.Mo
     monkeypatch.setattr(generator, "client", FakeClient(FakeResponses(response=response)))
 
     with pytest.raises(ScriptContentFilterError):
-        generator._request_script("指示", "トピック")
+        generator._request_script("指示", "トピック", DRAFT_TYPE)
 
 
 def test_打ち切りはコンテンツフィルタとして扱わない(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,7 +138,7 @@ def test_打ち切りはコンテンツフィルタとして扱わない(monkeyp
     monkeypatch.setattr(generator, "client", FakeClient(FakeResponses(response=response)))
 
     with pytest.raises(ScriptGenerationError) as caught:
-        generator._request_script("指示", "トピック")
+        generator._request_script("指示", "トピック", DRAFT_TYPE)
 
     assert not isinstance(caught.value, ScriptContentFilterError)
 
@@ -152,7 +159,7 @@ def test_generateは型を保ったまま伝播し引き直さない(monkeypatch
     generator = _generator()
     calls: list[int] = []
 
-    def raise_filtered(instructions: str, news_topic: str) -> None:
+    def raise_filtered(instructions: str, news_topic: str, draft_type: type) -> None:
         calls.append(1)
         raise ScriptContentFilterError("記事の題材が拒否されました")
 
@@ -176,7 +183,7 @@ def test_画面に出る文言に生のJSONを入れない(monkeypatch: pytest.M
     monkeypatch.setattr(generator, "client", FakeClient(responses))
 
     with pytest.raises(ScriptContentFilterError) as caught:
-        generator._request_script("指示", "トピック")
+        generator._request_script("指示", "トピック", DRAFT_TYPE)
 
     message = str(caught.value)
     assert "コンテンツフィルタに拒否されました" in message

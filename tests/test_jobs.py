@@ -17,6 +17,7 @@ import pytest
 from src.jobs.runner import ArticleRejected, ArticleUnavailable, PipelineJobRunner
 from src.jobs.worker import JobWorker
 from src.models.job import (
+    MAX_JOB_ATTEMPTS,
     ORIGIN_SCHEDULE,
     BatchProgress,
     GenerationJob,
@@ -811,3 +812,145 @@ def test_worker_survives_a_failing_callback(repository: JobRepository) -> None:
 
     # 例外が外に出ないこと（出るとワーカーのスレッドが死ぬ）
     assert worker._run_one() is True
+
+
+# --------------------------------------------------------------------------
+# 手動での再実行（#4）
+# --------------------------------------------------------------------------
+
+
+def _failed_job(repository: JobRepository, reason: str = "台本の検証に失敗") -> GenerationJob:
+    """1回試行して失敗した行を作る。"""
+    repository.enqueue_batch(ARTICLES[:1], video_format="short")
+    job = repository.claim_next("worker-1")
+    assert job is not None
+    repository.mark_failed(job.id, reason)
+    failed = repository.get(job.id)
+    assert failed is not None
+    return failed
+
+
+def test_retry_puts_a_failed_job_back_in_the_queue(repository: JobRepository) -> None:
+    """失敗した行を実行待ちに戻せること。
+
+    この種の失敗は確率的（本文が一時的に取れない、画像生成が 429、台本の
+    検証が3回とも外れる）で、もう一度やれば通る。押す口が無かったので、
+    記事を選び直して手で生成し直すしかなかった。
+    """
+    failed = _failed_job(repository)
+    repository.retry(failed.id)
+
+    back = repository.get(failed.id)
+    assert back is not None
+    assert back.status is JobStatus.QUEUED
+    # 前回の失敗理由は消す。残ると「もう一度落ちた」のか「まだ動いていない」のか
+    # 画面で区別できない
+    assert back.error_message is None
+    assert back.finished_at is None
+
+
+def test_retry_keeps_the_attempt_count(repository: JobRepository) -> None:
+    """試行回数は据え置くこと。
+
+    戻すと上限が働かず、押すたびに何度でも実行できてしまう
+    （画像生成のクォータを食う）。
+    """
+    failed = _failed_job(repository)
+    assert failed.attempts == 1
+    repository.retry(failed.id)
+
+    back = repository.get(failed.id)
+    assert back is not None
+    assert back.attempts == 1
+
+
+def test_a_retried_job_is_picked_up_again(repository: JobRepository) -> None:
+    """戻した行をワーカーが実際に掴めること（ここまで通らないと意味が無い）。"""
+    failed = _failed_job(repository)
+    repository.retry(failed.id)
+
+    claimed = repository.claim_next("worker-2")
+    assert claimed is not None
+    assert claimed.id == failed.id
+    assert claimed.attempts == 2
+
+
+def test_a_succeeded_job_cannot_be_retried(repository: JobRepository) -> None:
+    """成功した行は戻せないこと（同じ動画をもう1本作るだけ）。"""
+    repository.enqueue_batch(ARTICLES[:1], video_format="short")
+    job = repository.claim_next("worker-1")
+    assert job is not None
+    repository.mark_succeeded(job.id, video_key="videos/x.mp4")
+
+    with pytest.raises(InvalidJobTransition):
+        repository.retry(job.id)
+
+
+def test_retry_stops_at_the_attempt_limit(repository: JobRepository) -> None:
+    """上限に達した行は断ること。
+
+    **画面でボタンを隠すだけでは足りない。** 画面を開いたまま待っている間に
+    自動回収（`requeue_expired`）で試行回数が上限に届きうる。
+    """
+    failed = _failed_job(repository)
+    # 上限まで試行済みの状態にする（1回目は _failed_job が消費している）
+    repository.retry(failed.id)
+    for worker in ("w-2", "w-3"):
+        job = repository.claim_next(worker)
+        assert job is not None
+        repository.mark_failed(job.id, "また落ちた")
+        if worker == "w-2":
+            repository.retry(job.id)
+
+    exhausted = repository.get(failed.id)
+    assert exhausted is not None
+    assert exhausted.attempts == MAX_JOB_ATTEMPTS
+    assert not exhausted.can_retry
+
+    with pytest.raises(InvalidJobTransition):
+        repository.retry(failed.id)
+
+
+def test_retry_rejects_an_unknown_job(repository: JobRepository) -> None:
+    """存在しない id を静かに無視しないこと（画面が成功したように見える）。"""
+    with pytest.raises(InvalidJobTransition):
+        repository.retry(9999)
+
+
+def test_can_retry_is_false_while_the_job_is_still_running(repository: JobRepository) -> None:
+    """実行中・実行待ちにはボタンを出さないこと。"""
+    batch_id = repository.enqueue_batch(ARTICLES[:1], video_format="short")
+    queued = repository.list_batch(batch_id)[0]
+    assert not queued.can_retry
+
+    running = repository.claim_next("worker-1")
+    assert running is not None
+    assert not running.can_retry
+
+
+def test_list_recent_failed_returns_the_newest_first(repository: JobRepository) -> None:
+    """新しい順に返し、失敗以外を混ぜないこと。"""
+    batch_id = repository.enqueue_batch(ARTICLES, video_format="short")
+    first = repository.claim_next("w-1")
+    second = repository.claim_next("w-2")
+    third = repository.claim_next("w-3")
+    assert first and second and third
+    repository.mark_failed(first.id, "1つ目")
+    repository.mark_succeeded(second.id)
+    repository.mark_failed(third.id, "3つ目")
+
+    failed = repository.list_recent_failed()
+    assert [j.id for j in failed] == [third.id, first.id]
+    assert all(j.status is JobStatus.FAILED for j in failed)
+    assert failed[0].batch_id == batch_id
+
+
+def test_list_recent_failed_honours_the_limit(repository: JobRepository) -> None:
+    """件数を絞れること（一覧が伸び続けると画面が読めない）。"""
+    repository.enqueue_batch(ARTICLES, video_format="short")
+    for worker in ("w-1", "w-2", "w-3"):
+        job = repository.claim_next(worker)
+        assert job is not None
+        repository.mark_failed(job.id, "落ちた")
+
+    assert len(repository.list_recent_failed(limit=2)) == 2
