@@ -28,6 +28,7 @@ from src.models.script import (
     MAX_HEADLINE_CHARS,
     Script,
     ScriptDraft,
+    draft_type_for,
 )
 from src.utils.content_filter import category_suffix, is_content_filter_error
 from src.utils.grounding import ungrounded_numbers
@@ -849,15 +850,24 @@ Before output, verify:
         log_step(f"台本を生成中... ({language}, {spec.label})", "")
 
         instructions = self._build_system_prompt(language, video_format)
+        draft_type = draft_type_for(spec.segment_count)
 
         # モデルの出力がスキーマに適合していても、内容が使えないことがある。
         # 引き直しで直る種類の問題（配列長の不一致、空セグメント、
         # 分量の超過）はここで再試行する。
+        #
+        # **同じ入力を送り直さない。** `attempt_input` に前回の失敗理由を足して
+        # 引き直す。以前は `news_topic` を毎回そのまま送っており、3回の試行が
+        # 同じ分布からの3標本にすぎなかった——#61 では3回とも別の理由で外れて
+        # その日の動画が0本になった。`PostGenerator` が同じ形の失敗を実測で
+        # 潰しており（`src/social/post_generator.py:372-378`「効いているのは
+        # このフィードバック」）、こちらにも同じ手を入れる。
         last_problem: str | None = None
+        attempt_input = news_topic
         for attempt in range(self.VALIDATION_RETRIES):
             remaining = self.VALIDATION_RETRIES - attempt - 1
             try:
-                draft = self._request_script(instructions, news_topic)
+                draft = self._request_script(instructions, attempt_input, draft_type)
             except ScriptContentFilterError as e:
                 # **この節を消すと出力側の扉が黙って機能しなくなる。**
                 # ScriptContentFilterError は ScriptGenerationError の
@@ -876,6 +886,7 @@ Before output, verify:
                         f"台本の検証に失敗（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
                         f"再生成します: {last_problem}"
                     )
+                    attempt_input = self._with_validation_feedback(news_topic, last_problem)
                     continue
                 break
             except Exception as e:
@@ -892,6 +903,7 @@ Before output, verify:
                         f"分量が範囲外（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
                         f"再生成します: {problem}"
                     )
+                    attempt_input = self._with_validation_feedback(news_topic, problem)
                     continue
                 # 最終試行でも収まらなければ、生成を止めるより
                 # 長いまま進める方が実用的。警告だけ残す。
@@ -911,8 +923,28 @@ Before output, verify:
                         f"セグメントが長すぎる（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
                         f"再生成します: {segment_problem}"
                     )
+                    attempt_input = self._with_validation_feedback(news_topic, segment_problem)
                     continue
                 log_warning(f"セグメントが長いまま採用します: {segment_problem}")
+
+            # 挿絵の視覚要素・名札の長さ。**分量と同じ扱い（最終試行では通す）。**
+            # ここで落とすと、画面に一度も描かれない英語の句が11字長いだけで
+            # 動画が1本も作れなくなる（#61 で実際に2回ぶんの試行を消費した）。
+            # 挿絵は画像生成の失敗そのものが許されている（`Pipeline` が例外を
+            # 記録するだけで動画は作る）のだから、その概念の長さで全部を
+            # 落とすのは筋が通らない。詳細は
+            # `IllustrationConcept._check_structure` の説明を参照。
+            illustration_problem = draft.check_illustration_budget()
+            if illustration_problem is not None:
+                last_problem = illustration_problem
+                if remaining:
+                    log_warning(
+                        f"挿絵の要素が長すぎる（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
+                        f"再生成します: {illustration_problem}"
+                    )
+                    attempt_input = self._with_validation_feedback(news_topic, illustration_problem)
+                    continue
+                log_warning(f"挿絵の要素が長いまま採用します: {illustration_problem}")
 
             # 数値の根拠の検査。ラベルを描くレンダラでは**分量と違い、
             # 最終試行でも通さない。** 記事に無い数値が画面に描かれるのは、
@@ -926,6 +958,10 @@ Before output, verify:
             # 唯一の経路であり、`Pipeline.run_from_article` が本文を
             # `content[:2000]` で切る影響（切り捨てた先のバージョン番号が
             # 捏造に見える）もここに出る。
+            # **照合するのは元の `news_topic`。`attempt_input` ではない。**
+            # フィードバック文は数字を含む（`131字、最大120字` /
+            # `text_overlays=7`）ので、そちらを根拠にすると自分が足した数字で
+            # 捏造が「根拠あり」になる。
             ungrounded = self._ungrounded_scene_numbers(draft, news_topic)
             if ungrounded and not enforce_scene_grounding:
                 log_warning(
@@ -939,6 +975,7 @@ Before output, verify:
                         f"数値の根拠が無い（{attempt + 1}/{self.VALIDATION_RETRIES}）。"
                         f"再生成します: {last_problem}"
                     )
+                    attempt_input = self._with_validation_feedback(news_topic, last_problem)
                     continue
                 log_error(f"台本の検証に失敗: {last_problem}")
                 raise ScriptGenerationError(f"生成された台本が不正です: {last_problem}")
@@ -957,6 +994,27 @@ Before output, verify:
         log_error(f"台本の検証に失敗: {last_problem}")
         raise ScriptGenerationError(f"生成された台本が不正です: {last_problem}")
 
+    @staticmethod
+    def _with_validation_feedback(news_topic: str, problem: str) -> str:
+        """前回の失敗理由をユーザー入力に足す。
+
+        **毎回元の `news_topic` から組み直す**（前回のフィードバックに重ねない）。
+        累積させると、直った制約の指示が残って別の制約を壊す方向に効く。
+        `PostGenerator._with_length_feedback` と同じ形。
+
+        Args:
+            news_topic: 元のユーザー入力（記事のタイトルと本文）
+            problem: 直前の生成が使えなかった理由（バリデータのメッセージ）
+
+        Returns:
+            str: 理由を足した入力
+        """
+        return (
+            f"{news_topic}\n\n"
+            f"直前の生成は次の理由で使えなかった: {problem}\n"
+            "この点を直し、他の要件はすべて満たしたまま作り直すこと。"
+        )
+
     @retry(
         retry=retry_if_exception_type(
             (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
@@ -965,7 +1023,9 @@ Before output, verify:
         wait=wait_exponential(multiplier=2, min=2, max=60),
         reraise=True,
     )
-    def _request_script(self, instructions: str, news_topic: str) -> ScriptDraft:
+    def _request_script(
+        self, instructions: str, news_topic: str, draft_type: type[ScriptDraft]
+    ) -> ScriptDraft:
         """Responses API を Structured Outputs で呼び出して台本を得る。
 
         `responses.parse` に Pydantic モデルを渡すと、SDK がモデルを
@@ -976,7 +1036,11 @@ Before output, verify:
 
         Args:
             instructions: システムプロンプト
-            news_topic: ニューストピック
+            news_topic: ニューストピック（引き直しでは前回の失敗理由を含む）
+            draft_type: `text_format` に渡す型。`draft_type_for` が返す
+                「要素数を固定した派生型」を受け取る。**ベースの `ScriptDraft`
+                を直接渡してはいけない**——配列の個数がスキーマから消え、
+                `text_overlays` だけ7個で返る経路（#61）が戻る
 
         Returns:
             ScriptDraft: 検証済みの台本の下書き
@@ -992,7 +1056,7 @@ Before output, verify:
                 model=self.model,
                 instructions=instructions,
                 input=news_topic,
-                text_format=ScriptDraft,
+                text_format=draft_type,
             )
         except BadRequestError as e:
             # **入力側の扉。** 記事のタイトルと本文が拒否されると 400 で返る。

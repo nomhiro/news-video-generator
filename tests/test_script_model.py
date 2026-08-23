@@ -576,31 +576,52 @@ def test_requires_exactly_two_key_details() -> None:
         _draft(illustration_concept=_concept(key_details=["one", "two", "three"]))
 
 
-def test_rejects_too_long_key_detail() -> None:
-    """長い記述は「場面の説明」なので弾くこと。
+def test_too_long_key_detail_is_a_budget_not_a_schema_error() -> None:
+    """長い記述は「場面の説明」なので検出するが、**検証で落とさない**こと。
 
     1項目にパネル1枚ぶんを書かれると、モデルはそれをコマ1枚として描く。
+    ただし `key_details` は画面に一度も描かれず、画像生成プロンプトに
+    連結されるだけなので、`model_validator` で弾くと `responses.parse` ごと
+    失敗して**動画が1本も作れない**（#61 で実際に再試行を2回消費した）。
+    予算として扱い、引き直しはするが最終試行では通す。
     """
-    with pytest.raises(ValidationError, match="視覚要素が長すぎます"):
-        _draft(
-            illustration_concept=_concept(
-                key_details=["a" * (MAX_DETAIL_CHARS + 1), "a small switch block"]
-            )
+    draft = _draft(
+        illustration_concept=_concept(
+            key_details=["a" * (MAX_DETAIL_CHARS + 1), "a small switch block"]
         )
+    )
+    problem = draft.check_illustration_budget()
+    assert problem is not None
+    assert "視覚要素が長すぎます" in problem
 
 
 def test_accepts_key_detail_at_the_limit() -> None:
-    """上限ちょうどは通すこと（境界での off-by-one を防ぐ）。"""
+    """上限ちょうどは予算内（境界での off-by-one を防ぐ）。"""
     draft = _draft(
         illustration_concept=_concept(key_details=["a" * MAX_DETAIL_CHARS, "a small switch block"])
     )
     assert len(draft.illustration_concept.key_details[0]) == MAX_DETAIL_CHARS
+    assert draft.check_illustration_budget() is None
 
 
-def test_rejects_too_long_illustration_label() -> None:
-    """名札は名札の役割に留めること（長い文を入れると図が文字に埋まる）。"""
-    with pytest.raises(ValidationError, match="ラベルが長すぎます"):
-        _draft(illustration_concept=_concept(labels=["あ" * (MAX_LABEL_CHARS + 1)]))
+def test_too_long_illustration_label_is_a_budget_too() -> None:
+    """名札も同じ扱い（長い文を入れると図が文字に埋まるが、画面には出ない）。"""
+    draft = _draft(illustration_concept=_concept(labels=["あ" * (MAX_LABEL_CHARS + 1)]))
+    problem = draft.check_illustration_budget()
+    assert problem is not None
+    assert "ラベルが長すぎます" in problem
+
+
+def test_empty_key_detail_is_still_a_schema_error() -> None:
+    """**空は予算ではなくスキーマの問題**として弾き続けること。
+
+    長さと違い、空の要素は図の構造そのものが成立しない（描く物が無い）。
+    要素数と同じくスキーマ側で強制できる種類なので、緩めない。
+    """
+    with pytest.raises(ValidationError, match="key_details に空の要素があります"):
+        _draft(illustration_concept=_concept(key_details=["   ", "a small switch block"]))
+    with pytest.raises(ValidationError, match="labels に空のラベルがあります"):
+        _draft(illustration_concept=_concept(labels=["  "]))
 
 
 def test_accepts_illustration_without_labels() -> None:

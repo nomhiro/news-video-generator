@@ -13,12 +13,15 @@
 """
 
 import itertools
+import re
+from typing import Any, cast
 
 import pytest
+from openai.lib._parsing._completions import type_to_response_format_param
 
 from src.generators.script_generator import ScriptGenerator, chapter_labels, segment_allocation
 from src.models.formats import SPECS, VideoFormat, get_spec
-from src.models.script import MAX_HEADLINE_CHARS
+from src.models.script import MAX_HEADLINE_CHARS, ScriptDraft, draft_type_for
 
 FORMATS = ["short", "tiktok", "long"]
 LANGUAGES = ["ja", "en"]
@@ -389,3 +392,70 @@ def test_chapter_labels_degrades_instead_of_raising_for_too_few_segments() -> No
     """
     assert chapter_labels(4, "ja") == ["", "", "", ""]
     assert chapter_labels(1, "ja") == [""]
+
+
+# --------------------------------------------------------------------------
+# 配列の要素数（プロンプトの直書き / FormatSpec / スキーマの3箇所に住む）
+# --------------------------------------------------------------------------
+
+# 4つの並列な配列。要素数が一致することが音声のタイミング同期と動画合成の前提。
+ALIGNED_ARRAYS = ("image_prompts", "text_overlays", "segment_narrations", "scenes")
+
+
+def _json_schema(model: type) -> dict[str, Any]:
+    """SDK が `text_format` から組む JSON スキーマを取り出す。
+
+    自前で `model_json_schema()` を呼ばないのは、**実際に送られるもの**を
+    見たいから（SDK は strict 化などの加工をする）。返りは TypedDict の
+    union なので cast で開く。
+    """
+    param = cast(dict[str, Any], type_to_response_format_param(model))
+    return cast(dict[str, Any], param["json_schema"])
+
+
+@pytest.mark.parametrize(("video_format", "language"), ALL_COMBINATIONS)
+def test_prompt_array_counts_match_the_spec(video_format: str, language: str) -> None:
+    """プロンプトに直書きされた個数が `FormatSpec.segment_count` と一致すること。
+
+    個数は**3箇所に住んでいる**——`FormatSpec.segment_count`、6種類の
+    プロンプトテンプレートの直書き（`必ず6個ずつ` / `exactly 6 elements`）、
+    そして `draft_type_for` が作るスキーマの `minItems`/`maxItems`。
+    トークン置換ではないので、`segment_count` を変えてもテンプレートは
+    追従しない。ずれると、モデルはプロンプトの数で書いてスキーマに弾かれる
+    （＝毎回引き直しになる）。
+    """
+    prompt = _prompt(language, video_format)
+    expected = get_spec(video_format).segment_count
+    pattern = r"- {}: (\d+)個" if language == "ja" else r"- {}: (\d+) elements"
+    for field in ALIGNED_ARRAYS:
+        found = re.findall(pattern.format(field), prompt)
+        assert found, f"{field} の個数の指示が見つからない ({video_format}/{language})"
+        assert all(int(n) == expected for n in found), (
+            f"{field} の指示が {found} で、segment_count={expected} と食い違う"
+        )
+
+
+@pytest.mark.parametrize("video_format", FORMATS)
+def test_schema_pins_the_array_counts(video_format: str) -> None:
+    """スキーマ側にも要素数が載ること（#61）。
+
+    配列の `minItems` / `maxItems` は Structured Outputs の supported
+    properties にあるので、文法の段階で個数を縛れる。自然文の指示だけに
+    頼っていた頃は `text_overlays` だけ7個で返り、他の理由と合わせて
+    再試行を使い切って動画が0本になった。
+
+    ベースの `ScriptDraft` には入れない（保存済み JSON の読み込みと
+    テストのフィクスチャがそちらに依存している）ことも同時に見る。
+    """
+    count = get_spec(video_format).segment_count
+    schema = _json_schema(draft_type_for(count))
+    properties = schema["schema"]["properties"]
+    for field in ALIGNED_ARRAYS:
+        assert properties[field]["minItems"] == count, field
+        assert properties[field]["maxItems"] == count, field
+    # strict を保ったままであること（崩れると要素数以外の保証も消える）
+    assert schema["strict"] is True
+
+    base = _json_schema(ScriptDraft)["schema"]["properties"]
+    for field in ALIGNED_ARRAYS:
+        assert "minItems" not in base[field], field
