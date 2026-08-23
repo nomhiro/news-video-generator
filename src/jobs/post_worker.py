@@ -18,7 +18,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from src.models.social import PostKind
 from src.social.cost import PostBudget, estimate_month_cost, is_over_budget
 from src.social.x_auth import XTokenExpiredError
 from src.social.x_client import XClient, XSendUncertainError
@@ -60,7 +59,7 @@ def post_due_once(
         client: X クライアント
         switch: 自動投稿の有効/無効
         now: 現在時刻（UTC aware）
-        fetch_image: 画像キー -> ローカルパス（画像カードのとき必要）
+        fetch_image: 画像キー -> ローカルパス（`image_key` を持つ投稿のとき必要）
         on_posted: 投稿できたときに article_id を渡す（消費記録の更新用）
 
     Returns:
@@ -96,7 +95,16 @@ def post_due_once(
 
     try:
         media_ids: list[str] | None = None
-        if post.kind is PostKind.CARD and post.image_key and fetch_image is not None:
+        # **添付の条件は「画像キーがあるか」だけ。型で絞らない。**
+        #
+        # 以前は `post.kind is PostKind.CARD` も見ていた。画像を持てるのが
+        # CARD だけだった頃は同義だったが、型と画像は独立した属性で
+        # （`image_key` は列としても `kind` と無関係）、型で絞ると
+        # **キーを持つ投稿が黙って画像なしで出る**経路が残る。それは
+        # 「画像を作って Blob に上げたうえで添付せずに投稿する」という、
+        # ffprobe でもログでも検出できず**実物の投稿を見るまで気付けない**
+        # 失敗（CLAUDE.md に同じ形の前例が記録されている）。
+        if post.image_key and fetch_image is not None:
             # **アップロードは `with` の内側で行う。** 外に出すと、Blob 構成では
             # 一時ファイルが消えた後のパスを渡すことになる（`FetchImage` の注記）。
             # `create_post` は media_id（文字列）しか使わないので外でよい。
@@ -153,7 +161,7 @@ class PostWorker:
                 起動時に1つ作って使い回すと古いトークンを使い続ける）
             switch: 自動投稿の有効/無効
             poll_interval: キューが空のときの待ち時間（秒）
-            fetch_image: 画像キー -> ローカルパス（画像カードのとき必要）
+            fetch_image: 画像キー -> ローカルパス（`image_key` を持つ投稿のとき必要）
             on_posted: 投稿できたときに article_id を渡す（消費記録の更新用）
             max_post_delay_minutes: これ以上遅れた予定は出さずに捨てる。
                 **遅れた投稿を後から出し直さない**ための値。省略時は
