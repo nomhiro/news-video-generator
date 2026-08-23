@@ -159,6 +159,9 @@ az deployment group what-if --name whatif-db-only -g rg-newsvideo-img \
 デプロイと同名だと `InvalidDeploymentLocation`**（そのデプロイが別リージョンに
 存在する）で止まる。
 
+**打つ場所と、そのチェックアウトの git の鮮度が結果を変える。**
+`-C` で代用してもいけない（後述の「azd は元のチェックアウトから実行する」）。
+
 **API キーは Bicep の output にしていない。** ARM の output はデプロイ履歴に
 平文で残り、リソースグループの閲覧権限があれば読めてしまう。
 `infra/hooks/postprovision.*` が az CLI で取得して表示する。
@@ -1911,6 +1914,33 @@ Azure Files 上の `data/x_posting.json` にあり（有効化は画面から）
   実行後は `azd env get-value SERVICE_WEB_IMAGE_NAME` で反映を確かめる
   （新しい環境ができていたら `.azure/` ごと消して、元のチェックアウトから
   やり直す）。
+
+**`-C`（`--cwd`）で代用してはいけない。** azd は環境（`.azure/`）を `-C` の先から
+読む一方、**テンプレートとフックは作業ディレクトリ側**を使う。2026-08-23 に
+worktree から `azd provision -C <元のチェックアウト>` を打って実際にそうなった
+——`postprovision` フックが worktree 側のパスで実行され、そこに `.azure/` が
+無いので値が空になり
+`ERROR: unrecognized arguments: Suggestion: Run 'azd env list' …` で落ちた。
+
+- **フックの失敗自体は害が小さい**（キーを表示するだけで、インフラは適用済み）。
+  **気付きにくいのは「意図と違うテンプレートで払い出せる」こと**——worktree が
+  未マージのブランチに居れば、未マージの infra がそのまま本番に当たる。
+- **元のチェックアウトの git を先に最新にする。** テンプレートはチェックアウトの
+  作業ツリーから読まれるので、`main` が古いと**古い env が本番に書き戻される**。
+  同日の実測で、元のチェックアウトの `main` は**5つのマージぶん**古く
+  （PR #52 / #53 / #54 / #55 / #58 が入っていない。PR 番号の差ではなく
+  `git rev-list --count --merges main..origin/main` で数える）、
+  `DATABASE_URL` が `sqlite:////app/state/newsvideo.db` の世代だった。そこから
+  provision すれば共有 DB への切り替えが黙って巻き戻り、しかも
+  **PostgreSQL は削除されないまま課金だけ残る**（ARM の incremental は
+  テンプレートに無いリソースを消さない）。`SERVICE_WEB_IMAGE_NAME` の同期と
+  同じ形の罠が、**チェックアウトの HEAD にもある**。
+
+```bash
+cd <元のチェックアウト>   # worktree からは打たない。-C でも代用しない
+git pull --ff-only        # テンプレートはここから読まれる
+azd env list              # 既定が newsvideo-img であることを確認
+```
 
 **状態の置き場所は3つに分かれている。**
 
