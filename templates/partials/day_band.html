@@ -55,10 +55,31 @@
       余白の中に収まる。はみ出す経路が無くなるので `overflow-hidden` で
       閉じられる（`auto` に戻すとスクロールバーが復活する）。
     #}
+    {#
+      **縦に使えるのは 64px しかない。中身を数えて収める。**
+
+      `text-[10px]` は font-size だけを出力し**行送りを指定しない**ので、
+      Tailwind preflight の `html{line-height:1.5}` が効いて1行 15px になる。
+      以前は 24（`top-6`）+ 10（点）+ 2 + 15 + 2 + 15 = **68px** で、軌道の
+      64px（`h-16`）を4px超えていた——`overflow-hidden` なので**状態の語
+      （待機 / 完成 / 投稿済）の行が下端で断ち切られていた**。軌道が
+      `h-20`（80px）だった頃は収まっていたので、高さを縮めた側が中身を
+      数え直さなかった形の退行。
+
+      **軌道を伸ばして直さない。** 記事プールの高さは `index.html` の
+      `lg:h-[calc(100vh-17rem)]` で、`17rem` はこの帯の高さから決めた実測値
+      （カード下端 890px / ビューポート 900px）。帯を伸ばせばそちらを測り
+      直すことになり、「選ぶ場所と押す場所が同時に見える」ぶんを削る。
+      行送りを `leading-3`（12px）で明示し、点を `top-5`（20px）から始める:
+      20 + 10 + 2 + 12 + 2 + 12 = **58px**（余裕 6px）。
+
+      `tests/test_day_band_geometry.py` がこの算術を検査する（行を1本足すか
+      軌道を縮めると落ちる）。
+    #}
     <div class="relative h-16 rounded bg-ink/5 overflow-hidden">
         <div class="relative h-full mx-7">
             {% for hour in range(0, 25, 6) %}
-            <span class="absolute top-1 -translate-x-1/2 text-[10px] text-ink/40 tnum"
+            <span class="absolute top-1 -translate-x-1/2 text-[10px] leading-3 text-ink/40 tnum"
                   style="left: {{ (hour / 24 * 100) }}%">{{ "%02d:00" | format(hour) }}</span>
             {% endfor %}
 
@@ -67,15 +88,15 @@
                  style="left: {{ now_ratio * 100 }}%" aria-hidden="true"></div>
 
             {% for slot in slots %}
-            <div class="absolute top-6 -translate-x-1/2 flex flex-col items-center gap-0.5"
+            <div class="absolute top-5 -translate-x-1/2 flex flex-col items-center gap-0.5"
                  style="left: {{ ((slot.at.hour * 60 + slot.at.minute) / (24 * 60) * 100) }}%">
                 <span class="w-2.5 h-2.5 rounded-full
                     {% if slot.status in ('posted', 'succeeded') %}bg-teal
                     {% elif slot.status in ('needs_review', 'failed') %}bg-vermilion
                     {% else %}bg-amber{% endif %}"
                       title="{{ slot.label }} ・ {{ slot.status_label }}"></span>
-                <span class="text-[10px] text-ink/70 tnum whitespace-nowrap">{{ slot.at.strftime('%H:%M') }}</span>
-                <span class="text-[10px] text-ink/50 whitespace-nowrap">{{ slot.status_label }}</span>
+                <span class="text-[10px] leading-3 text-ink/70 tnum whitespace-nowrap">{{ slot.at.strftime('%H:%M') }}</span>
+                <span class="text-[10px] leading-3 text-ink/50 whitespace-nowrap">{{ slot.status_label }}</span>
             </div>
             {% endfor %}
         </div>
