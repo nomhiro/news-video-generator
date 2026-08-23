@@ -134,6 +134,28 @@ azd down               # 破棄
 Dockerfile は検証済み。クラウドで動かすには生成物の保存先が未解決
 （`infra/core/app-hosting.bicep` の冒頭を参照）。
 
+**新しいモジュールを足したら、モジュール単位で what-if を打つ。**
+テンプレート全体（`az deployment sub what-if`）は既存の Foundry
+（`Microsoft.CognitiveServices/accounts` の `2026-07-01`）の preflight で
+落ちるので、**足したリソースが妥当かどうかが分からない**。preflight は集約
+されるため、無関係な1つの失敗で全部が検証されないまま終わる。既存の
+リソースグループに対してモジュールだけを検証すれば、ARM が実際に
+プロパティを見てくれる（読み取りのみ。リソースは作られない）。
+
+```bash
+az deployment group what-if --name whatif-db-only -g rg-newsvideo-img \
+  --template-file infra/core/database.bicep \
+  --parameters location=westus3 tags='{}' envSlug=newsvideo-img \
+    resourceToken=mimujd6zyifm6 \
+    identityName=id-newsvideo-img-mimujd6zyifm6 \
+    identityPrincipalId=$(az identity list -g rg-newsvideo-img \
+      --query "[0].principalId" -o tsv)
+```
+
+`--name` は必ず指定する。既定はテンプレート名（`MAIN`）で、**過去の
+デプロイと同名だと `InvalidDeploymentLocation`**（そのデプロイが別リージョンに
+存在する）で止まる。
+
 **API キーは Bicep の output にしていない。** ARM の output はデプロイ履歴に
 平文で残り、リソースグループの閲覧権限があれば読めてしまう。
 `infra/hooks/postprovision.*` が az CLI で取得して表示する。
