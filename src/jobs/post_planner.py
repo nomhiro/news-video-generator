@@ -4,7 +4,7 @@
 --------
 1. その日の投稿時刻を決める
 2. X でまだ使っていない記事を選ぶ
-3. 型を割り当てて下書きを作り、予定時刻を入れて積む
+3. 画像を作り、下書きを作り、予定時刻を入れて積む
 
 **コストの上限を超えていたら何も積まない。** 積んでから止めると、
 上限が戻った月初に古い投稿が一斉に出る。
@@ -106,16 +106,22 @@ class SupportsArtifactPublish(Protocol):
         ...
 
 
-# 型の割り当て。固定の並びを posts_per_day に合わせて循環させる。
+# 日次計画が使う唯一の型。
 #
-# LLM に「今日はどの型がよいか」を決めさせない。判断材料（過去の反応）が
-# 数十件しかない時期に選ばせると、理由の説明できないばらつきが出るだけ。
-KIND_ROTATION: tuple[PostKind, ...] = (
-    PostKind.SINGLE,
-    PostKind.SINGLE,
-    PostKind.SINGLE,
-    PostKind.CARD,
-)
+# **画像は型から独立している。** 以前は `KIND_ROTATION` が4件に1件だけ
+# `CARD` を割り当て、画像を作るのは CARD のときだけだった（Issue #23）。
+# 帰結として、投稿枠が3つしか残らない日は画像が1枚も付かなかった。
+#
+# いまは全件が SINGLE で、全件が画像を持つ。型を循環させる概念そのものが
+# 要らなくなった（THREAD / PROMO は元から未配線で、CARD もこれで未配線に
+# なった。理由は仕様書の「第1弾で配線していないもの」）。
+#
+# **`CARD` を enum から消してはいけない。** `src/storage/social.py` の
+# `_to_domain` が `PostKind(record.kind)` で復元するので、`kind='card'` の
+# 既存行があると `ValueError` になる。その経路は `monthly_post_counts`
+# （予算判定）の上にあり、計画のたびと `PostWorker` の毎周で通るため、
+# 表示バグではなく**クラッシュ**になる。
+DAILY_POST_KIND = PostKind.SINGLE
 
 
 @dataclass(frozen=True)
@@ -172,16 +178,18 @@ async def plan_daily_posts(
         unit_with_link_usd: リンク有りの単価
         now: 現在時刻（UTC aware）
         timezone: times を解釈するタイムゾーン
-        card_generator: 画像カードの視覚指示生成器。`image_generator` /
+        card_generator: 画像の視覚指示生成器。`image_generator` /
             `artifacts` / `output_dir` のいずれかと組にならない場合、
-            または省略時は、画像無しの CARD を作る（Task 6 以前の動作）
-        image_generator: 画像カードの生成器。同上
+            または省略時は、画像を付けずに投稿を作る
+        image_generator: 画像の生成器。同上
         artifacts: 生成した画像の保存先。同上
-        jobs: 動画生成ジョブ表。`has_active_jobs()` が True の間はカードを
+        jobs: 動画生成ジョブ表。`has_active_jobs()` が True の間は画像を
             作らない（`gpt-image-2` のクォータをリージョン単位で
-            動画パイプラインと共有しているため、奪うと双方が遅くなる）
-        output_dir: 画像カードを生成する作業ディレクトリ（ローカル）。
-            生成後に `artifacts` へ publish する。省略時はカードを作らない
+            動画パイプラインと共有しているため、奪うと双方が遅くなる）。
+            **全件が画像を持つようになったので、ここに引っかかると
+            その日の全件が画像なしになる**（`_build_post_image` を参照）
+        output_dir: 画像を生成する作業ディレクトリ（ローカル）。
+            生成後に `artifacts` へ publish する。省略時は画像を付けない
 
     Returns:
         DailyPostPlan: 積んだまとまり、または積まなかった理由
@@ -193,10 +201,10 @@ async def plan_daily_posts(
     #    その下書きを黙って捨てる。見えるものが無いので誰も見直せない
     # 2. 記事は「投稿できた後」にしか消費済みにならないため、同じ記事が
     #    翌日以降も再ドラフトされ続け、無駄が収束しない
-    # 3. 下書き生成は Azure OpenAI 呼び出しであり、Task 6 以降は CARD が
-    #    画像も生成する。`gpt-image-2` のクォータはリージョン上限 4 で
-    #    動画パイプラインと共有しているため、見られない出力のために
-    #    奪うのは実害が大きい
+    # 3. 下書き生成は Azure OpenAI 呼び出しであり、**全件が画像も生成する**
+    #    （Issue #23 以降。以前は4件に1件だけだった）。`gpt-image-2` の
+    #    クォータはリージョン単位で動画パイプラインと共有しているため、
+    #    見られない出力のために奪うのは実害が大きい
     #
     # つまりスイッチは送信ステップだけでなく計画ステップも止める。
     if not enabled:
@@ -241,7 +249,6 @@ async def plan_daily_posts(
     # 実測（2026-08-17）: 3件のうち1件目と3件目の生成が失敗し、成功した2件目だけが
     # 2番目の枠（19:00）に積まれた。1番目（12:30）と3番目（21:30）の枠は誰にも
     # 使われず消えた。3件出す予定の日に1件しか出ないことになる。
-    # 型の割り当ても同じ理由で成功順にする（失敗すると CARD の順番が飛ぶ）。
     filled = 0
 
     for article in articles:
@@ -250,14 +257,17 @@ async def plan_daily_posts(
             log_error(f"投稿時刻が埋まったため {len(articles) - filled}件を見送ります")
             break
 
-        kind = KIND_ROTATION[filled % len(KIND_ROTATION)]
+        kind = DAILY_POST_KIND
         image_key: str | None = None
         caption: str | None = None
         # card_generator / image_generator / artifacts が揃っていない場合は
-        # 画像生成そのものを試みず、画像無しの CARD のまま進む
-        # （Task 6 以前からの動作。呼び出し元が未設定でも壊れない）。
-        if kind is PostKind.CARD and card_generator and image_generator and artifacts:
-            kind, image_key, caption = _build_card_image(
+        # 画像生成そのものを試みず、画像無しで進む。本番の呼び出し元
+        # （`src/web/dependencies.py` の日次タスク）は常に3つを渡すので、
+        # ここを通るのはテストだけ。**それでも省略可能なままにしてある**
+        # ——画像の配線が無くても投稿の計画は成立する、という切り分けを
+        # 保つため（画像が壊れた日に投稿まで止めない）。
+        if card_generator and image_generator and artifacts:
+            image_key, caption = _build_post_image(
                 article, card_generator, image_generator, artifacts, jobs, output_dir
             )
 
@@ -296,19 +306,24 @@ async def plan_daily_posts(
     return DailyPostPlan(group_ids=group_ids)
 
 
-def _build_card_image(
+def _build_post_image(
     article: NewsArticle,
     card_generator: SupportsCardVisualGeneration,
     image_generator: SupportsCardImageGeneration,
     artifacts: SupportsArtifactPublish,
     jobs: SupportsActiveJobsCheck | None,
     output_dir: Path | None,
-) -> tuple[PostKind, str | None, str | None]:
-    """画像カードの視覚指示・画像を生成し、保存先へ公開する。
+) -> tuple[str | None, str | None]:
+    """投稿に添える画像の視覚指示・画像を生成し、保存先へ公開する。
 
-    失敗したら例外を投げず SINGLE への降格を返す。カード1枚を諦めても
-    その日の投稿は出したいため（呼び出し元の `plan_daily_posts` が
+    失敗したら例外を投げず `(None, None)`（画像なし）を返す。画像1枚を
+    諦めてもその日の投稿は出したいため（呼び出し元の `plan_daily_posts` が
     1件の生成失敗で1日を落とさない、という方針と同じ）。
+
+    **型を返さない。** 以前は失敗を「CARD から SINGLE への降格」として
+    表していたが、本文の予算は常に 95〜125字（`BUDGETS[SINGLE]`）なので、
+    画像の有無で型を切り替える理由が無くなった。降格という概念が消えたぶん、
+    失敗の意味は「画像が付かない」だけになる。
 
     Args:
         article: 元記事
@@ -316,22 +331,31 @@ def _build_card_image(
         image_generator: 画像の生成器
         artifacts: 生成した画像の保存先
         jobs: 動画生成ジョブ表（None なら判定を省略する）
-        output_dir: 画像を生成する作業ディレクトリ（None なら降格する）
+        output_dir: 画像を生成する作業ディレクトリ（None なら画像なし）
 
     Returns:
-        tuple[PostKind, str | None, str | None]:
-            (最終的な型, 画像の保存先キー, 投稿本文に渡すキャプション)
+        tuple[str | None, str | None]:
+            (画像の保存先キー, 投稿本文に渡すキャプション)
     """
     if jobs is not None and jobs.has_active_jobs():
-        # gpt-image-2 のクォータはリージョン単位で上限4という律速で、
-        # 動画パイプラインと共有している。動画生成中にカードを作ると
-        # 動画側の完了を遅らせるので、その日は SINGLE に降格する。
-        log_step("動画生成が進行中のため画像カードを SINGLE に降格します", "⏭️")
-        return PostKind.SINGLE, None, None
+        # gpt-image-2 のクォータはリージョン単位の律速で、動画パイプラインと
+        # 共有している。動画生成中に画像を作ると動画側の完了を遅らせるので
+        # 諦める。
+        #
+        # **射程が変わった。** 4件に1件だけが画像を持っていた頃、この判定に
+        # 引っかかって失うのは1枚だけだった。いまは全件が画像を持つので、
+        # 計画の時点でジョブが動いていると**その日の全件**が画像なしになる。
+        # 通常は起きない——日次タスクは「取得 → X の計画 → 動画の投入」の
+        # 順で、X の計画時にはまだジョブを積んでいない
+        # （`src/web/dependencies.py` の `task()` の理由1）。起きるのは
+        # 前サイクルの詰まったジョブが残っているか、手動生成とぶつかった
+        # ときだけ。
+        log_step("動画生成が進行中のため画像を付けずに投稿します", "⏭️")
+        return None, None
 
     if output_dir is None:
-        log_error("画像カードの作業ディレクトリが未設定のため SINGLE に降格します")
-        return PostKind.SINGLE, None, None
+        log_error("画像の作業ディレクトリが未設定のため画像を付けずに投稿します")
+        return None, None
 
     try:
         visual = card_generator.generate(article)
@@ -352,14 +376,14 @@ def _build_card_image(
         artifacts.publish(paths[0], key)
     except ContentFilterError as e:
         # コンテンツフィルタの拒否は再試行しても結果が変わらない設計
-        # （ImageGenerator 側の判断）なので、ここでも再試行せず即座に降格する。
-        log_error(f"画像カードがコンテンツフィルタに拒否されました。SINGLE に降格します: {e}")
-        return PostKind.SINGLE, None, None
+        # （ImageGenerator 側の判断）なので、ここでも再試行せず即座に諦める。
+        log_error(f"画像がコンテンツフィルタに拒否されました。画像を付けずに投稿します: {e}")
+        return None, None
     except Exception as e:
-        log_error(f"画像カードの生成に失敗しました。SINGLE に降格します: {e}")
-        return PostKind.SINGLE, None, None
+        log_error(f"画像の生成に失敗しました。画像を付けずに投稿します: {e}")
+        return None, None
 
-    return PostKind.CARD, key, visual.caption_ja
+    return key, visual.caption_ja
 
 
 def _resolve_schedule(times: list[str], now: datetime, timezone: str) -> list[datetime]:

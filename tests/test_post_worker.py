@@ -249,9 +249,21 @@ def test_スレッドの途中で失敗したら_残りも_NEEDS_REVIEW(
     assert statuses == {1: PostStatus.NEEDS_REVIEW, 2: PostStatus.NEEDS_REVIEW}
 
 
-def test_画像カードは_メディアを先に上げる(
-    repository: SocialPostRepository, tmp_path: Path
+@pytest.mark.parametrize("kind", [PostKind.SINGLE, PostKind.CARD])
+def test_画像は型に関係なくメディアを先に上げる(
+    repository: SocialPostRepository, tmp_path: Path, kind: PostKind
 ) -> None:
+    """**添付の条件は `image_key` があるかだけ。型は見ない**（Issue #23）。
+
+    以前は `post.kind is PostKind.CARD` も条件に入っていた。画像を持てるのが
+    CARD だけだった頃は同義だったが、日次計画が全件を SINGLE + 画像で積む
+    ようになった時点で、**この1行が「画像を作って Blob に上げたうえで添付
+    せずに投稿する」経路になる**。尺やログには何も出ないので、実物の投稿を
+    見るまで気付けない（CLAUDE.md に同じ形の前例がある）。
+
+    SINGLE 側がこの回帰を捕まえる唯一の自動検査。CARD 側は退路として
+    残してある型が壊れていないことの確認。
+    """
     now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
     image = tmp_path / "card.png"
     image.write_bytes(b"png")
@@ -260,7 +272,7 @@ def test_画像カードは_メディアを先に上げる(
             NewPost(
                 article_id="a1",
                 article_title="記事",
-                kind=PostKind.CARD,
+                kind=kind,
                 body="本文",
                 has_link=False,
                 image_key="social/cards/card.png",
@@ -312,7 +324,8 @@ def test_画像は_withの内側でアップロードされる(
             NewPost(
                 article_id="a1",
                 article_title="記事",
-                kind=PostKind.CARD,
+                # 日次計画が実際に積む形（SINGLE + 画像）で見る
+                kind=PostKind.SINGLE,
                 body="本文",
                 has_link=False,
                 image_key="social/cards/card.png",

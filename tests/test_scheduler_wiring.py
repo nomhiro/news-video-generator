@@ -215,17 +215,19 @@ def test_投稿ワーカーの_fetch_image_が保存先に繋がっている(tmp
         context.aggregator.close()
 
 
-def test_動画ジョブを積んでもカードは作られる(
+def test_動画ジョブを積んでも画像は作られる(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """定期実行は「取得 → X の計画 → 動画の投入」の順で走る（C1 の回帰）。
 
     2つのことを同時に見張っている。片方だけを直すともう片方が壊れる。
 
-    1. **X の計画は動画の投入より先。** `plan_daily_posts` はカードを作る前に
+    1. **X の計画は動画の投入より先。** `plan_daily_posts` は画像を作る前に
        `jobs.has_active_jobs()` を見て、実行待ち・実行中の動画ジョブがあれば
-       CARD を SINGLE に降格する。動画を先に積むとこの判定が**常に True**
-       になり、画像カードの機能全体が本番で一度も動かない。
+       画像を諦める。動画を先に積むとこの判定が**常に True** になり、
+       画像の機能全体が本番で一度も動かない。**Issue #23 でこの判定の射程が
+       全件に広がった**ので、以前は「4件に1件の画像を失う」だった失敗が
+       いまは「その日の全件が画像なし」になる。
     2. **取得は両方の計画より先。** 取得は元々 `plan_daily_batch` の中に
        あった。1 のために X を先に回すと、その位置では X が「このサイクルで
        取得した記事」を見られず、毎日1日古いニュースを投稿することになる。
@@ -266,7 +268,7 @@ def test_動画ジョブを積んでもカードは作られる(
         asyncio.run(context.scheduler._task())
 
         # 投稿計画の時点でジョブ表が空であること。True だと
-        # `_build_card_image` が必ず SINGLE に降格する。
+        # `_build_post_image` が全件で画像を諦める。
         assert enqueued_before_posts == [False]
         # 投稿計画が今回取得した記事を見られていること。取得が
         # `plan_daily_batch` の中に戻ると、ここは空になる。

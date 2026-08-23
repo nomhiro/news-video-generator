@@ -267,29 +267,59 @@ def test_記事が無ければ理由を返す() -> None:
     assert plan.skipped_reason == "X で未使用の記事がありません"
 
 
-def test_4件目はカードになる() -> None:
+def test_全件に画像が付く(tmp_path: Path) -> None:
+    """Issue #23 の回帰。**画像は型から独立している。**
+
+    以前は `KIND_ROTATION` が4件に1件だけ CARD を割り当て、画像を作るのは
+    CARD のときだけだった。投稿枠が3つしか残らない日は割り当てが
+    SINGLE, SINGLE, SINGLE になり、画像が1枚も付かなかった
+    （2026-08-17 の3件が実際にそうなった）。
+    """
     posts = FakePosts()
-    _plan(FakeNews([_article(s) for s in "abcd"]), posts, FakeGenerator())
+    image_generator = FakeCardImageGenerator()
 
-    kinds = [batch[0].kind for batch, _ in posts.enqueued]
-    assert kinds == [PostKind.SINGLE, PostKind.SINGLE, PostKind.SINGLE, PostKind.CARD]
+    _plan(
+        FakeNews([_article(s) for s in "abcd"]),
+        posts,
+        FakeGenerator(),
+        card_generator=FakeCardGenerator(),
+        image_generator=image_generator,
+        artifacts=FakeArtifacts(),
+        jobs=FakeJobs(active=False),
+        output_dir=tmp_path,
+    )
+
+    first_posts = [batch[0] for batch, _ in posts.enqueued]
+    assert len(first_posts) == 4
+    # 型は全件 SINGLE。画像を持つかどうかは `image_key` だけが表す
+    assert {p.kind for p in first_posts} == {PostKind.SINGLE}
+    assert [p.image_key for p in first_posts] == [
+        "social/cards/a.png",
+        "social/cards/b.png",
+        "social/cards/c.png",
+        "social/cards/d.png",
+    ]
+    # **1記事につき1リクエストで、逐次に流れる。** ここが崩れて1回で
+    # まとめて投げる形になると、`gpt-image-2` の毎分クォータ
+    # （リージョン単位・動画パイプラインと共有）に当たりうる。
+    assert len(image_generator.calls) == 4
+    assert all(len(prompts) == 1 for prompts, *_ in image_generator.calls)
 
 
-def test_カード生成器が無ければ画像無しのカードのまま() -> None:
-    """既存の動作（Task 6 以前）を変えていないことの確認。
-
-    card_generator / image_generator / artifacts のいずれかが無ければ
-    画像生成そのものを試みず、CARD のまま積む。
+def test_画像の生成器が無ければ画像を付けずに積む() -> None:
+    """card_generator / image_generator / artifacts のいずれかが無ければ
+    画像生成そのものを試みず、画像なしで積む（呼び出し元が未設定でも
+    壊れない。CLI とテストがこの経路を通る）。
     """
     posts = FakePosts()
     _plan(FakeNews([_article(s) for s in "abcd"]), posts, FakeGenerator())
 
-    card_post = posts.enqueued[3][0][0]
-    assert card_post.kind == PostKind.CARD
-    assert card_post.image_key is None
+    first_posts = [batch[0] for batch, _ in posts.enqueued]
+    assert {p.kind for p in first_posts} == {PostKind.SINGLE}
+    assert all(p.image_key is None for p in first_posts)
 
 
-def test_カードは画像を生成してキーを添付する(tmp_path: Path) -> None:
+def test_画像を生成して保存先へ公開する(tmp_path: Path) -> None:
     posts = FakePosts()
     generator = FakeGenerator()
     card_generator = FakeCardGenerator()
@@ -307,24 +337,30 @@ def test_カードは画像を生成してキーを添付する(tmp_path: Path) 
         output_dir=tmp_path,
     )
 
-    card_post = posts.enqueued[3][0][0]
-    assert card_post.kind == PostKind.CARD
-    assert card_post.image_key == "social/cards/d.png"
-    # 1回だけ生成し、そのまま公開している（キーは article_id ベース）
-    assert len(image_generator.calls) == 1
-    generated_path = image_generator.calls[0][1] / "card.png"
-    assert artifacts.published == [(generated_path, "social/cards/d.png")]
+    last_post = posts.enqueued[3][0][0]
+    assert last_post.kind == PostKind.SINGLE
+    # キーは article_id ベース。同じ記事の再ドラフトは上書きになるので、
+    # 孤立したファイルが積み重ならない
+    assert last_post.image_key == "social/cards/d.png"
+    generated_path = image_generator.calls[3][1] / "card.png"
+    assert artifacts.published[3] == (generated_path, "social/cards/d.png")
     # CARD_STYLE_PROMPT は完結済みの指示なので、動画用の装飾
     # （_enhance_prompt）を重ねない（Finding 1 の再発防止）。
-    assert image_generator.calls[0][3] is False
-    # キャプションが下書き生成に渡っていること
+    assert image_generator.calls[3][3] is False
+    # キャプションが下書き生成に渡っていること。**型に関係なく効く**
+    # （`_build_user_prompt` は kind ではなく caption の有無だけを見る）。
     assert generator.captions[-1] == "同じ入力を使い回すことで推論コストが下がる。"
 
 
-def test_動画生成中はカードをSINGLEに降格する(tmp_path: Path) -> None:
-    """gpt-image-2 のクォータはリージョン単位で上限4で、動画パイプラインと
-    共有している。動画生成中にカードを作ると動画側を遅くするので、
-    その日は SINGLE に降格する（カード1枚は諦めるが、その日の投稿は出す）。
+def test_動画生成中は画像を付けない(tmp_path: Path) -> None:
+    """gpt-image-2 のクォータはリージョン単位で動画パイプラインと共有して
+    いる。動画生成中に画像を作ると動画側を遅くするので諦める（画像は
+    諦めるが、その日の投稿は出す）。
+
+    **射程が広がった。** 4件に1件だけが画像を持っていた頃に失うのは1枚
+    だけだったが、いまは**その日の全件**が画像なしになる。通常は起きない
+    ——日次タスクは「取得 → X の計画 → 動画の投入」の順なので、X の計画時
+    にはまだジョブが無い（`tests/test_scheduler_wiring.py` が見張っている）。
     """
     posts = FakePosts()
     card_generator = FakeCardGenerator()
@@ -341,17 +377,17 @@ def test_動画生成中はカードをSINGLEに降格する(tmp_path: Path) -> 
         output_dir=tmp_path,
     )
 
-    card_post = posts.enqueued[3][0][0]
-    assert card_post.kind == PostKind.SINGLE
-    assert card_post.image_key is None
-    # 降格したので視覚指示も画像も一切生成していない
+    first_posts = [batch[0] for batch, _ in posts.enqueued]
+    assert {p.kind for p in first_posts} == {PostKind.SINGLE}
+    assert all(p.image_key is None for p in first_posts)
+    # 諦めたので視覚指示も画像も一切生成していない
     assert card_generator.calls == []
     assert image_generator.calls == []
 
 
-def test_コンテンツフィルタに拒否されたらSINGLEに降格する(tmp_path: Path) -> None:
+def test_画像がコンテンツフィルタに拒否されても投稿は積む(tmp_path: Path) -> None:
     """再試行しても結果は変わらない設計（画像生成側）なので、ここでも
-    再試行せず即座に降格する。"""
+    再試行せず即座に諦める。投稿そのものは画像なしで出す。"""
     posts = FakePosts()
 
     _plan(
@@ -365,12 +401,12 @@ def test_コンテンツフィルタに拒否されたらSINGLEに降格する(t
         output_dir=tmp_path,
     )
 
-    card_post = posts.enqueued[3][0][0]
-    assert card_post.kind == PostKind.SINGLE
-    assert card_post.image_key is None
+    last_post = posts.enqueued[3][0][0]
+    assert last_post.kind == PostKind.SINGLE
+    assert last_post.image_key is None
 
 
-def test_視覚指示の生成に失敗したらSINGLEに降格する(tmp_path: Path) -> None:
+def test_視覚指示の生成に失敗しても投稿は積む(tmp_path: Path) -> None:
     posts = FakePosts()
 
     _plan(
@@ -384,12 +420,12 @@ def test_視覚指示の生成に失敗したらSINGLEに降格する(tmp_path: 
         output_dir=tmp_path,
     )
 
-    card_post = posts.enqueued[3][0][0]
-    assert card_post.kind == PostKind.SINGLE
-    assert card_post.image_key is None
+    last_post = posts.enqueued[3][0][0]
+    assert last_post.kind == PostKind.SINGLE
+    assert last_post.image_key is None
 
 
-def test_作業ディレクトリが無ければSINGLEに降格する() -> None:
+def test_作業ディレクトリが無ければ画像を付けない() -> None:
     """output_dir が無いと画像を生成する場所が無い。"""
     posts = FakePosts()
     card_generator = FakeCardGenerator()
@@ -406,8 +442,9 @@ def test_作業ディレクトリが無ければSINGLEに降格する() -> None:
         output_dir=None,
     )
 
-    card_post = posts.enqueued[3][0][0]
-    assert card_post.kind == PostKind.SINGLE
+    first_posts = [batch[0] for batch, _ in posts.enqueued]
+    assert {p.kind for p in first_posts} == {PostKind.SINGLE}
+    assert all(p.image_key is None for p in first_posts)
     assert card_generator.calls == []
     assert image_generator.calls == []
 
@@ -433,19 +470,29 @@ def test_生成に失敗しても後続が枠を繰り上げる() -> None:
     assert scheduled.astimezone(ZoneInfo("Asia/Tokyo")).strftime("%H:%M") == first_slot
 
 
-def test_成功順に型が割り当てられる() -> None:
-    """型も枠と同じ理由で成功順にする。
+def test_先行が失敗しても残った1件に画像が付く(tmp_path: Path) -> None:
+    """画像は枠の順番に依存しない。
 
-    添字に紐づけると、失敗した記事のぶん CARD の順番が飛んで、
-    画像カードが出ない日が偶然できる。
+    型を循環させていた頃は、失敗した記事のぶん CARD の順番が飛んで
+    **画像が1枚も出ない日が偶然できた**。画像を型から切り離した以上、
+    成功した件数がいくつでも全件が画像を持つ。
     """
     posts = FakePosts()
-    articles = [_article(s) for s in "abcd"]
-    # 先頭3件が失敗すると、4件目が「1番目」として扱われるべき
-    _plan(FakeNews(articles), posts, FakeGenerator(fail_for={"a", "b", "c"}))
+    _plan(
+        FakeNews([_article(s) for s in "abcd"]),
+        posts,
+        FakeGenerator(fail_for={"a", "b", "c"}),
+        card_generator=FakeCardGenerator(),
+        image_generator=FakeCardImageGenerator(),
+        artifacts=FakeArtifacts(),
+        jobs=FakeJobs(active=False),
+        output_dir=tmp_path,
+    )
 
-    kinds = [batch[0].kind for batch, _ in posts.enqueued]
-    assert kinds == [PostKind.SINGLE]
+    first_posts = [batch[0] for batch, _ in posts.enqueued]
+    assert len(first_posts) == 1
+    assert first_posts[0].kind == PostKind.SINGLE
+    assert first_posts[0].image_key == "social/cards/d.png"
 
 
 def _plan_slots() -> list[str]:
