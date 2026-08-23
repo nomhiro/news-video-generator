@@ -7,15 +7,16 @@
 // それでも既定を false にしているのは、払い出すと課金が始まるうえ、
 // クラウドで動かすには次の未解決事項が残っているため。
 //
-//   - ジョブ表は SQLite で、コンテナのローカルディスクにある。
-//     Azure Files には置けなかった（SMB 上の SQLite は CREATE TABLE で
-//     固まる。実測済み）。そのためリビジョン更新でジョブの履歴と
-//     実行待ちは消え、minReplicas/maxReplicas も 1 固定のまま。
-//     DATABASE_URL を PostgreSQL に向ければ両方とも解決する
+//   - 定期実行がアプリ内のスレッドで動くので、minReplicas/maxReplicas は
+//     1 固定のまま。2以上にすると全レプリカが同時刻に走る
+//     （リーダー選出か Container Apps Jobs への切り出しが必要）
 //   （OAuth トークンは Blob に置けるようになったが、初回の認証は
 //     ローカルで行い scripts/push_tokens.py で送る運用が必要）
 //
 // 解決済み:
+//   - ジョブ表と投稿表の永続化。**共有データベース**（core/database.bicep の
+//     PostgreSQL）に置く。以前はコンテナのローカルディスク上の SQLite で、
+//     リビジョンごとに空になっていた（Issue #56 / #3）
 //   - 音声合成の資格情報。Azure AI Speech へ移したのでキーだけで足り、
 //     マウントするシークレットファイルが無くなった
 //   - 生成物の保存先。Blob Storage（core/storage.bicep）に publish する。
@@ -142,8 +143,9 @@ param stateAccountName string = ''
 param stateShareName string = 'data'
 
 @description('''コンテナ内のマウント先。
-ここに置くのは記事の JSON（NEWS_DATA_DIR）だけ。
-ジョブ表（SQLite）は SMB 上で動かないためローカルディスクに置く。''')
+ここに置くのは JSON（記事と NEWS_DATA_DIR、投稿スイッチ、公開記録）だけ。
+ジョブ表と投稿表は共有 DB（core/database.bicep）にある——SMB の上の SQLite は
+CREATE TABLE で固まって起動しない（実測済み。再挑戦しないこと）。''')
 param stateMountPath string = '/app/data'
 
 // --- 定期実行 ---
@@ -264,7 +266,25 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
 }
 
 // レジストリが GHCR（public）になったため、AcrPull のロール割当は要らない。
-// マネージド ID は Blob（生成物とトークン）へのアクセスにだけ使う。
+// マネージド ID は Blob（生成物とトークン）と PostgreSQL へのアクセスに使う。
+
+// ジョブ表と投稿表を置く共有データベース。
+//
+// identity をここで作っているので、モジュールは入れ子にして ID を渡す
+// （identity を main.bicep へ動かすと既存リソースの id が変わりうる）。
+// 逆向きの依存は無い: DB はアプリを知らず、アプリは下の DATABASE_URL で
+// DB の FQDN を知る。
+module database 'database.bicep' = {
+  name: 'database'
+  params: {
+    location: location
+    tags: tags
+    envSlug: envSlug
+    resourceToken: resourceToken
+    identityName: identity.name
+    identityPrincipalId: identity.properties.principalId
+  }
+}
 
 // X のシークレット宣言と secretRef を**同じ式**で出すために名前を付ける。
 // 片方だけ出すと壊れる:
@@ -421,19 +441,28 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
                 value: '${stateMountPath}/news'
               }
               {
-                // ジョブ表は**マウントの外**（コンテナのローカルディスク）に置く。
+                // ジョブ表と投稿表は**共有データベース**に置く（core/database.bicep）。
                 //
-                // Azure Files（SMB）の上の SQLite は使えなかった。journal_mode を
-                // DELETE にしても CREATE TABLE で固まり、リビジョンが
-                // Activating のまま起動しない（同じイメージでローカルディスクに
-                // 向けると25秒で起動する、という切り分けまで実測した）。
+                // 以前はコンテナのローカルディスク上の SQLite
+                // （`sqlite:////app/state/newsvideo.db`）だった。Azure Files の
+                // マウントは /app/data なので /app/state はマウント外で、
+                // **リビジョンごとに新しい空のディスク**になり、起動時の
+                // `alembic upgrade head` が空のテーブルを作り直していた。
+                // X 投稿キューがデプロイで消え、その日の残りの投稿が出ないまま
+                // 終わっていた（Issue #56。予算ガードとジョブ履歴も同時に失って
+                // いた。詳しくは src/storage/db.py の docstring）。
                 //
-                // 引き換えに、リビジョン更新や再起動でジョブの履歴と実行待ちは
-                // 消える。記事の選択状態（共有に置いた JSON）は残るので、
-                // 選び直しは要らない。ジョブまで永続化したいなら
-                // DATABASE_URL を PostgreSQL に向ける。
+                // **SQLite を Azure Files（SMB）に置く案に再挑戦しないこと。**
+                // journal_mode を DELETE にしても CREATE TABLE で固まり、
+                // リビジョンが Activating のまま起動しない（同じイメージで
+                // ローカルディスクに向けると25秒で起動する、という切り分けまで
+                // 実測した）。だから共有 DB にした。
+                //
+                // パスワードは含まない（Entra のトークンで接続する）ので
+                // secret ではなく素の env で渡せる。sslmode=require は CA 検証を
+                // しないので、証明書をイメージに入れる必要は無い。
                 name: 'DATABASE_URL'
-                value: 'sqlite:////app/state/newsvideo.db'
+                value: 'postgresql+psycopg://${database.outputs.loginName}@${database.outputs.fqdn}:5432/${database.outputs.databaseName}?sslmode=require'
               }
               // --- 定期実行 ---
               // 生成までを自動で行い、YouTube への公開はしない
@@ -498,9 +527,17 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             }
           ]
       scale: {
-        // 進捗はジョブ表に持つようになったが、その DB は
-        // コンテナのローカルディスク上の SQLite なので共有されない。
-        // DATABASE_URL を共有 DB（PostgreSQL）に向けるまでは 1 に固定する。
+        // DB は共有になった（core/database.bicep）が、**まだ 1 に固定する**。
+        //
+        // 定期実行（src/jobs/scheduler.py）がアプリ内の daemon スレッドで
+        // 動くため、レプリカを増やすと**全レプリカが同時刻に走る**
+        // ——毎朝の生成が二重に走り、X の下書きも二重に積まれる。
+        // 増やすにはリーダー選出か Container Apps Jobs への切り出しが要る。
+        //
+        // デプロイ中に旧新2つのレプリカが同時に走る（activeRevisionsMode が
+        // Single なので新が ready になるまで旧を落とさない）ことは、
+        // ここが 1 でも起きる。**そのときに同じ投稿が二度出ないのは、
+        // claim が共有 DB 上の1箇所の条件付き UPDATE になったから。**
         minReplicas: 1
         maxReplicas: 1
       }

@@ -18,6 +18,13 @@ uv run pytest                                     # テスト（slow/live は既
 uv run pytest -m slow                             # ffmpeg を実際に起動するテスト
 uv run pytest -m live                             # 実APIを叩く（課金あり）
 
+# クラウドの DB（PostgreSQL）に対する検査。ローカルは SQLite なので方言差は
+# ここでしか出ない（マイグレーション / tz / SKIP LOCKED / claim の排他）。
+docker run --rm -d -p 5433:5432 -e POSTGRES_PASSWORD=devpass --name pgtest postgres:17
+TEST_POSTGRES_URL="postgresql+psycopg://postgres:devpass@127.0.0.1:5433/postgres" \
+  uv run pytest -m slow -k postgres
+docker rm -f pgtest
+
 npm run build:css                                 # テンプレートのクラスを変えたとき
 
 cd remotion && npm install                        # 動画レンダラの依存（初回のみ）
@@ -52,6 +59,12 @@ git config core.hooksPath .githooks
 **Azure AI Speech** — 音声合成。キーとリージョンのみ（`AZURE_SPEECH_API_KEY` /
 `AZURE_SPEECH_REGION`）。台本・画像の Azure OpenAI とは別リソース
 （`rg-newsvideo-speech` / japaneast）。
+
+**Azure Database for PostgreSQL Flexible Server** — ジョブ表（`jobs`）と投稿表
+（`social_posts`）の置き場所。**クラウドだけ**で、ローカル実行と `pytest` は
+SQLite のまま（`DATABASE_URL` の1行で切り替わる）。**パスワードを持たない**
+——マネージド ID で取った Entra のアクセストークンをパスワード欄に渡す
+（`psycopg` が必要）。理由と経緯は「状態の置き場所は3つに分かれている」を参照。
 
 記事本文の抽出は **trafilatura**。取得は httpx で行い（User-Agent とタイムアウトを
 制御するため）、抽出結果が100文字未満なら記事ページでないと判断して破棄する
@@ -403,10 +416,15 @@ htmx の out-of-band swap を使う。**押した場所が変わらない UI は
 
 記録は `src/storage/publications.py` の `PublicationStore`。
 
-- **置き場所は Azure Files でなければならない。** 二重公開を止める権威なので、
-  デプロイで消える SQLite には置けない（`main` へのマージが即デプロイなので、
-  消えた直後に同じ動画をもう一度上げうる）。`data/x_posting.json` と同じ理由・
-  同じボリューム。#6 の動画テーブル（SQLite）に寄せてはいけない。
+- **置き場所は Azure Files。** 二重公開を止める権威なので、当時の SQLite
+  （コンテナのローカルディスク）には置けなかった——`main` へのマージが即デプロイ
+  なので、消えた直後に同じ動画をもう一度上げうる。`data/x_posting.json` と
+  同じ理由・同じボリューム。
+
+  **この理由は 2026-08-23 に解消した**（DB を共有の PostgreSQL に移したので
+  消えない）。DB に寄せること自体は筋が通るが、**この Issue ではやっていない**
+  ——二重公開を止める権威を動かす作業なので、移行手順（既存の JSON を DB に
+  入れる、片方だけ読む期間を作らない）とセットで行う。`consumed` も同じ。
 - **キーは生成物のキー（`videos/....mp4`）で、記事ではない。** 1つの記事から
   複数の動画ができる（形式 × 言語）。記事に持たせると「3本作って1本だけ
   公開した」を表せず、ガードが必要とする粒度に届かない。
@@ -1068,8 +1086,10 @@ uv run python -c "from PIL import Image; im=Image.open('f.png').convert('L'); px
 
 
 - **`data/news/*.json` を書き換え可能なデータストアとして使っている。**
-  同一プロセス内はロックで守っているが、複数プロセスからは守れない。
-  Phase 4 で SQLite に移す。
+  同一プロセス内はロックで守っているが、複数プロセスからは守れない
+  （レプリカを1に固定しているので現状は当たらない）。移し先は共有 DB
+  （`jobs` / `social_posts` と同じ PostgreSQL）だが、`consumed` が二重投稿を
+  止める権威なので移行手順とセットでしか動かさない。
 - **チョークダスト風の全画面テクスチャは未実装・未計測。** 全画面フィルタは
   `filter: blur()` そのものが3倍化（199秒→598秒）した経路そのものなので、
   採用の前に必ず計測する。
@@ -1171,10 +1191,15 @@ Key Vault ではなく Blob にしている。生成物用に**すでに Entra I
   書くと cp932 で `UnicodeDecodeError` になる（一度踏んだ）。
   接続先は ini に書かず `migrations/env.py` がアプリ設定から取る。
 
-**レプリカを2つ以上にするには DB を差し替える必要がある。** SQLite の
-ファイルは1台のファイルシステム上にしかないので、行にしただけでは
-共有されない。`DATABASE_URL` を Azure Database for PostgreSQL に向ければ
-コードはそのまま動く（SQLAlchemy を挟んでいる理由がこれ）。
+**DB はもう共有されている**（2026-08-23、Issue #56 / #3）。`DATABASE_URL` は
+クラウドでは Azure Database for PostgreSQL を指す。ローカル実行と `pytest` は
+SQLite のままなので、上の SQLite 固有の記述（WAL / `_as_utc` / 影響行数での
+競合検出）はどれも生きている。
+
+**それでもレプリカは1に固定してある。** 残っている制約は DB ではなく
+**定期実行がアプリ内の daemon スレッドで動くこと**（`src/jobs/scheduler.py`）。
+2以上にすると全レプリカが同時刻に走り、毎朝の生成が二重に走って X の下書きも
+二重に積まれる。増やすにはリーダー選出か Container Apps Jobs への切り出しが先。
 
 ### 生成物は「作る場所」と「置く場所」を分ける
 
@@ -1325,8 +1350,10 @@ Chromium で再生して `readyState=4` / 1080x1920 / `webkitAudioDecodedByteCou
 #### `dismissed` は画面のためだけの記録
 
 人が「この記事は使わない」と決めた印（`NewsArticle.dismissed`）。
-`consumed`（もう出した）とは別で、権威は同じく記事データに置く
-（SQLite に置くとリビジョン更新で消え、外したはずの記事が翌日戻る）。
+`consumed`（もう出した）とは別で、権威は同じく記事データ（Azure Files）に置く
+——当時の SQLite はコンテナのローカルディスクにあり、リビジョン更新で消えて
+外したはずの記事が翌日戻るためだった（その制約は 2026-08-23 に解消。上の
+`PublicationStore` の項を参照）。
 
 - `get_articles_by_category` は既定で外した記事を返さない。
 - **`pick_unconsumed` もこれを見る**（＝外した記事は自動生成の候補にも
@@ -1571,10 +1598,12 @@ tenant level resource provider` という原因の分からないエラーにな
     --query 'properties.template.containers[0].image' -o tsv)"
   ```
 
-- **デプロイごとにジョブ表が消える。** `DATABASE_URL` はコンテナのローカル
-  ディスク上の SQLite なので、リビジョン更新で実行待ちのジョブと履歴が失われる。
-  マージが即デプロイになるぶん頻度が上がり、**生成中にマージするとその回の生成が
-  失われる**（記事の選択状態は Azure Files なので残る）。
+- **デプロイでジョブ表と投稿表は消えない**（2026-08-23 以降。Issue #56 / #3）。
+  `DATABASE_URL` は共有の PostgreSQL を指す。**2026-08-23 までは消えていた**
+  ——コンテナのローカルディスク上の SQLite だったので、リビジョン更新で実行待ちの
+  ジョブと履歴が失われ、**X 投稿キューも消えてその日の残りの投稿が出なかった**。
+  いまは生成中にマージしても、殺されたジョブはリースが切れて
+  `requeue_expired()` が拾い直す。
   イメージに入らないもの（`**.md` / `tests/` / `infra/` / `.claude/` / `.githooks/`）は
   `paths-ignore` で除外して、無駄な再起動を減らしている。
 - **デプロイが失敗してもアプリは止まらない。** Single モードなので旧リビジョンが
@@ -1864,14 +1893,32 @@ Azure Files 上の `data/x_posting.json` にあり（有効化は画面から）
 |---|---|---|
 | 生成物（動画・画像・音声・台本） | Blob（`artifacts`） | 再起動で消えない。Entra ID 認証 |
 | OAuth トークン | Blob（`tokens`） | 同上。別コンテナに分離 |
-| 記事の選択状態（JSON） | Azure Files（`/app/data`） | リビジョン更新で選び直したくない |
-| ジョブ表（SQLite） | コンテナのローカル（`/app/state`） | **SMB 上では動かない**（下記） |
+| 記事の選択状態・`consumed`・投稿スイッチ・公開記録（JSON） | Azure Files（`/app/data`） | リビジョン更新で選び直したくない |
+| ジョブ表・投稿表（`jobs` / `social_posts`） | **PostgreSQL**（`infra/core/database.bicep`） | リビジョン更新で消えないため（下記） |
 
-- **SQLite を Azure Files に置くと起動しない。** `journal_mode` を DELETE に
-  してもテーブル作成で固まり、リビジョンが Activating のまま終わらない。
-  同じイメージで `DATABASE_URL` をローカルディスクに向けると25秒で起動する、
-  という切り分けまでやった。ジョブまで永続化するなら PostgreSQL に移す。
-  引き換えに、リビジョン更新で**実行待ちのジョブと履歴は消える**。
+- **2026-08-23 まではコンテナのローカルディスク上の SQLite だった**
+  （`/app/state`。Azure Files のマウントは `/app/data` なのでマウント外）。
+  リビジョンごとに新しい空のディスクになり、起動時の `alembic upgrade head` が
+  空のテーブルを作り直していた。**エラーも警告も出ない**まま3つ起きていた:
+  X 投稿キューがデプロイで消えてその日の残りの投稿が出ない（Issue #56）、
+  実行待ちの動画ジョブと履歴が消える（#3）、**予算ガードが効かない**
+  （`monthly_post_counts` が数える POSTED 行が消えるので、月の実支出が
+  いくらでも `is_over_budget` がほぼ発火しない）。
+- **SQLite を Azure Files に置く案に再挑戦しないこと。** `journal_mode` を
+  DELETE にしてもテーブル作成で固まり、リビジョンが Activating のまま
+  終わらない。同じイメージでローカルディスクに向けると25秒で起動する、
+  という切り分けまでやった。**だから共有 DB にした。**
+- **下書きを Azure Files に写して復元する案も却下した。** ACA は
+  `activeRevisionsMode = Single` で新リビジョンが ready になるまで旧を
+  落とさないので、デプロイのたびに2つのレプリカが1〜2分同時に走る。
+  per-replica のコピーを持たせると両方が同じ行を持ち、各自が別のファイルを
+  見るぶん claim の排他が効かず、**同じ投稿が二度出る**。
+  `tests/test_db_postgres_slow.py` が「同時に掴んでも1つしか掴めない」ことを
+  実物の PostgreSQL で見張っている。
+- **Cosmos DB は単価では安いがコスパの頂点ではない**（理由は
+  `infra/core/database.bicep` の冒頭。無料レベルはサブスクに1つで使用済み、
+  プロビジョニングは最小 400 RU/s で月$23、そして書き換え対象が
+  「二重投稿を防いでいるコード」そのもの）。B1MS + 32GB で**月約$16**。
 - Azure Files のマウントは SMB でアカウントキーを要求するため、
   **生成物とは別のストレージアカウント**にしている（生成物側は
   `allowSharedKeyAccess: false` を維持したい）。キーが漏れても
@@ -1924,11 +1971,14 @@ X API には**冪等キーが無い**。送信の結果が分からない状態�
 
 ### 「もう投稿した」の権威は Azure Files 上の記事データ
 
-`jobs` / `social_posts` の SQLite は**コンテナのローカルディスクにあり、リビジョン更新で
-消える**。`main` へのマージが即デプロイなので、これは日常的に起きる。
+2026-08-23 まで `jobs` / `social_posts` の SQLite は**コンテナのローカルディスクにあり、
+リビジョン更新で消えていた**。`main` へのマージが即デプロイなので日常的に起きた。
 
-「投稿済み」を SQLite だけに持つと、**デプロイ直後に同じ記事の投稿が作り直されて
-二重投稿する**。だから権威は Azure Files 上の `data/news/*.json`（`NewsArticle.consumed`）に置く。
+「投稿済み」を消える DB だけに持つと、**デプロイ直後に同じ記事の投稿が作り直されて
+二重投稿する**。だから権威は Azure Files 上の `data/news/*.json`（`NewsArticle.consumed`）に置いた。
+**DB を共有の PostgreSQL に移して消えなくなった後も、権威はここに残してある**
+——動かす作業は二重投稿を止める仕組みそのものを触るので、移行手順とセットでしか
+やらない（`PublicationStore` の項と同じ判断）。
 `consumed` はチャネル名 → 消費時刻の対応で、`video_generated` は
 `consumed` を見る読み取り専用 property。書き込みは `mark_consumed` だけを通る。
 
@@ -1941,8 +1991,9 @@ X API には**冪等キーが無い**。送信の結果が分からない状態�
 
 ### 投稿スイッチもデータベースには置けない
 
-実体は Azure Files 上の `data/x_posting.json`。SQLite に置くと、画面で有効にした翌日に
-マージした時点で**黙って投稿が止まる**。`X_POSTING_ENABLED`（既定 false）は
+実体は Azure Files 上の `data/x_posting.json`。消える DB に置くと、画面で有効にした翌日に
+マージした時点で**黙って投稿が止まる**（2026-08-23 に DB が共有になって消えなくなったが、
+上の2件と同じ理由でここも動かしていない）。`X_POSTING_ENABLED`（既定 false）は
 「ファイルが無いときの初期値」でしかなく、一度画面で切り替えたら以降はファイルが権威。
 
 **スイッチは送信段だけでなく `plan_daily_posts` も止める。** off の間に下書きを作ると、
@@ -1960,8 +2011,9 @@ X API には**冪等キーが無い**。送信の結果が分からない状態�
   を別型にしてあるのは、呼び出し側が投稿を `NEEDS_REVIEW` にして再認証を促すため。
   成功したが壊れた payload（`access_token` 欠落など）もこの型にする。素の `KeyError` を
   漏らすとその経路を素通りしてワーカーが落ちる。
-- **レプリカを2つ以上にすると壊れる。** 同時 refresh で片方が無効化される。SQLite の
-  ジョブ表と同じ制約の列に並ぶ既知の制約。
+- **レプリカを2つ以上にすると壊れる。** 同時 refresh で片方が無効化される。
+  定期実行のアプリ内スレッドと並ぶ「レプリカを増やす前に直すもの」の1つ
+  （DB はもう共有なので制約から外れた）。
 
 **認証はローカルで1回だけ。** `uv run python -m scripts.authorize_x` で PKCE を完了させ、
 `uv run python -m scripts.push_tokens` で保存先へ送る。PKCE はブラウザのリダイレクトを
