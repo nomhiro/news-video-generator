@@ -27,10 +27,16 @@
 --------
 既定では skip する（`TEST_POSTGRES_URL` が無ければ）。
 
-    docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=devpass --name pgtest postgres:17
-    TEST_POSTGRES_URL="postgresql+psycopg://postgres:devpass@localhost:5432/postgres" \
+    PGPASS="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(12))')"
+    docker run --rm -d -p 5433:5432 -e POSTGRES_PASSWORD="$PGPASS" --name pgtest postgres:17
+    TEST_POSTGRES_URL="postgresql+psycopg://postgres:$PGPASS@127.0.0.1:5433/postgres" \
       uv run pytest -m slow -k postgres
     docker rm -f pgtest
+
+**パスワードは毎回捨てる値を作る。** リポジトリに literal を置くと秘密検出が
+鳴る（実際に GitGuardian が鳴った）。ポートを 5433 にしているのはローカルに
+PostgreSQL が居る場合に 5432 とぶつかるため。ホストは `127.0.0.1` にする
+——`localhost` だと psycopg が `::1` を先に試して260秒待つ（実測）。
 
 **パスワード付きの URL を使う。** 実機はパスワードを持たず Entra の
 トークンで接続するが、その経路はローカルでは再現できない（`src/storage/db.py`

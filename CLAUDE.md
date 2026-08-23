@@ -20,8 +20,11 @@ uv run pytest -m live                             # 実APIを叩く（課金あ�
 
 # クラウドの DB（PostgreSQL）に対する検査。ローカルは SQLite なので方言差は
 # ここでしか出ない（マイグレーション / tz / SKIP LOCKED / claim の排他）。
-docker run --rm -d -p 5433:5432 -e POSTGRES_PASSWORD=devpass --name pgtest postgres:17
-TEST_POSTGRES_URL="postgresql+psycopg://postgres:devpass@127.0.0.1:5433/postgres" \
+# パスワードは毎回捨てるので**リポジトリに literal を置かない**
+# （置くと秘密検出が鳴る。実際に GitGuardian が鳴った）。
+PGPASS="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(12))')"
+docker run --rm -d -p 5433:5432 -e POSTGRES_PASSWORD="$PGPASS" --name pgtest postgres:17
+TEST_POSTGRES_URL="postgresql+psycopg://postgres:$PGPASS@127.0.0.1:5433/postgres" \
   uv run pytest -m slow -k postgres
 docker rm -f pgtest
 

@@ -37,6 +37,10 @@ from src.storage import db
 # （libpq は2未満を2として扱うので、これが下限）。
 REFUSED_URL = "postgresql+psycopg://app-identity@127.0.0.1:1/newsvideo?connect_timeout=2"
 
+# 「URL にパスワードがある」ことだけを表す1文字。値は使われない
+# （`create_db_engine` は `make_url(url).password is None` しか見ない）。
+PASSWORD_PRESENT = "x"
+
 
 @dataclass
 class FakeToken:
@@ -118,8 +122,13 @@ def test_パスワード付きのURLではトークンを注入しない(credent
 
     ここで注入するとパスワードが上書きされ、
     `tests/test_db_postgres_slow.py` が認証できなくなる。
+
+    URL に**パスワードらしい文字列を書かない**。分岐が見ているのは値ではなく
+    有無だけで、literal を置くと秘密検出が鳴る（実際に GitGuardian が鳴った）。
     """
-    engine = db.create_db_engine("postgresql+psycopg://postgres:devpass@db.example:5432/postgres")
+    engine = db.create_db_engine(
+        f"postgresql+psycopg://postgres:{PASSWORD_PRESENT}@db.example:5432/postgres"
+    )
 
     assert _connect_listeners(engine) == []
     assert credential.calls == []
