@@ -11,7 +11,13 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from config import Config
-from src.models.job import BatchProgress, GenerationJob, JobStatus
+from src.models.job import (
+    MAX_JOB_ATTEMPTS,
+    BatchProgress,
+    GenerationJob,
+    InvalidJobTransition,
+    JobStatus,
+)
 from src.models.news import CHANNEL_VIDEO, CHANNEL_X, NewsArticle, NewsCategory
 from src.models.social import (
     CANCELLABLE_STATUSES,
@@ -505,10 +511,31 @@ async def get_status(
     return _status_response(request, jobs.latest_progress())
 
 
+def _status_context(progress: BatchProgress) -> dict[str, object]:
+    """進捗をステータスのパーシャルが読む形にする。
+
+    投入直後・ポーリング・再実行の応答（out-of-band）で同じ表示になるよう、
+    変換を1箇所に置く。
+
+    Args:
+        progress: 直近バッチの進捗
+
+    Returns:
+        dict[str, object]: テンプレートのコンテキスト
+    """
+    return {
+        "status": progress.status,
+        "total_count": progress.total_count,
+        "completed_count": progress.completed_count,
+        "current_article": progress.current_article,
+        "completed_articles": progress.completed_articles,
+        "failed_articles": progress.failed_articles,
+        "error_message": progress.error_message,
+    }
+
+
 def _status_response(request: Request, progress: BatchProgress) -> HTMLResponse:
     """進捗をステータスのパーシャル HTML にする。
-
-    投入直後とポーリングで同じ表示になるよう、変換を1箇所に置く。
 
     Args:
         request: FastAPIリクエスト
@@ -520,16 +547,97 @@ def _status_response(request: Request, progress: BatchProgress) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "partials/generation_status.html",
-        {
-            "status": progress.status,
-            "total_count": progress.total_count,
-            "completed_count": progress.completed_count,
-            "current_article": progress.current_article,
-            "completed_articles": progress.completed_articles,
-            "failed_articles": progress.failed_articles,
-            "error_message": progress.error_message,
-        },
+        _status_context(progress),
     )
+
+
+@router.get("/jobs/failed", response_class=HTMLResponse)
+async def get_failed_jobs(
+    request: Request,
+    jobs: JobRepository = Depends(get_jobs),
+):
+    """失敗したジョブの一覧（直近 N 件）を返す。
+
+    **`/status` とは別に必要**。あちらは直近1バッチしか見ないので、次のバッチが
+    走った時点で古い失敗が画面から消え、再実行できなくなる（#4 / #61）。
+
+    Args:
+        request: FastAPIリクエスト
+        jobs: ジョブ表
+
+    Returns:
+        HTMLResponse: 失敗一覧のパーシャルHTML
+    """
+    return templates.TemplateResponse(
+        request,
+        "partials/failed_jobs.html",
+        _failed_jobs_context(jobs),
+    )
+
+
+@router.post("/jobs/{job_id}/retry", response_class=HTMLResponse)
+async def retry_job(
+    request: Request,
+    job_id: int,
+    jobs: JobRepository = Depends(get_jobs),
+):
+    """失敗したジョブを実行待ちに戻す。
+
+    この種の失敗は確率的なものが多い（本文が一時的に取れない、画像生成が
+    429 で力尽きる、台本の検証が3回とも外れる）。もう一度やれば通るのに、
+    記事を選び直して手で生成し直すしか手が無かった。
+
+    応答は**押した場所（失敗一覧）と別の場所（生成状況）の両方**を直す。
+    `latest_batch_id()` は実行待ち・実行中のあるバッチを優先するので、
+    古いバッチのジョブを戻しても `/status` はそちらに切り替わり、
+    ポーリングが再開する。
+
+    Args:
+        request: FastAPIリクエスト
+        job_id: 戻すジョブのID
+        jobs: ジョブ表
+
+    Returns:
+        HTMLResponse: 失敗一覧 + 生成状況（out-of-band）のパーシャルHTML
+    """
+    message = None
+    try:
+        jobs.retry(job_id)
+    except InvalidJobTransition as e:
+        # **4xx にしない。** htmx はエラー応答で対象を差し替えないので、
+        # 画面が黙って古いまま残り、押しても何も起きないように見える。
+        message = str(e)
+        log_error(f"ジョブ {job_id} の再実行を断りました: {message}")
+    else:
+        log_step(f"ジョブ {job_id} を実行待ちに戻しました", "♻️")
+
+    context = _failed_jobs_context(jobs, retry_message=message)
+    context.update(_status_context(jobs.latest_progress()))
+    return templates.TemplateResponse(request, "partials/failed_jobs_swap.html", context)
+
+
+def _failed_jobs_context(
+    jobs: JobRepository, retry_message: str | None = None
+) -> dict[str, object]:
+    """失敗一覧のパーシャルが読む形にする。
+
+    キーを `message` にしない。再実行の応答は生成状況のコンテキスト
+    （`_status_context`）と1つの辞書に混ぜるので、あちらが
+    `{{ message or error_message }}` で読んでいる名前とぶつかり、
+    **再実行を断った理由が生成状況の失敗理由として表示される**。
+
+    Args:
+        jobs: ジョブ表
+        retry_message: 再実行を断った理由（あれば画面に出す）
+
+    Returns:
+        dict[str, object]: テンプレートのコンテキスト
+    """
+    return {
+        "failed_jobs": jobs.list_recent_failed(),
+        "max_attempts": MAX_JOB_ATTEMPTS,
+        "retry_message": retry_message,
+    }
 
 
 # ============================================================

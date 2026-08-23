@@ -168,6 +168,24 @@
                 <div class="text-ink/40 text-sm">読み込み中...</div>
             </div>
 
+            <!--
+              直近の失敗（再実行の導線）。
+
+              生成状況のパネル（`#generation-status`）は直近1バッチしか
+              見ないので、次のバッチが走ると古い失敗が消えて再実行できない。
+              ここは高さ固定のカードの外なので、伸びても記事一覧の可視件数を
+              削らない。
+            -->
+            <div class="mb-3 pb-3 border-b border-ink/10">
+                <h3 class="text-xs font-medium text-ink/60 mb-2">直近の失敗</h3>
+                <div id="failed-jobs"
+                     hx-get="/jobs/failed"
+                     hx-trigger="load"
+                     hx-swap="innerHTML">
+                    <p class="text-xs text-ink/40">読み込み中...</p>
+                </div>
+            </div>
+
             <!-- Video List -->
             <div id="video-list"
                  hx-get="/videos"

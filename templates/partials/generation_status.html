@@ -78,6 +78,15 @@
         {% for title in failed_articles %}{{ article_line(title, "failed") }}{% endfor %}
     </div>
     {% endif %}
+
+    {#
+      再実行のボタンはここに置かない。このパネルは直近1バッチしか見ないので、
+      次のバッチが走ると古い失敗が消えて押せなくなる（#4 / #61）。導線は
+      バッチに依存しない「直近の失敗」の側にある。
+    #}
+    {% if failed_articles %}
+    <p class="mt-2 text-xs text-ink/40">再実行は「直近の失敗」から。</p>
+    {% endif %}
 </div>
 
 {% elif status == "success" %}

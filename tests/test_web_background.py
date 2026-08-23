@@ -350,3 +350,134 @@ def test_status_explains_a_content_filter_rejection(repository: JobRepository) -
     # 生の応答の断片は出さない
     assert "content_filter_offsets" not in body
     assert "end_offset" not in body
+
+
+# --------------------------------------------------------------------------
+# 失敗したジョブの再実行（#4）
+# --------------------------------------------------------------------------
+
+
+def _failed(repository: JobRepository, reason: str = "台本の検証に失敗しました") -> GenerationJob:
+    """1回試行して失敗した行を作る。"""
+    repository.enqueue_batch([("a-1", "落ちた記事")], video_format="short")
+    job = repository.claim_next("worker-1")
+    assert job is not None
+    repository.mark_failed(job.id, reason)
+    failed = repository.get(job.id)
+    assert failed is not None
+    return failed
+
+
+def test_failed_jobs_are_listed_with_a_retry_button(app: tuple[FastAPI, JobRepository]) -> None:
+    """一覧に記事名・理由・試行回数と再実行ボタンが出ること。"""
+    from fastapi.testclient import TestClient
+
+    application, repository = app
+    _failed(repository)
+
+    with TestClient(application) as client:
+        response = client.get("/jobs/failed")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "落ちた記事" in body
+    assert "台本の検証に失敗しました" in body
+    assert "1/3回" in body
+    assert "/retry" in body
+
+
+def test_retry_queues_the_job_again(app: tuple[FastAPI, JobRepository]) -> None:
+    """押すと実行待ちに戻り、一覧から消えること（押した場所が変わること）。"""
+    from fastapi.testclient import TestClient
+
+    application, repository = app
+    failed = _failed(repository)
+
+    with TestClient(application) as client:
+        response = client.post(f"/jobs/{failed.id}/retry")
+
+    assert response.status_code == 200
+    back = repository.get(failed.id)
+    assert back is not None
+    assert back.status is JobStatus.QUEUED
+    assert "落ちた記事" not in response.text
+    # 生成状況も同じ応答で直す（out-of-band）。実行待ちがあるので「生成中」
+    assert 'id="generation-status"' in response.text
+    assert 'hx-swap-oob="innerHTML"' in response.text
+    assert "生成中" in response.text
+
+
+def test_retry_switches_the_status_panel_to_the_older_batch(
+    app: tuple[FastAPI, JobRepository],
+) -> None:
+    """**古いバッチのジョブを戻しても生成状況がそちらに切り替わること。**
+
+    ここが `/status` のパネルに再実行を置けない理由の裏返しでもある。
+    あのパネルは直近1バッチしか見ないので、後から別のバッチが走ると
+    古い失敗は見えなくなる。戻したときは `latest_batch_id()` が
+    「実行待ちのあるバッチ」を優先するので、そちらに切り替わる。
+    """
+    from fastapi.testclient import TestClient
+
+    application, repository = app
+    failed = _failed(repository)
+    # 後から別のバッチを積んで終わらせる（こちらが最新になる）
+    repository.enqueue_batch([("a-2", "あとの記事")], video_format="short")
+    later = repository.claim_next("worker-2")
+    assert later is not None
+    repository.mark_succeeded(later.id, video_key="videos/later.mp4")
+
+    with TestClient(application) as client:
+        before = client.get("/status").text
+        assert "あとの記事" in before
+
+        response = client.post(f"/jobs/{failed.id}/retry")
+
+    # out-of-band 側が「あとのバッチ」から離れて、戻したバッチを映していること
+    # （戻した行は QUEUED なので記事名はまだ出ない。出るのは「生成中」）
+    oob = response.text.split('id="generation-status"')[1]
+    assert "あとの記事" not in oob
+    assert "生成中" in oob
+
+
+def test_retry_of_a_succeeded_job_explains_itself(app: tuple[FastAPI, JobRepository]) -> None:
+    """成功済み・上限到達を 500 にせず、読める理由で返すこと。
+
+    htmx はエラー応答で対象を差し替えない。4xx/5xx にすると画面が黙って
+    古いまま残り、押しても何も起きないように見える。
+    """
+    from fastapi.testclient import TestClient
+
+    application, repository = app
+    repository.enqueue_batch([("a-1", "成功した記事")], video_format="short")
+    job = repository.claim_next("worker-1")
+    assert job is not None
+    repository.mark_succeeded(job.id, video_key="videos/ok.mp4")
+
+    with TestClient(application) as client:
+        response = client.post(f"/jobs/{job.id}/retry")
+
+    assert response.status_code == 200
+    assert "許可されていません" in response.text
+
+
+def test_a_job_at_the_attempt_limit_has_no_button(app: tuple[FastAPI, JobRepository]) -> None:
+    """上限に達した行にはボタンを出さず、語で示すこと。"""
+    from fastapi.testclient import TestClient
+
+    application, repository = app
+    failed = _failed(repository)
+    repository.retry(failed.id)
+    for worker in ("w-2", "w-3"):
+        job = repository.claim_next(worker)
+        assert job is not None
+        repository.mark_failed(job.id, "また落ちた")
+        if worker == "w-2":
+            repository.retry(job.id)
+
+    with TestClient(application) as client:
+        response = client.get("/jobs/failed")
+
+    assert "3/3回" in response.text
+    assert "/retry" not in response.text
+    assert "上限" in response.text

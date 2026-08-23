@@ -1,0 +1,18 @@
+{#
+  再実行を押したあとの応答。
+
+  押した場所（失敗一覧）が主対象、生成状況は out-of-band。
+  「押した場所が変わらない UI は、押しても何も起きないのと同じ」なので、
+  戻したジョブが一覧から消えることと、生成状況が動き出すことの両方を
+  1回の応答で見せる。
+
+  **通常の差し替えで入る側は id を持たない**（`#failed-jobs` の innerHTML に
+  なる）。out-of-band 側は逆に持たなければならない——それが照合の仕組みで、
+  両方に id を置くと文書内に同じ id が2つでき、htmx は最初の一致しか
+  入れ替えない（このリポジトリで何度も踏んでいる）。
+#}
+{% include "partials/failed_jobs.html" %}
+
+<div id="generation-status" hx-swap-oob="innerHTML">
+    {% include "partials/generation_status.html" %}
+</div>

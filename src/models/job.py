@@ -55,6 +55,18 @@ _ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
 # 終端状態。ここに来た行はワーカーが二度と触らない。
 TERMINAL_STATUSES = frozenset({JobStatus.SUCCEEDED, JobStatus.FAILED})
 
+# 1つのジョブを実行してよい回数の上限。
+#
+# **2つの経路が同じ上限を見る必要がある。** リースが切れた行の自動回収
+# （`requeue_expired`）と、人が画面から押す再実行（`retry`）である。
+# 以前は前者の既定引数にしか無く、後者を足すときに数字を書き写せば
+# 「自動では打ち切られるのに手動では無限に押せる」形の食い違いになる。
+#
+# 上限が必要な理由は自動回収と同じ。特定の記事で必ず落ちる場合に、
+# 画像生成のクォータ（リージョン単位で上限4、X の画像カードと共食い）を
+# 食い潰し続けるのを防ぐ。
+MAX_JOB_ATTEMPTS = 3
+
 
 class InvalidJobTransition(Exception):
     """許可されていない状態遷移。"""
@@ -131,6 +143,16 @@ class GenerationJob:
     def is_terminal(self) -> bool:
         """もう変化しない状態か。"""
         return self.status in TERMINAL_STATUSES
+
+    @property
+    def can_retry(self) -> bool:
+        """人が押して再実行できる状態か。
+
+        画面がボタンを出すかどうかの判断に使う。`JobRepository.retry` は
+        同じ条件を独立に検査する——ボタンを隠すだけでは、画面を開いたまま
+        待っている間に別の経路（自動回収）で試行回数が上限に達しうる。
+        """
+        return self.status is JobStatus.FAILED and self.attempts < MAX_JOB_ATTEMPTS
 
 
 @dataclass(frozen=True)
