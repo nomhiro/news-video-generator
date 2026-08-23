@@ -245,8 +245,54 @@ SSML の `<mark>` に対応せず、実装が3系統（個別合成して結合 
   CLI は自由テキストのトピックを取るので `--source-url` は任意で、
   空なら追記しない。
 
-`segment_narrations` / `image_prompts` / `text_overlays` の要素数が一致することは
-音声のタイミング同期と動画合成の前提なので、バリデータで強制している。
+`segment_narrations` / `image_prompts` / `text_overlays` / `scenes` の要素数が
+一致することは音声のタイミング同期と動画合成の前提なので、バリデータで強制している。
+
+#### 個数はスキーマにも書ける（`minItems`/`maxItems` は載る、`maxLength` は載らない）
+
+**配列の要素数は `draft_type_for(segment_count)` がスキーマに書き込む**
+（`pydantic.create_model` で `ScriptDraft` の派生型を作り、4配列に
+`minItems == maxItems == segment_count` を持たせる）。バリデータは生成**後**の
+検査なので、外れると `VALIDATION_RETRIES` を消費する——実際に `text_overlays`
+だけ7個で返って1回ぶんを使い、他の理由と合わせて3回を使い切ってその日の動画が
+0本になった（#61）。
+
+- **Azure の Learn ページは `minItems`/`maxItems` を unsupported と書いているが、
+  実測が優先する。** `IllustrationConcept.key_details` の
+  `Field(min_length=2, max_length=2)` 由来でこのキーワードは**以前から本番の
+  リクエストに載っており、400 は返っていない**（`type_to_response_format_param`
+  でダンプして確認）。OpenAI の現行ドキュメントは配列の `minItems`/`maxItems` を
+  supported properties に挙げている。
+- **文字列の `maxLength` は載せられない**（supported properties に無い。
+  `pattern`/`format` はある）。だから文字数の上限は今後もコード側の検査になる。
+- **ベースの `ScriptDraft` には制約を入れない。** 保存済み台本 JSON の読み込みと
+  テストのフィクスチャ（形式を問わず3要素）がそちらに依存している。
+- 個数は **`FormatSpec.segment_count` / プロンプトの直書き（`必ず6個ずつ` /
+  `exactly 6 elements`）/ スキーマ**の3箇所に住む。プロンプトはトークン置換では
+  ないので `segment_count` を変えても追従しない。`tests/test_script_prompt.py` の
+  `test_prompt_array_counts_match_the_spec` が突き合わせる。
+- 強制されるかは **`-m live` の実験**（`test_probe_whether_the_schema_pins_the_array_count`）で
+  観測する。`generate()` の結果を見ても恒真の assert になるので、
+  **プロンプトと違う個数をスキーマで要求して**切り分ける。
+
+#### 検証に失敗したら理由をモデルに戻して引き直す
+
+`VALIDATION_RETRIES`（3）の各試行は、以前は**同じ入力の3標本**だった
+（`last_problem` はログにしか行かず、`instructions` と `news_topic` は毎回同一）。
+#61 では3回とも別の理由で外れて動画が0本になった。いまは
+`_with_validation_feedback` が**元の `news_topic` から組み直して**理由を足す。
+
+同じ失敗は `PostGenerator` が先に実測して否決している（`post_generator.py` の
+「同じ入力なら同じ長さが返る…**効いているのはこのフィードバック**」）。
+**台本側だけが例外だった**、というのがこの修正の中身。
+
+- **累積させない。** 前回のフィードバックに重ねると、直った制約の指示が残って
+  別の制約を壊す方向に効く。
+- **数値の接地の照合元は元の `news_topic` に固定する。** フィードバック文は数字を
+  含む（`131字、最大120字` / `text_overlays=7`）ので、`attempt_input` に変えると
+  **自分が足した数字で捏造が「根拠あり」になる**。
+  `tests/test_script_retry_feedback.py` が見張っている。
+- `ScriptContentFilterError` は引き続き引き直さない（拒否されたのは入力）。
 
 #### 独自解説は必須フィールドで強制する
 
@@ -1154,6 +1200,23 @@ uv run python -c "from PIL import Image; im=Image.open('f.png').convert('L'); px
   カード側は実測で決まった値だが、動画の帯（1080x800）はカード（1024x1024）と
   面積も比率も違う。実物を見て決め直していない。
 
+  ただし**「帯で実測し直す」という測り方は成立しない**（2026-08-23 に確認。
+  ここには以前その方針だけが書かれていた）。`key_details` は**画面に一度も
+  描かれない**——`build_illustration_prompt` が画像生成プロンプトに連結する
+  だけで、Remotion 側は `filename` しか受け取らない
+  （`remotion/src/` を検索して0件）。測るとしたら「どこまで長い句なら挿絵が
+  壊れないか」を実画像で見ることになる。#61 で観測した 131字・155字は
+  正常な句（40〜100字）と壊れた出力（250〜350字）の間で、2例では閾値を
+  動かす根拠にならないので 120 のまま据え置いてある。
+
+  **超過は動画を落とさない**（`IllustrationConcept.length_problem` →
+  `ScriptDraft.check_illustration_budget`。分量の予算と同じで、引き直しは
+  するが最終試行では通す）。`model_validator` に置くと `responses.parse` ごと
+  失敗し、画面に出ない英語の句が11字長いだけで生成が0本になる。
+  **空と要素数はスキーマ側の制約として硬いまま**残してある——線引きは
+  「画面に描かれる文字列の制約は硬く、画像生成プロンプトの制約は柔らかく」。
+  `SceneVisual.items` / `relation` は Remotion が実寸から逆算して描くので硬い。
+
 ### OAuth トークンも保存先を差し替える
 
 YouTube / TikTok のトークンと `client_secrets.json` は
@@ -1199,8 +1262,38 @@ Key Vault ではなく Blob にしている。生成物用に**すでに Entra I
 - **同じジョブを2人が実行しないための仕組みはリース**。掴むときに
   `lease_expires_at` を入れ、実行中は heartbeat で延ばす。ワーカーが
   落ちれば期限が切れ、他のワーカーが `requeue_expired()` で QUEUED に
-  戻す。試行回数が上限（既定3回）を超えたら FAILED で打ち切る
+  戻す。試行回数が `MAX_JOB_ATTEMPTS`（3回）を超えたら FAILED で打ち切る
   （毎回落ちる記事で画像生成のクォータを食い潰さないため）。
+  **上限は定数で1箇所に置く**——自動回収と手動の再実行が同じ値を見る必要が
+  あり、既定引数のままだと数字を書き写して「自動では打ち切られるのに手動では
+  無限に押せる」形の食い違いになる。
+
+#### 失敗したジョブの再実行は「直近の失敗」の一覧に置く
+
+`FAILED -> QUEUED` は遷移表で最初から許可されていたが、呼ぶ口が無かった
+（#4）。いまは `JobRepository.retry()` と `POST /jobs/{id}/retry` がある。
+`attempts` は**据え置く**（戻すと上限が働かず、押すたびに実行できてしまう）。
+
+- **導線を `/status` のパネルに置いてはいけない。** あちらは
+  `latest_progress()`（＝直近1バッチ）しか見ないので、**次のバッチが走った
+  時点で古い失敗が画面から消えて押せなくなる**。毎朝1バッチ積む運用では
+  「気付いた時には別バッチが最新」が通常ケースで、#61 のジョブはまさに
+  長く止まっていて後から見つかったものだった。`list_recent_failed()` を
+  読む独立した一覧（`#failed-jobs`）に置く。
+- **置き場所は「生成済み動画」セクションの中**。`#generation-status` の中に
+  置くと `lg:h-[calc(100vh-17rem)]` のカードの内側になり、伸びたぶん
+  `flex-1` の記事一覧が縮んで一度に見える件数が減る。
+- 押すと**押した場所（一覧から行が消える）と別の場所（生成状況）**の両方が
+  1回の応答で変わる（out-of-band）。`latest_batch_id()` は実行待ちのある
+  バッチを優先するので、古いバッチのジョブを戻しても `/status` はそちらに
+  切り替わってポーリングが再開する。
+- **`InvalidJobTransition` を 4xx にしない。** htmx はエラー応答で対象を
+  差し替えないので、画面が黙って古いまま残り「押しても何も起きない」ように
+  見える。捕まえて理由を出した同じパーシャルを 200 で返す。
+- 上限に達した行はボタンを出さず語で示す。ただし `retry()` 自身も独立に
+  検査する——画面を開いたまま待っている間に自動回収で上限に届きうる。
+- 再実行は**画像生成のクォータを消費する**（リージョン単位で上限4、X の
+  画像カードと共食い）。`hx-disabled-elt="this"` で連打を止めている。
 - **SQLite には `FOR UPDATE SKIP LOCKED` が無い。** 掴む操作は
   「status が QUEUED のまま」を条件にした UPDATE の影響行数で競合を
   検出している。PostgreSQL のときだけ `SKIP LOCKED` を使う。
