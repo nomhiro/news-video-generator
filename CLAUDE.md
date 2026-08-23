@@ -1927,7 +1927,9 @@ worktree から `azd provision -C <元のチェックアウト>` を打って実
   未マージのブランチに居れば、未マージの infra がそのまま本番に当たる。
 - **元のチェックアウトの git を先に最新にする。** テンプレートはチェックアウトの
   作業ツリーから読まれるので、`main` が古いと**古い env が本番に書き戻される**。
-  同日の実測で、元のチェックアウトの `main` は7つ前（PR #51）＝
+  同日の実測で、元のチェックアウトの `main` は**5つのマージぶん**古く
+  （PR #52 / #53 / #54 / #55 / #58 が入っていない。PR 番号の差ではなく
+  `git rev-list --count --merges main..origin/main` で数える）、
   `DATABASE_URL` が `sqlite:////app/state/newsvideo.db` の世代だった。そこから
   provision すれば共有 DB への切り替えが黙って巻き戻り、しかも
   **PostgreSQL は削除されないまま課金だけ残る**（ARM の incremental は
