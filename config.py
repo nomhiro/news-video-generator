@@ -163,13 +163,19 @@ class Config(BaseSettings):
 
     # --- データベース（ジョブ表） ---
     #
-    # 進捗をプロセスメモリではなく行として持つための DB。
-    # SQLite のファイルは1台のファイルシステム上にしかないので、
-    # レプリカを2つ以上にするなら共有できる DB（PostgreSQL）に
-    # 差し替える。SQLAlchemy を挟んでいるのはそのため。
+    # ジョブ表（jobs）と投稿表（social_posts）を置く DB。
+    #
+    # **既定の SQLite はローカル実行と pytest のためのもの。**
+    # クラウドは共有の PostgreSQL に向ける（bicep が env で渡す）:
+    #   postgresql+psycopg://<identity>@<host>:5432/newsvideo?sslmode=require
+    #
+    # コンテナのローカルディスク上の SQLite だった間、リビジョンごとに
+    # 空のファイルになり、X 投稿キューとジョブ履歴と予算ガードの土台が
+    # デプロイのたびに消えていた（Issue #56 / #3。経緯は
+    # src/storage/db.py の docstring）。
     database_url: str = Field(
         default="sqlite:///./data/newsvideo.db",
-        description="SQLAlchemy の接続 URL",
+        description="SQLAlchemy の接続 URL。クラウドは PostgreSQL",
     )
 
     # SQLite の journal mode。
@@ -191,11 +197,12 @@ class Config(BaseSettings):
     news_data_dir: Path = Field(default=Path("./data/news"))
     # 公開の記録（どの動画をどのチャネルに出したか）の実体。
     #
-    # **Azure Files を想定する。** これは二重公開を止める権威なので、
-    # デプロイで消える SQLite には置けない（`main` へのマージが即デプロイ
-    # なので、消えた直後に同じ動画をもう一度 YouTube に上げうる）。
-    # 記事の選択状態（news_data_dir）・投稿スイッチ
-    # （x_posting_switch_path）と同じ理由・同じボリューム。
+    # **Azure Files を想定する。** これは二重公開を止める権威なので、当時の
+    # SQLite（コンテナのローカルディスクにあり、デプロイで消えた）には
+    # 置けなかった——`main` へのマージが即デプロイなので、消えた直後に同じ
+    # 動画をもう一度 YouTube に上げうる。記事の選択状態（news_data_dir）・
+    # 投稿スイッチ（x_posting_switch_path）と同じ理由・同じボリューム。
+    # DB が共有になった後も動かしていない（CLAUDE.md の同項を参照）。
     publications_path: Path = Field(default=Path("./data/publications.json"))
     news_fetch_limit: int = Field(default=10, ge=1)
     # AI カテゴリはフィードから埋める（一覧と理由は src/news/feeds.py）。
@@ -290,8 +297,8 @@ class Config(BaseSettings):
     # 実請求と突き合わせて、読み取りが概算から丸ごと落ちていることに気付いた。
     x_cost_per_read_usd: float = Field(default=0.005, ge=0)
 
-    # 自動投稿スイッチの実体。ジョブ表（SQLite）と違い Azure Files を想定する
-    # （リビジョン更新で消えると、画面で有効にした翌日に黙って投稿が止まる）。
+    # 自動投稿スイッチの実体。Azure Files を想定する（消える置き場所だと、
+    # 画面で有効にした翌日にマージした時点で黙って投稿が止まる）。
     # 記事の選択状態（news_data_dir）と同じボリュームに置く。
     x_posting_switch_path: Path = Field(default=Path("./data/x_posting.json"))
 

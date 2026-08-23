@@ -29,6 +29,7 @@ import pytest
 from tests.conftest import REPO_ROOT
 
 APP_HOSTING_PATH = REPO_ROOT / "infra" / "core" / "app-hosting.bicep"
+DATABASE_PATH = REPO_ROOT / "infra" / "core" / "database.bicep"
 MAIN_PATH = REPO_ROOT / "infra" / "main.bicep"
 PARAMETERS_PATH = REPO_ROOT / "infra" / "main.parameters.json"
 
@@ -50,6 +51,7 @@ def _without_comments(path: pathlib.Path) -> str:
 
 
 APP_HOSTING = _without_comments(APP_HOSTING_PATH)
+DATABASE = _without_comments(DATABASE_PATH)
 MAIN = _without_comments(MAIN_PATH)
 
 
@@ -299,3 +301,93 @@ def test_no_output_exposes_a_secure_parameter() -> None:
         for name in _secure_params(text):
             leaked = [line for line in outputs if name in line]
             assert not leaked, f"{name} を output に出している: {leaked}"
+
+
+# --------------------------------------------------------------------------
+# ジョブ表と投稿表が共有 DB にあること（Issue #56 / #3）
+#
+# コンテナのローカルディスク上の SQLite に戻すと、X 投稿キューがデプロイの
+# たびに消え、その日の残りの投稿が出ないまま終わる。**起動は成功し、画面は
+# 「まだ何も予定が無い朝」と完全に同じ見た目になる**ので、気付く手段が
+# 画面にもログにも無い。だから文面で見張る。
+# --------------------------------------------------------------------------
+
+
+def test_database_url_points_at_the_shared_postgres() -> None:
+    """`DATABASE_URL` が共有 DB を指していること。"""
+    kind, expression = _env_entries()["DATABASE_URL"]
+    assert kind == "value"
+    assert "postgresql+psycopg://" in expression, f"共有 DB を指していない: {expression}"
+    assert "sqlite" not in expression, "コンテナのローカルディスクに戻っている"
+    assert "database.outputs.fqdn" in expression, "ホスト名をリテラルで埋めている"
+
+
+def test_database_url_carries_no_password() -> None:
+    """接続情報にパスワードを書かないこと。
+
+    env は `az containerapp show` に平文で出る。そもそもサーバー側は
+    パスワード認証を無効にしてあり、接続は Entra のトークンで行う。
+    """
+    _, expression = _env_entries()["DATABASE_URL"]
+    userinfo = expression.split("://", 1)[1].split("@", 1)[0]
+    assert ":" not in userinfo, f"URL にパスワードが入っている: {userinfo}"
+
+
+def test_the_connection_user_is_the_identity_name() -> None:
+    """URL の user と PostgreSQL のロール名が同じ出所であること。
+
+    ロール名は `administrators` の `principalName`（= マネージド ID の名前）に
+    なる。ずれると起動時に
+    `password authentication failed for user "..."` で落ちる。
+    """
+    _, expression = _env_entries()["DATABASE_URL"]
+    assert "database.outputs.loginName" in expression
+    assert "output loginName string = identityName" in DATABASE
+    assert "principalName: identityName" in DATABASE
+
+
+def test_the_managed_identity_is_the_entra_administrator() -> None:
+    """マネージド ID がサーバーの Entra 管理者であること。
+
+    管理者でないと `alembic upgrade head` がテーブルを作れず、
+    `pgaadauth_create_principal` を手で流す工程が復活する。
+    """
+    assert "Microsoft.DBforPostgreSQL/flexibleServers/administrators" in DATABASE
+    assert "principalType: 'ServicePrincipal'" in DATABASE
+    assert "identityPrincipalId: identity.properties.principalId" in APP_HOSTING
+
+
+def test_postgres_accepts_only_entra_authentication() -> None:
+    """パスワード認証を無効にしてあること。
+
+    公開エンドポイント + 「Azure から許可」のファイアウォール規則なので、
+    パスワード認証を残すと総当たりの的が1つ増える。
+    """
+    assert "activeDirectoryAuth: 'Enabled'" in DATABASE
+    assert "passwordAuth: 'Disabled'" in DATABASE
+    assert "administratorLogin" not in DATABASE, "パスワード認証の管理者を作っている"
+
+
+def test_postgres_stays_on_the_cheapest_sku() -> None:
+    """一番安い構成のままであること（B1MS + 32GB で月約$16）。
+
+    上げるのは構わないが、**気付かずに上がる**ことを防ぐ。ここは
+    収益化前のプロジェクトで、X の投稿予算（月$30）と同じ桁の固定費。
+    """
+    assert "name: 'Standard_B1ms'" in DATABASE
+    assert "tier: 'Burstable'" in DATABASE
+    assert "storageSizeGB: 32" in DATABASE
+    assert "autoGrow: 'Disabled'" in DATABASE
+    assert "geoRedundantBackup: 'Disabled'" in DATABASE
+
+
+def test_the_app_stays_on_one_replica() -> None:
+    """DB が共有になってもレプリカは1のままであること。
+
+    定期実行がアプリ内の daemon スレッドで動くので、2以上にすると
+    **全レプリカが同時刻に走る**（毎朝の生成が二重に走り、X の下書きも
+    二重に積まれる）。増やすにはリーダー選出か Container Apps Jobs への
+    切り出しが先に必要。
+    """
+    assert "minReplicas: 1" in APP_HOSTING
+    assert "maxReplicas: 1" in APP_HOSTING

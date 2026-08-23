@@ -43,6 +43,10 @@ dependencies = [
     "azure-identity>=1.19",
     "sqlalchemy>=2.0",
     "alembic>=1.14",
+    # クラウドの DB は Azure Database for PostgreSQL（ローカルと pytest は SQLite）。
+    # binary wheel を選ぶのは、イメージに libpq を apt で入れずに済ませるため
+    # （Dockerfile は `uv sync --no-dev` だけで完結する）。
+    "psycopg[binary]>=3.2",
     # --- 動画合成 ---
     # 字幕の折り返し位置を決めるのに、実際のフォントの送り幅を測るため。
     # 文字数で折り返すと半角英数が混じった行が短くなる（実測: 全角14文字で
