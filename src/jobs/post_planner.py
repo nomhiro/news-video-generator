@@ -261,8 +261,11 @@ async def plan_daily_posts(
         image_key: str | None = None
         caption: str | None = None
         # card_generator / image_generator / artifacts が揃っていない場合は
-        # 画像生成そのものを試みず、画像無しで進む（呼び出し元が未設定でも
-        # 壊れない。テストと CLI がこの経路を通る）。
+        # 画像生成そのものを試みず、画像無しで進む。本番の呼び出し元
+        # （`src/web/dependencies.py` の日次タスク）は常に3つを渡すので、
+        # ここを通るのはテストだけ。**それでも省略可能なままにしてある**
+        # ——画像の配線が無くても投稿の計画は成立する、という切り分けを
+        # 保つため（画像が壊れた日に投稿まで止めない）。
         if card_generator and image_generator and artifacts:
             image_key, caption = _build_post_image(
                 article, card_generator, image_generator, artifacts, jobs, output_dir
