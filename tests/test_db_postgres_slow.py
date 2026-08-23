@@ -180,6 +180,27 @@ def test_同時に掴んでもジョブを掴めるのは1つだけ(jobs: JobRep
     assert len(winners) == 1, f"{len(winners)}人が同じジョブを掴んだ（動画が二重に作られる）"
 
 
+def test_長いworker_idでも掴める(jobs: JobRepository) -> None:
+    """Container Apps のレプリカ名は長い。
+
+    実測でレプリカ名だけで58字
+    （`ca-newsvideo-img-mimujd6zyifm6--0000019-7fd4f56486-pwqdv`）あり、
+    `JobWorker.worker_id`（ホスト名 + PID + 乱数6字）を足すと66字になる。
+    旧列（VARCHAR(64)）では PostgreSQL が `StringDataRightTruncation` で
+    `claim_next` の UPDATE を毎回落とし、ジョブが QUEUED のまま無限リトライに
+    なった（2026-08-23 に本番で発生）。SQLite は列長を強制しないので
+    このテストでしか検出できない。
+    """
+    jobs.enqueue_batch([("a1", "テスト記事")], video_format="short")
+    long_worker_id = "ca-newsvideo-img-mimujd6zyifm6--0000019-7fd4f56486-pwqdv-1-ce0459"
+    assert len(long_worker_id) > 64, "この検査自体が64字を超えていないと意味が無い"
+
+    job = jobs.claim_next(worker_id=long_worker_id)
+
+    assert job is not None
+    assert job.worker_id == long_worker_id
+
+
 def test_送信中で残った行はNEEDS_REVIEWに落ちる(posts: SocialPostRepository) -> None:
     """SCHEDULED に戻さないこと（届いていた場合に二度出る）。"""
     now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)

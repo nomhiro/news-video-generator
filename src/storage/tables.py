@@ -70,7 +70,15 @@ class JobRecord(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     # 実行中のワーカーを識別する。落ちたワーカーの仕事を見分けるために要る。
-    worker_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    #
+    # 64 だと Container Apps では溢れる。実測でレプリカ名だけで58字
+    # （`ca-newsvideo-img-mimujd6zyifm6--0000019-7fd4f56486-pwqdv`）あり、
+    # `JobWorker.worker_id`（ホスト名 + PID + 乱数6字）を足すと66字になる。
+    # SQLite は列長を強制しないので気付かず、PostgreSQL に移した直後
+    # （2026-08-23）に `claim_next` の UPDATE が
+    # `StringDataRightTruncation` で毎回失敗し、ジョブが QUEUED のまま
+    # 無限リトライになって動画が1本も進まなくなった。
+    worker_id: Mapped[str | None] = mapped_column(String(128), default=None)
     # リースの期限。過ぎている RUNNING は、ワーカーが落ちたものとして
     # 他のワーカーが QUEUED に戻して回収する。
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
